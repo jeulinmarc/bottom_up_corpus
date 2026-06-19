@@ -16,7 +16,7 @@ from . import __version__
 from .completeness import build_matrix, summarize
 from .config import Config, normalize_cik
 from .http import Fetcher
-from .pipeline import discover_universe
+from .pipeline import discover_universe, download_universe
 from .storage import Storage
 from .taxonomy import FULL_SCOPE, FormType, parse_scope
 from .universe import Universe, resolve_tickers
@@ -113,6 +113,10 @@ def _cmd_discover(args: argparse.Namespace) -> int:
     since = date(min(years), 1, 1) if years else None
     dry_run = not args.write
 
+    # --download implies persisting the manifest (records must exist on disk).
+    if args.download:
+        dry_run = False
+
     report = discover_universe(
         ciks,
         scope=scope,
@@ -127,6 +131,31 @@ def _cmd_discover(args: argparse.Namespace) -> int:
     print(f"  seen={s.seen} added={s.added} updated={s.updated} unchanged={s.unchanged}")
     if report.errors:
         print(f"  discovery errors: {len(report.errors)} (see discovery_errors.jsonl)")
+
+    if args.download:
+        dl = download_universe(
+            ciks, scope=scope, dry_run=False, overwrite=args.overwrite,
+            limit=args.limit, config=cfg,
+        )
+        print(f"download — got={dl.downloaded} skipped={dl.skipped} errors={dl.errors} "
+              f"bytes={dl.bytes:,}")
+    return 0
+
+
+def _cmd_download(args: argparse.Namespace) -> int:
+    cfg = Config()
+    ciks = _ciks_for(args, cfg)
+    scope = parse_scope(args.forms)
+    dry_run = not args.write
+    dl = download_universe(
+        ciks, scope=scope, dry_run=dry_run, overwrite=args.overwrite,
+        limit=args.limit, config=cfg,
+    )
+    mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
+    print(f"download [{mode}] — got={dl.downloaded} skipped={dl.skipped} "
+          f"empty={dl.empty} errors={dl.errors} bytes={dl.bytes:,}")
+    if dl.error_items:
+        print(f"  errors logged: {len(dl.error_items)} (see discovery_errors.jsonl)")
     return 0
 
 
@@ -178,7 +207,20 @@ def build_parser() -> argparse.ArgumentParser:
     di.add_argument("--years", default=None, help="year filter, e.g. 2006-2025 (default: last 20)")
     di.add_argument("--rounds", type=int, default=1, help="max convergence rounds")
     di.add_argument("--write", action="store_true", help="persist manifests (else dry-run)")
+    di.add_argument("--download", action="store_true", help="also download+decompose (implies --write)")
+    di.add_argument("--overwrite", action="store_true", help="re-download already-stored filings")
+    di.add_argument("--limit", type=int, default=None, help="cap number of new downloads")
     di.set_defaults(func=_cmd_discover)
+
+    dl = sub.add_parser("download", help="download+decompose filings from existing manifests")
+    dlsrc = dl.add_mutually_exclusive_group(required=True)
+    dlsrc.add_argument("--universe", help="universe name")
+    dlsrc.add_argument("--ciks", help="comma-separated CIKs")
+    dl.add_argument("--forms", default=None, help="scope selector (default: narrative A-D)")
+    dl.add_argument("--write", action="store_true", help="persist files+manifest (else dry-run)")
+    dl.add_argument("--overwrite", action="store_true", help="re-download already-stored filings")
+    dl.add_argument("--limit", type=int, default=None, help="cap number of new downloads")
+    dl.set_defaults(func=_cmd_download)
 
     rp = sub.add_parser("report", help="completeness matrix (issuer x form x year)")
     rsrc = rp.add_mutually_exclusive_group(required=True)

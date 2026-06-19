@@ -39,6 +39,7 @@ class FilingRecord:
     sha256: str | None = None             # hash of stored submission (integrity/dedup)
 
     local_path: str | None = None         # stored full submission (rel. to data/)
+    primary_path: str | None = None       # decomposed primary document
     text_path: str | None = None          # cleaned extracted text
     pdf_path: str | None = None           # populated by the separate render-pdf batch
 
@@ -94,6 +95,7 @@ class FilingRecord:
             provenance=row.get("provenance", "edgar_index"),
             sha256=row.get("sha256"),
             local_path=row.get("local_path"),
+            primary_path=row.get("primary_path"),
             text_path=row.get("text_path"),
             pdf_path=row.get("pdf_path"),
             language=row.get("language", "en"),
