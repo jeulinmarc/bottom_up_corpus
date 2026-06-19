@@ -68,7 +68,9 @@ compliance:
 export BOTTOM_UP_CORPUS_CONTACT="you@example.com"
 ```
 
-## Usage (Phase 0)
+## Usage
+
+Inspection:
 
 ```bash
 python -m bottom_up_corpus list-forms          # show the taxonomy
@@ -76,8 +78,35 @@ python -m bottom_up_corpus list-forms --forms A  # filter by family/codes
 python -m bottom_up_corpus config              # effective runtime config
 ```
 
-Discovery (`discover`, `fts`), download/decompose, XBRL (`xbrl`), completeness
-(`report`), and `render-pdf` land in subsequent phases (see `docs/`).
+Issuer universe (curated tier, version-controlled under `data/universe/`):
+
+```bash
+# Resolve tickers -> CIKs via the official SEC map (dry-run, then --write).
+python -m bottom_up_corpus build-universe --tickers AAPL,MSFT,GOOGL --name sp_curated --write
+python -m bottom_up_corpus list-universe --name sp_curated
+```
+
+Discovery (metadata into per-issuer manifests; **dry-run by default**, `--write`
+to persist; downloads land in Phase 2):
+
+```bash
+# Dry-run: see what would be indexed.
+python -m bottom_up_corpus discover --universe sp_curated --years 2006-2025
+# Persist manifests, multi-round until convergence:
+python -m bottom_up_corpus discover --universe sp_curated --years 2006-2025 --write --rounds 3
+# Or target specific CIKs / a wider scope (e.g. add ownership family E):
+python -m bottom_up_corpus discover --ciks 320193 --forms A,B,C,D,E --write
+```
+
+Completeness matrix (discovered vs. expected per issuer/form/year):
+
+```bash
+python -m bottom_up_corpus report --universe sp_curated --years 2015-2025 --csv data/reports/matrix.csv
+```
+
+Download + complete-submission decomposition, text extraction, XBRL (`xbrl`),
+the separate `render-pdf` batch, and the `RAGDataOrchestrator` connector land in
+subsequent phases (see the plan/`docs/`).
 
 ## SEC fair access
 
