@@ -17,7 +17,7 @@ from .completeness import build_matrix, summarize
 from .config import Config, normalize_cik
 from .entity import EntityRegistry
 from .http import Fetcher
-from .pipeline import discover_universe, download_universe, render_universe
+from .pipeline import discover_universe, download_universe, fetch_financials, render_universe
 from .rag import iter_items
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
@@ -190,6 +190,22 @@ def _cmd_render_pdf(args: argparse.Namespace) -> int:
           f"skipped={rep.skipped} no-primary={rep.no_primary} errors={rep.errors}")
     if rep.error_items:
         print(f"  errors logged: {len(rep.error_items)} (see discovery_errors.jsonl)")
+    return 0
+
+
+def _cmd_xbrl(args: argparse.Namespace) -> int:
+    cfg = Config()
+    ciks = _ciks_for(args, cfg)
+    years = _parse_years(args.years) if args.years else None
+    since_year = min(years) if years else None
+    dry_run = not args.write
+    rep = fetch_financials(ciks, since_year=since_year, dry_run=dry_run, config=cfg)
+    mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
+    s = rep.stats
+    print(f"xbrl [{mode}] — {rep.issuers} issuers, {rep.periods} period summaries (F1)")
+    print(f"  seen={s.seen} added={s.added} updated={s.updated} unchanged={s.unchanged}")
+    if rep.errors:
+        print(f"  errors: {len(rep.errors)} (see discovery_errors.jsonl)")
     return 0
 
 
@@ -370,6 +386,14 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--overwrite", action="store_true", help="re-render already-rendered filings")
     rd.add_argument("--limit", type=int, default=None, help="cap number of new renders")
     rd.set_defaults(func=_cmd_render_pdf)
+
+    xb = sub.add_parser("xbrl", help="build per-period XBRL financial summaries (family F1)")
+    xbsrc = xb.add_mutually_exclusive_group(required=True)
+    xbsrc.add_argument("--universe", help="universe name")
+    xbsrc.add_argument("--ciks", help="comma-separated CIKs")
+    xb.add_argument("--years", default=None, help="keep periods with fiscal year >= min(years)")
+    xb.add_argument("--write", action="store_true", help="persist summaries+facts (else dry-run)")
+    xb.set_defaults(func=_cmd_xbrl)
 
     ri = sub.add_parser("rag-items", help="preview SourceItems the RAG would ingest")
     risrc = ri.add_mutually_exclusive_group(required=False)

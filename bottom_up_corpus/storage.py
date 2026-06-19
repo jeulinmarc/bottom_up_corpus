@@ -235,6 +235,38 @@ class Storage:
         record.pdf_path = self._rel(pdf_path)
         return RenderResult(record.doc_id, "rendered")
 
+    # ---- XBRL financials (Phase 4) ----
+    def store_companyfacts(self, cik: str, facts: dict) -> tuple[str, str]:
+        """Write the raw company-facts JSON once per issuer. Returns (rel_path, sha256)."""
+        cik = normalize_cik(cik)
+        path = self.config.raw_dir / cik / "F1" / "companyfacts.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob = json.dumps(facts, ensure_ascii=False)
+        path.write_text(blob, encoding="utf-8")
+        return self._rel(path), hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def write_financials_table(self, cik: str, rows: Iterable[dict]) -> str:
+        """Write the normalized, queryable facts table data/financials/<cik>.jsonl."""
+        cik = normalize_cik(cik)
+        path = self.config.financials_dir / f"{cik}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return self._rel(path)
+
+    def write_financial_summary(self, record: FilingRecord, html: str, text: str) -> None:
+        """Write a period summary's HTML (primary) + clean text; mutate record paths."""
+        dest_dir = self.raw_dir_for(record)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        primary = dest_dir / f"{record.doc_id}.primary.html"
+        primary.write_text(html, encoding="utf-8")
+        record.primary_path = self._rel(primary)
+        record.sha256 = hashlib.sha256(html.encode("utf-8")).hexdigest()
+        txt = dest_dir / f"{record.doc_id}.txt"
+        txt.write_text(text, encoding="utf-8")
+        record.text_path = self._rel(txt)
+
     # ---- discovery errors ----
     def record_errors(self, errors: Iterable[dict]) -> int:
         """Append discovery errors to the audit trail. Returns count written."""

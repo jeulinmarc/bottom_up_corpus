@@ -137,6 +137,53 @@ def sample_submission() -> str:
     return SAMPLE_SUBMISSION
 
 
+# Minimal company-facts: an annual (FY) and a quarterly (Q3) period, with a 3-month
+# vs 9-month revenue duration (to test period-length selection) and a restated
+# Assets value (to test latest-filed wins).
+SAMPLE_FACTS = {
+    "cik": 320193,
+    "entityName": "Apple Inc.",
+    "facts": {"us-gaap": {
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"label": "Revenue", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 383285000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"},
+            {"start": "2023-07-01", "end": "2023-09-30", "val": 89498000000,
+             "accn": "acc-q3-23", "fy": 2023, "fp": "Q3", "form": "10-Q", "filed": "2023-08-04"},
+            {"start": "2023-01-01", "end": "2023-09-30", "val": 270000000000,
+             "accn": "acc-q3-23", "fy": 2023, "fp": "Q3", "form": "10-Q", "filed": "2023-08-04"},
+        ]}},
+        "NetIncomeLoss": {"label": "Net income", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 96995000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"},
+        ]}},
+        "Assets": {"label": "Assets", "units": {"USD": [
+            {"end": "2023-09-30", "val": 352000000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"},
+            {"end": "2023-09-30", "val": 352583000000,
+             "accn": "acc-amend", "fy": 2023, "fp": "FY", "form": "10-K/A", "filed": "2024-02-01"},
+        ]}},
+    }},
+}
+
+SAMPLE_FACTS_SUBMISSIONS = {"entityName": "Apple Inc.", "formerNames": []}
+
+
+@pytest.fixture
+def sample_facts() -> dict:
+    return SAMPLE_FACTS
+
+
+@pytest.fixture
+def xbrl_fetcher(config) -> FakeFetcher:
+    return FakeFetcher(
+        {
+            "api/xbrl/companyfacts/CIK0000320193.json": SAMPLE_FACTS,
+            "submissions/CIK0000320193.json": SAMPLE_FACTS_SUBMISSIONS,
+        },
+        config=config,
+    )
+
+
 @pytest.fixture
 def apple_fetcher(config) -> FakeFetcher:
     return FakeFetcher(

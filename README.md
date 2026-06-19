@@ -150,6 +150,20 @@ Completeness matrix (discovered vs. expected per issuer/form/year):
 python -m bottom_up_corpus report --universe sp_curated --years 2015-2025 --csv data/reports/matrix.csv
 ```
 
+Structured financials (family F1) — curated XBRL metrics, one summary per
+reporting period (annual/quarterly) with its publication date:
+
+```bash
+python -m bottom_up_corpus xbrl --universe sp_curated --years 2015-2025 --write
+```
+
+This fetches SEC XBRL company facts and writes, per issuer: the raw
+`companyfacts.json` (canonical), a normalized `data/financials/<cik>.jsonl`
+table, and an HTML financial summary per period. Each summary is an F1 record
+keyed on its **period end** (so prior-year comparatives land in their own period,
+not the report's year) and stamped with the **publication date**. The summaries
+flow through `render-pdf` and `rag-items` like any other document.
+
 ## Feeding the RAG
 
 The corpus plugs into the RAG stack (`mvp-graph-rag` / `eigenmind`) via
