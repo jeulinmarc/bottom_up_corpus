@@ -14,8 +14,11 @@ from datetime import date
 
 from .config import Config
 from .entity import EntityRegistry
+from .financials import normalized_rows, render_summary_html
 from .http import Fetcher
+from .models import FilingRecord
 from .sources.edgar_submissions import EdgarSubmissions
+from .sources.edgar_xbrl import EdgarXBRL
 from .storage import SaveStats, Storage
 from .taxonomy import FULL_SCOPE, FormType
 
@@ -235,3 +238,83 @@ def render_universe(
     if not dry_run and report.error_items:
         storage.record_errors(report.error_items)
     return report
+
+
+@dataclass
+class FinancialsReport:
+    """Aggregate outcome of an XBRL financials run."""
+
+    issuers: int = 0
+    periods: int = 0
+    stats: SaveStats = field(default_factory=SaveStats)
+    errors: list[dict] = field(default_factory=list)
+
+
+def fetch_financials(
+    ciks: Iterable[str],
+    *,
+    since_year: int | None = None,
+    dry_run: bool = True,
+    config: Config | None = None,
+    fetcher: Fetcher | None = None,
+    storage: Storage | None = None,
+) -> FinancialsReport:
+    """Build per-period XBRL financial summaries (family F1) into manifests.
+
+    For each issuer: fetch company facts, group into one summary per reporting
+    period (annual/quarterly), and emit an F1 ``FilingRecord`` per period with the
+    period's **publication date**. Persists the raw company-facts JSON (canonical),
+    a normalized facts table, and an HTML summary per period (so the existing
+    ``render_universe`` / ``rag.iter_items`` handle PDF + ingestion). The summaries
+    feed the RAG; the raw JSON preserves exhaustivity.
+    """
+    config = config or Config()
+    fetcher = fetcher or Fetcher(config)
+    storage = storage or Storage(config)
+    cik_list = list(ciks)
+
+    report = FinancialsReport(issuers=len(cik_list))
+    for cik in cik_list:
+        source = EdgarXBRL(fetcher=fetcher, config=config)
+        facts, summaries = source.period_summaries(cik, since_year=since_year)
+        report.errors.extend(source.errors)
+        if not facts or not summaries:
+            continue
+
+        records: list[FilingRecord] = []
+        rows: list[dict] = []
+        for ps in summaries:
+            rec = FilingRecord(
+                cik=cik, form_type=FormType.F1,
+                sec_form=f"{ps.sec_form}/XBRL", accession=ps.accession,
+                title=f"{ps.company} — {ps.period_label} financial summary",
+                company=ps.company, company_current=ps.company_current,
+                filing_date=ps.publication_date, period_of_report=ps.period_end,
+                provenance="edgar_xbrl",
+            )
+            if not dry_run:
+                storage.write_financial_summary(rec, render_summary_html(ps),
+                                                _summary_text(ps))
+            records.append(rec)
+            rows.extend(normalized_rows(cik, ps))
+
+        report.periods += len(records)
+        if not dry_run:
+            storage.store_companyfacts(cik, facts)
+            storage.write_financials_table(cik, rows)
+        report.stats += storage.save_records(records, dry_run=dry_run)
+
+    if not dry_run and report.errors:
+        storage.record_errors(report.errors)
+    return report
+
+
+def _summary_text(ps) -> str:
+    """Plain-text rendering of a period summary (text fallback for the RAG)."""
+    lines = [f"{ps.company} — {ps.period_label} financial summary",
+             f"Period ending {ps.period_end} ({ps.frequency}); "
+             f"published (filed) {ps.publication_date}; "
+             f"source {ps.sec_form} accession {ps.accession}", ""]
+    for v in ps.values.values():
+        lines.append(f"{v['label']}: {v['value']} {v['unit']}")
+    return "\n".join(lines)

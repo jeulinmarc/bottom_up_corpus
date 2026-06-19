@@ -15,8 +15,14 @@ from .entity import Entity, EntityRegistry
 from .extract import clean_text
 from .http import Fetcher
 from .models import FilingRecord
+from .financials import CONCEPTS, PeriodSummary, build_period_summaries
 from .naming import name_as_of, parse_former_names
-from .pipeline import discover_universe, download_universe, render_universe
+from .pipeline import (
+    discover_universe,
+    download_universe,
+    fetch_financials,
+    render_universe,
+)
 from .rag import SourceItem, iter_items
 from .render import find_chrome, make_chrome_renderer
 from .storage import Storage
@@ -48,6 +54,10 @@ __all__ = [
     "discover_universe",
     "download_universe",
     "render_universe",
+    "fetch_financials",
+    "build_period_summaries",
+    "PeriodSummary",
+    "CONCEPTS",
     "make_chrome_renderer",
     "find_chrome",
     "iter_items",
