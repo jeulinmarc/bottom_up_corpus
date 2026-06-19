@@ -13,8 +13,10 @@ from .completeness import build_matrix
 from .config import Config, normalize_cik
 from .http import Fetcher
 from .models import FilingRecord
-from .pipeline import discover_universe
+from .extract import clean_text
+from .pipeline import discover_universe, download_universe
 from .storage import Storage
+from .submission import parse_submission, select_primary
 from .taxonomy import (
     FULL_SCOPE,
     FormType,
@@ -39,7 +41,11 @@ __all__ = [
     "Issuer",
     "resolve_tickers",
     "discover_universe",
+    "download_universe",
     "build_matrix",
+    "parse_submission",
+    "select_primary",
+    "clean_text",
 ]
 
 __version__ = "0.1.0"

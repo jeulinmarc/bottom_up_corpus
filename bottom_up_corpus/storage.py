@@ -9,13 +9,17 @@ Phase 2; this module owns the metadata layer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from .config import Config, normalize_cik
+from .extract import clean_text
 from .models import FilingRecord
+from .submission import filename_from_url, parse_submission, select_primary
 
 
 @dataclass
@@ -33,6 +37,16 @@ class SaveStats:
         self.updated += other.updated
         self.unchanged += other.unchanged
         return self
+
+
+@dataclass
+class DownloadResult:
+    """Outcome of fetching + decomposing a single filing."""
+
+    doc_id: str
+    status: str  # downloaded | skipped | would-download | empty | error
+    bytes: int = 0
+    error: str | None = None
 
 
 class Storage:
@@ -108,6 +122,69 @@ class Storage:
         with path.open("w", encoding="utf-8") as fh:
             for rec in ordered:
                 fh.write(json.dumps(rec.to_row(), ensure_ascii=False) + "\n")
+
+    # ---- download + decomposition (Phase 2) ----
+    def raw_dir_for(self, record: FilingRecord) -> Path:
+        year = str(record.year) if record.year else "unknown"
+        return self.config.raw_dir / record.cik / record.form_type.code / year
+
+    def _rel(self, path: Path) -> str:
+        return str(path.relative_to(self.config.data_dir))
+
+    def fetch_and_store(
+        self,
+        record: FilingRecord,
+        fetcher,
+        *,
+        dry_run: bool = False,
+        overwrite: bool = False,
+    ) -> DownloadResult:
+        """Download a filing's complete submission and decompose it.
+
+        Writes three layered artifacts under ``data/raw/<cik>/<form>/<year>/``:
+        the full submission (``.submission.txt``), the decomposed primary
+        document (``.primary<ext>``), and cleaned text (``.txt``). Mutates
+        ``record`` with the resulting paths + sha256. Idempotent: an existing
+        submission is skipped unless ``overwrite`` is set.
+        """
+        dest_dir = self.raw_dir_for(record)
+        sub_path = dest_dir / f"{record.doc_id}.submission.txt"
+
+        if sub_path.exists() and not overwrite:
+            record.local_path = self._rel(sub_path)
+            return DownloadResult(record.doc_id, "skipped")
+        if dry_run:
+            return DownloadResult(record.doc_id, "would-download")
+        if not record.submission_url:
+            return DownloadResult(record.doc_id, "error", error="no submission_url")
+
+        try:
+            raw = fetcher.get_text(record.submission_url)
+        except Exception as exc:  # noqa: BLE001
+            return DownloadResult(record.doc_id, "error", error=str(exc))
+
+        data = raw.encode("utf-8", "replace")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        sub_path.write_text(raw, encoding="utf-8")
+        record.local_path = self._rel(sub_path)
+        record.sha256 = hashlib.sha256(data).hexdigest()
+
+        primary = select_primary(
+            parse_submission(raw),
+            primary_filename=filename_from_url(record.primary_doc_url),
+            sec_form=record.sec_form,
+        )
+        if primary and primary.text:
+            ext = Path(primary.filename).suffix or ".txt"
+            primary_path = dest_dir / f"{record.doc_id}.primary{ext}"
+            primary_path.write_text(primary.text, encoding="utf-8")
+            record.primary_path = self._rel(primary_path)
+
+            text_path = dest_dir / f"{record.doc_id}.txt"
+            text_path.write_text(clean_text(primary.text, primary.filename), encoding="utf-8")
+            record.text_path = self._rel(text_path)
+
+        return DownloadResult(record.doc_id, "downloaded", bytes=len(data))
 
     # ---- discovery errors ----
     def record_errors(self, errors: Iterable[dict]) -> int:

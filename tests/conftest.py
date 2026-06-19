@@ -90,12 +90,60 @@ COMPANY_TICKERS = {
 }
 
 
+# A minimal but realistic complete submission: header + primary HTML 10-K +
+# a text exhibit + a binary graphic (uuencoded payload that must be ignored).
+SAMPLE_SUBMISSION = """<SEC-DOCUMENT>0000320193-24-000123.txt : 20241101
+<SEC-HEADER>
+ACCESSION NUMBER: 0000320193-24-000123
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>10-K
+<SEQUENCE>1
+<FILENAME>aapl-20240928.htm
+<DESCRIPTION>10-K
+<TEXT>
+<html><head><style>.x{color:red}</style><title>10-K</title></head>
+<body><h1>Annual Report</h1><p>Net sales were   $391 billion.</p>
+<script>var x=1;</script></body></html>
+</TEXT>
+</DOCUMENT>
+<DOCUMENT>
+<TYPE>EX-21.1
+<SEQUENCE>2
+<FILENAME>ex211.htm
+<DESCRIPTION>SUBSIDIARIES
+<TEXT>
+<html><body>Subsidiary list</body></html>
+</TEXT>
+</DOCUMENT>
+<DOCUMENT>
+<TYPE>GRAPHIC
+<SEQUENCE>3
+<FILENAME>logo.jpg
+<TEXT>
+begin 644 logo.jpg
+M_]C_X``02D9)1@`!`0$`8`!@``#_VP!#``H'!P@'!@H("`@+"@H+#A@0#@T-
+end
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>
+"""
+
+SAMPLE_SUBMISSION_URL = "0000320193-24-000123.txt"
+
+
+@pytest.fixture
+def sample_submission() -> str:
+    return SAMPLE_SUBMISSION
+
+
 @pytest.fixture
 def apple_fetcher(config) -> FakeFetcher:
     return FakeFetcher(
         {
             "CIK0000320193.json": APPLE_SUBMISSIONS,
             "company_tickers.json": COMPANY_TICKERS,
+            SAMPLE_SUBMISSION_URL: SAMPLE_SUBMISSION,
         },
         config=config,
     )

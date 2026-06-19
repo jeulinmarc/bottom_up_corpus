@@ -74,3 +74,72 @@ def discover_universe(
             break
 
     return report
+
+
+@dataclass
+class DownloadReport:
+    """Aggregate outcome of a download run."""
+
+    downloaded: int = 0
+    skipped: int = 0
+    empty: int = 0
+    errors: int = 0
+    bytes: int = 0
+    error_items: list[dict] = field(default_factory=list)
+
+
+def download_universe(
+    ciks: Iterable[str],
+    *,
+    scope: Sequence[FormType] | None = None,
+    dry_run: bool = True,
+    overwrite: bool = False,
+    limit: int | None = None,
+    config: Config | None = None,
+    fetcher: Fetcher | None = None,
+    storage: Storage | None = None,
+) -> DownloadReport:
+    """Download + decompose filings already present in the issuers' manifests.
+
+    Reads each issuer's manifest, fetches the complete submission for each record
+    (optionally filtered by ``scope``), decomposes it, and persists the updated
+    record. ``limit`` caps the number of *new* downloads across the run (handy
+    for live smoke tests). Idempotent: already-downloaded filings are skipped.
+    """
+    config = config or Config()
+    fetcher = fetcher or Fetcher(config)
+    storage = storage or Storage(config)
+    scope_set = set(scope) if scope else None
+
+    report = DownloadReport()
+    for cik in ciks:
+        manifest = storage.load_manifest(cik)
+        records = [
+            r for r in manifest.values()
+            if scope_set is None or r.form_type in scope_set
+        ]
+        records.sort(key=lambda r: (r.filing_date or date.min), reverse=True)
+
+        touched = []
+        for rec in records:
+            if limit is not None and report.downloaded >= limit:
+                break
+            res = storage.fetch_and_store(rec, fetcher, dry_run=dry_run, overwrite=overwrite)
+            touched.append(rec)
+            if res.status == "downloaded":
+                report.downloaded += 1
+                report.bytes += res.bytes
+            elif res.status == "skipped":
+                report.skipped += 1
+            elif res.status == "error":
+                report.errors += 1
+                report.error_items.append(
+                    {"source": "download", "context": rec.doc_id, "url": rec.submission_url, "error": res.error}
+                )
+
+        if not dry_run and touched:
+            storage.save_records(touched, dry_run=False)
+
+    if not dry_run and report.error_items:
+        storage.record_errors(report.error_items)
+    return report
