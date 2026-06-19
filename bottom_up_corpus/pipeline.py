@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from .config import Config
+from .entity import EntityRegistry
 from .http import Fetcher
 from .sources.edgar_submissions import EdgarSubmissions
 from .storage import SaveStats, Storage
@@ -39,17 +40,26 @@ def discover_universe(
     config: Config | None = None,
     fetcher: Fetcher | None = None,
     storage: Storage | None = None,
+    entities: EntityRegistry | None = None,
 ) -> RunReport:
     """Discover filings for every CIK and merge into manifests.
 
     Idempotent: re-running with the same inputs converges (no changes). With
     ``dry_run=True`` nothing is persisted but the report reflects what would
     change.
+
+    If an :class:`EntityRegistry` is supplied (or one exists on disk), the input
+    CIKs are expanded through the alias/successor map so a single issuer pulls
+    every CIK of its economic entity (e.g. Alphabet also crawls Google's old
+    CIK), and each record is stamped with its ``entity_id``.
     """
     config = config or Config()
     fetcher = fetcher or Fetcher(config)
     storage = storage or Storage(config)
-    cik_list = list(ciks)
+    if entities is None:
+        entities = EntityRegistry(config).load()
+
+    cik_list = entities.expand_all(ciks)
 
     report = RunReport(issuers=len(cik_list))
     for round_no in range(1, max_rounds + 1):
@@ -60,6 +70,10 @@ def discover_universe(
         for cik in cik_list:
             source = EdgarSubmissions(fetcher=fetcher, config=config)
             records = list(source.discover(cik, scope=scope, since=since))
+            entity_id = entities.entity_id_for(cik)
+            if entity_id:
+                for rec in records:
+                    rec.entity_id = entity_id
             round_stats += storage.save_records(records, dry_run=dry_run)
             round_errors.extend(source.errors)
 

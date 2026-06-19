@@ -87,7 +87,7 @@ python -m bottom_up_corpus list-universe --name sp_curated
 ```
 
 Discovery (metadata into per-issuer manifests; **dry-run by default**, `--write`
-to persist; downloads land in Phase 2):
+to persist):
 
 ```bash
 # Dry-run: see what would be indexed.
@@ -96,7 +96,39 @@ python -m bottom_up_corpus discover --universe sp_curated --years 2006-2025
 python -m bottom_up_corpus discover --universe sp_curated --years 2006-2025 --write --rounds 3
 # Or target specific CIKs / a wider scope (e.g. add ownership family E):
 python -m bottom_up_corpus discover --ciks 320193 --forms A,B,C,D,E --write
+# Exhaustive (incl. delisted/merged filers) via the quarterly full-index:
+python -m bottom_up_corpus discover-index --universe sp_curated --years 2006-2025 --write
 ```
+
+### Company identity (rename / rebrand / merger)
+
+A company's **CIK is permanent** — it never changes on a rename or rebrand — so
+everything is keyed on CIK (manifests, `doc_id = sha1(cik|form|accession)`). On
+top of that anchor:
+
+- **Point-in-time naming.** Each filing is attributed to the name **in effect on
+  its filing date** (from EDGAR `formerNames`), with the current name kept in
+  `company_current`. A 2015 filing reads `Facebook Inc`; a 2023 one reads
+  `Meta Platforms, Inc.` — same CIK throughout.
+- **Cross-CIK entities.** Some events (holding-company restructures, mergers)
+  span multiple CIKs that EDGAR does not link — e.g. Alphabet (CIK 1652044) is
+  the successor to Google (CIK 1288776). A committed alias map
+  (`data/entities/aliases.jsonl`) groups these; discovery expands a universe
+  through it so one issuer pulls all its CIKs, and stamps each record with
+  `entity_id`.
+
+  ```bash
+  python -m bottom_up_corpus entities                 # list grouped entities
+  python -m bottom_up_corpus entities --cik 1288776   # resolve a CIK
+  ```
+- **Survivorship.** `company_tickers.json` lists *current* issuers only, so a
+  ticker-built universe omits delisted/merged/failed companies. For historical
+  coverage, anchor the universe on CIK or crawl the full index:
+
+  ```bash
+  # Include delisted/historical issuers by CIK (works when tickers no longer resolve):
+  python -m bottom_up_corpus build-universe --ciks 1288776,320193 --name historical --write
+  ```
 
 Completeness matrix (discovered vs. expected per issuer/form/year):
 

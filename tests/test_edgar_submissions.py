@@ -45,3 +45,29 @@ def test_missing_cik_records_error(make_fetcher, config):
     assert recs == []
     assert len(src.errors) == 1
     assert src.errors[0]["source"] == "edgar_submissions"
+
+
+def test_point_in_time_naming(make_fetcher, config):
+    subs = {
+        "name": "Meta Platforms, Inc.",
+        "tickers": ["META"],
+        "formerNames": [{"name": "Facebook Inc",
+                         "from": "2005-05-06T04:00:00.000Z",
+                         "to": "2021-10-27T04:00:00.000Z"}],
+        "filings": {"recent": {
+            "form": ["10-K", "10-K"],
+            "accessionNumber": ["a-2015", "a-2023"],
+            "filingDate": ["2015-01-29", "2023-02-02"],
+            "reportDate": ["2014-12-31", "2022-12-31"],
+            "primaryDocument": ["fb-2014.htm", "meta-2022.htm"],
+            "primaryDocDescription": ["10-K", "10-K"],
+        }, "files": []},
+    }
+    src = EdgarSubmissions(fetcher=make_fetcher({"CIK0001326801.json": subs}), config=config)
+    recs = {r.accession: r for r in src.discover("1326801", scope=(FormType.A1,))}
+    # The 2015 filing is attributed to the name in effect then (Facebook),
+    # while the current name is preserved separately.
+    assert recs["a-2015"].company == "Facebook Inc"
+    assert recs["a-2015"].company_current == "Meta Platforms, Inc."
+    assert recs["a-2015"].title.startswith("Facebook Inc 10-K")
+    assert recs["a-2023"].company == "Meta Platforms, Inc."

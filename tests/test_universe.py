@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bottom_up_corpus.universe import Issuer, Universe, resolve_tickers
+from bottom_up_corpus.universe import Issuer, Universe, resolve_ciks, resolve_tickers
 
 
 def test_resolve_tickers(apple_fetcher):
@@ -32,3 +32,14 @@ def test_universe_dedup_on_save(config):
     uni = Universe(config)
     uni.save("dup", [Issuer(cik="320193", ticker="AAPL"), Issuer(cik="320193", ticker="AAPL")])
     assert len(uni.load("dup")) == 1
+
+
+def test_resolve_ciks_uses_submissions(apple_fetcher):
+    # CIK-anchored: resolves via submissions API, and keeps a CIK even when its
+    # metadata is unavailable (delisted/merged issuer not in the ticker map).
+    issuers = resolve_ciks(["320193", "999999"], apple_fetcher)
+    by_cik = {i.cik: i for i in issuers}
+    assert by_cik["0000320193"].company == "Apple Inc."
+    assert by_cik["0000320193"].ticker == "AAPL"
+    assert "0000999999" in by_cik
+    assert by_cik["0000999999"].company == ""  # no route -> empty, but CIK retained
