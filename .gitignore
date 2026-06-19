@@ -1,0 +1,28 @@
+# Raw corpus (large, regenerable) — only manifests/indices/reports are committed
+data/raw/
+data/**/raw/
+
+# Render caches / headless-browser profiles
+.chrome-profile-*/
+*.pdf.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
