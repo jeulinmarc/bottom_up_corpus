@@ -11,9 +11,11 @@ from __future__ import annotations
 
 from .completeness import build_matrix
 from .config import Config, normalize_cik
+from .entity import Entity, EntityRegistry
+from .extract import clean_text
 from .http import Fetcher
 from .models import FilingRecord
-from .extract import clean_text
+from .naming import name_as_of, parse_former_names
 from .pipeline import discover_universe, download_universe
 from .storage import Storage
 from .submission import parse_submission, select_primary
@@ -24,7 +26,7 @@ from .taxonomy import (
     from_edgar_form,
     parse_scope,
 )
-from .universe import Issuer, Universe, resolve_tickers
+from .universe import Issuer, Universe, resolve_ciks, resolve_tickers
 
 __all__ = [
     "Config",
@@ -40,12 +42,17 @@ __all__ = [
     "Universe",
     "Issuer",
     "resolve_tickers",
+    "resolve_ciks",
     "discover_universe",
     "download_universe",
     "build_matrix",
     "parse_submission",
     "select_primary",
     "clean_text",
+    "Entity",
+    "EntityRegistry",
+    "name_as_of",
+    "parse_former_names",
 ]
 
 __version__ = "0.1.0"

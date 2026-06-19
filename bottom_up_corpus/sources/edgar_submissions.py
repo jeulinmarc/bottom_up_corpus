@@ -13,6 +13,7 @@ from datetime import date
 
 from ..config import normalize_cik
 from ..models import FilingRecord
+from ..naming import NamePeriod, name_as_of, parse_former_names
 from ..taxonomy import FormType, from_edgar_form
 from .base import Source, cik_to_path_int
 
@@ -53,10 +54,11 @@ class EdgarSubmissions(Source):
         company = data.get("name", "")
         tickers = data.get("tickers") or []
         ticker = tickers[0] if tickers else ""
+        former = parse_former_names(data.get("formerNames"))
 
         filings = data.get("filings", {})
         recent = filings.get("recent", {})
-        yield from self._parse_block(cik, company, ticker, recent, scope_set, since)
+        yield from self._parse_block(cik, company, ticker, former, recent, scope_set, since)
 
         for extra in filings.get("files", []):
             extra_url = EXTRA_URL.format(name=extra.get("name", ""))
@@ -65,13 +67,14 @@ class EdgarSubmissions(Source):
             except Exception as exc:  # noqa: BLE001
                 self._record_error("submissions-extra", extra_url, exc)
                 continue
-            yield from self._parse_block(cik, company, ticker, block, scope_set, since)
+            yield from self._parse_block(cik, company, ticker, former, block, scope_set, since)
 
     def _parse_block(
         self,
         cik: str,
         company: str,
         ticker: str,
+        former: list[NamePeriod],
         block: dict,
         scope_set: set[FormType] | None,
         since: date | None,
@@ -103,13 +106,17 @@ class EdgarSubmissions(Source):
             primary = primary_docs[i] if i < len(primary_docs) else ""
             desc = primary_descs[i] if i < len(primary_descs) else ""
 
+            # Attribute the filing to the name in effect when it was filed.
+            pit_name = name_as_of(filing_date, company, former)
+
             yield FilingRecord(
                 cik=cik,
                 form_type=ft,
                 sec_form=raw_form,
                 accession=accession,
-                title=f"{company} {raw_form}".strip() + (f" — {desc}" if desc else ""),
-                company=company,
+                title=f"{pit_name} {raw_form}".strip() + (f" — {desc}" if desc else ""),
+                company=pit_name,
+                company_current=company,
                 ticker=ticker,
                 filing_date=filing_date,
                 period_of_report=_parse_date(report_dates[i] if i < len(report_dates) else None),

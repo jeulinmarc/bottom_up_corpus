@@ -15,11 +15,13 @@ from datetime import date
 from . import __version__
 from .completeness import build_matrix, summarize
 from .config import Config, normalize_cik
+from .entity import EntityRegistry
 from .http import Fetcher
 from .pipeline import discover_universe, download_universe
+from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
 from .taxonomy import FULL_SCOPE, FormType, parse_scope
-from .universe import Universe, resolve_tickers
+from .universe import Universe, resolve_ciks, resolve_tickers
 
 
 def _parse_years(spec: str | None) -> list[int]:
@@ -77,10 +79,20 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 def _cmd_build_universe(args: argparse.Namespace) -> int:
     cfg = Config()
-    tickers = [t for t in args.tickers.split(",") if t.strip()]
-    issuers, unresolved = resolve_tickers(tickers, Fetcher(cfg))
-    if unresolved:
-        print(f"WARNING: unresolved tickers: {', '.join(unresolved)}", file=sys.stderr)
+    fetcher = Fetcher(cfg)
+    issuers: list = []
+    if args.tickers:
+        tickers = [t for t in args.tickers.split(",") if t.strip()]
+        resolved, unresolved = resolve_tickers(tickers, fetcher)
+        issuers.extend(resolved)
+        if unresolved:
+            print(f"WARNING: unresolved tickers (delisted/renamed?): {', '.join(unresolved)}",
+                  file=sys.stderr)
+    if args.ciks:
+        # CIK-anchored: works for delisted/merged issuers the ticker map omits.
+        issuers.extend(resolve_ciks([c for c in args.ciks.split(",") if c.strip()], fetcher))
+    if not issuers:
+        raise SystemExit("error: provide --tickers and/or --ciks")
     if args.write:
         path = Universe(cfg).save(args.name, issuers)
         print(f"wrote {len(issuers)} issuers -> {path}")
@@ -177,6 +189,66 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_entities(args: argparse.Namespace) -> int:
+    reg = EntityRegistry(Config()).load()
+    if args.cik:
+        ent = reg.resolve(args.cik)
+        if ent:
+            print(f"{normalize_cik(args.cik)} -> entity '{ent.entity_id}' ({ent.name})")
+            print(f"  CIKs: {', '.join(ent.ciks)}")
+            if ent.note:
+                print(f"  note: {ent.note}")
+        else:
+            print(f"{normalize_cik(args.cik)} -> standalone (no alias entry)")
+        return 0
+    ents = list(reg.entities())
+    print(f"entities: {len(ents)}")
+    for e in ents:
+        print(f"  {e.entity_id:<16} {e.name}  [{', '.join(e.ciks)}]")
+    return 0
+
+
+def _cmd_discover_index(args: argparse.Namespace) -> int:
+    cfg = Config()
+    scope = parse_scope(args.forms)
+    years = _parse_years(args.years)
+    reg = EntityRegistry(cfg).load()
+
+    cik_filter: set[str] | None = None
+    if args.universe:
+        cik_filter = set(reg.expand_all(Universe(cfg).iter_ciks(args.universe)))
+    elif args.ciks:
+        cik_filter = set(reg.expand_all(c for c in args.ciks.split(",") if c.strip()))
+    elif not args.all:
+        raise SystemExit("error: provide --universe, --ciks, or --all (full EDGAR)")
+
+    dry_run = not args.write
+    storage = Storage(cfg)
+    src = EdgarFullIndex(fetcher=Fetcher(cfg), config=cfg)
+    from .storage import SaveStats
+
+    stats = SaveStats()
+    for year in years:
+        for quarter in (1, 2, 3, 4):
+            recs = list(src.discover(year, quarter, scope=scope, ciks=cik_filter))
+            for rec in recs:
+                eid = reg.entity_id_for(rec.cik)
+                if eid:
+                    rec.entity_id = eid
+            stats += storage.save_records(recs, dry_run=dry_run)
+    if src.errors and not dry_run:
+        storage.record_errors(src.errors)
+
+    mode = "DRY-RUN (nothing written)" if dry_run else "WROTE manifests"
+    span = f"{years[0]}-{years[-1]}" if years else "(none)"
+    scope_note = "ALL filers" if cik_filter is None else f"{len(cik_filter)} CIKs"
+    print(f"discover-index [{mode}] — years={span}, {scope_note}")
+    print(f"  seen={stats.seen} added={stats.added} updated={stats.updated} unchanged={stats.unchanged}")
+    if src.errors:
+        print(f"  index errors: {len(src.errors)} (see discovery_errors.jsonl)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bottom_up_corpus")
     p.add_argument("--version", action="version", version=f"bottom_up_corpus {__version__}")
@@ -189,11 +261,26 @@ def build_parser() -> argparse.ArgumentParser:
     cf = sub.add_parser("config", help="print the effective runtime configuration")
     cf.set_defaults(func=_cmd_config)
 
-    bu = sub.add_parser("build-universe", help="resolve tickers -> CIKs and save a curated list")
-    bu.add_argument("--tickers", required=True, help="comma-separated tickers, e.g. AAPL,MSFT")
+    bu = sub.add_parser("build-universe", help="resolve tickers/CIKs -> a curated list")
+    bu.add_argument("--tickers", default="", help="comma-separated tickers, e.g. AAPL,MSFT")
+    bu.add_argument("--ciks", default="", help="comma-separated CIKs (for delisted/historical issuers)")
     bu.add_argument("--name", default="curated", help="universe name (file stem)")
     bu.add_argument("--write", action="store_true", help="persist to data/universe/<name>.jsonl")
     bu.set_defaults(func=_cmd_build_universe)
+
+    en = sub.add_parser("entities", help="list cross-CIK entities or resolve a CIK's entity")
+    en.add_argument("--cik", default="", help="resolve a single CIK to its entity")
+    en.set_defaults(func=_cmd_entities)
+
+    dx = sub.add_parser("discover-index", help="exhaustive discovery via quarterly full-index (incl. delisted)")
+    dxsrc = dx.add_mutually_exclusive_group(required=False)
+    dxsrc.add_argument("--universe", help="restrict to a universe's CIKs (alias-expanded)")
+    dxsrc.add_argument("--ciks", help="restrict to comma-separated CIKs (alias-expanded)")
+    dx.add_argument("--all", action="store_true", help="index ALL filers (no CIK filter; very large)")
+    dx.add_argument("--forms", default=None, help="scope selector (default: narrative A-D)")
+    dx.add_argument("--years", default=None, help="year range, e.g. 2006-2025 (default: last 20)")
+    dx.add_argument("--write", action="store_true", help="persist manifests (else dry-run)")
+    dx.set_defaults(func=_cmd_discover_index)
 
     lu = sub.add_parser("list-universe", help="list curated universes or one universe's issuers")
     lu.add_argument("--name", default="", help="universe name; omit to list all")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from bottom_up_corpus.entity import Entity, EntityRegistry
 from bottom_up_corpus.pipeline import discover_universe
 from bottom_up_corpus.storage import Storage
 from bottom_up_corpus.taxonomy import FULL_SCOPE
@@ -43,3 +44,20 @@ def test_missing_cik_surfaces_error(make_fetcher, config):
     assert report.stats.added == 0
     assert len(report.errors) == 1
     assert config.discovery_errors_path.exists()
+
+
+def test_alias_expansion_and_entity_stamp(apple_fetcher, config):
+    # Entity groups Apple's CIK with a sibling CIK that has no fetcher route.
+    reg = EntityRegistry(config)
+    reg.save([Entity(entity_id="grp", name="Group", ciks=["320193", "789019"])])
+    reg = EntityRegistry(config).load()
+
+    report = discover_universe(["320193"], dry_run=False, config=config,
+                               fetcher=apple_fetcher, entities=reg)
+    # Input of one CIK expanded to the entity's two CIKs.
+    assert report.issuers == 2
+    # The unrouted sibling (789019) surfaces an error rather than failing silently.
+    assert report.errors
+    # Every persisted record is stamped with the canonical entity id.
+    recs = Storage(config).load_manifest("320193")
+    assert recs and all(r.entity_id == "grp" for r in recs.values())

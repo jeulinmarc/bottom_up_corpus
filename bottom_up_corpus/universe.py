@@ -55,7 +55,14 @@ def load_company_tickers(fetcher: Fetcher) -> dict[str, Issuer]:
 def resolve_tickers(
     tickers: Iterable[str], fetcher: Fetcher
 ) -> tuple[list[Issuer], list[str]]:
-    """Resolve tickers to :class:`Issuer`s. Returns ``(issuers, unresolved)``."""
+    """Resolve tickers to :class:`Issuer`s. Returns ``(issuers, unresolved)``.
+
+    NOTE: ``company_tickers.json`` lists *currently* trading issuers only, so a
+    ticker-built universe has **survivorship bias** — delisted, acquired, or
+    failed companies (Lehman, Twitter/TWTR, Enron, …) won't resolve. For
+    historical coverage, anchor on CIK via :func:`resolve_ciks` or crawl the
+    full-index (see ``sources.edgar_index``).
+    """
     table = load_company_tickers(fetcher)
     issuers: list[Issuer] = []
     unresolved: list[str] = []
@@ -69,6 +76,32 @@ def resolve_tickers(
         else:
             unresolved.append(t)
     return issuers, unresolved
+
+
+def resolve_ciks(ciks: Iterable[str], fetcher: Fetcher) -> list[Issuer]:
+    """Build issuers directly from CIKs via the submissions API.
+
+    Unlike :func:`resolve_tickers`, this works for delisted / merged / renamed
+    issuers that no longer appear in the current ticker map — the CIK is the
+    permanent anchor. The (current) name and primary ticker are attached when
+    available.
+    """
+    # Imported here to avoid a circular import at module load.
+    from .sources.edgar_submissions import SUBMISSIONS_URL
+
+    issuers: list[Issuer] = []
+    for raw in ciks:
+        cik = normalize_cik(raw)
+        name, ticker = "", ""
+        try:
+            data = fetcher.get_json(SUBMISSIONS_URL.format(cik=cik))
+            name = data.get("name", "")
+            tks = data.get("tickers") or []
+            ticker = tks[0] if tks else ""
+        except Exception:  # noqa: BLE001 - keep the CIK even if metadata is unavailable
+            pass
+        issuers.append(Issuer(cik=cik, ticker=ticker, company=name))
+    return issuers
 
 
 class Universe:

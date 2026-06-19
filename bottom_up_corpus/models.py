@@ -26,8 +26,10 @@ class FilingRecord:
     sec_form: str                         # raw EDGAR form, e.g. "10-K"
     accession: str                        # EDGAR accession number (natural key)
     title: str = ""
-    company: str = ""
+    company: str = ""                     # name in effect on filing_date (point-in-time)
+    company_current: str = ""             # current registrant name (for search/joins)
     ticker: str = ""
+    entity_id: str = ""                   # canonical entity id (cross-CIK alias), if any
 
     filing_date: date | None = None       # date EDGAR accepted the filing (day precision)
     period_of_report: date | None = None  # fiscal period the filing covers
@@ -87,7 +89,9 @@ class FilingRecord:
             accession=row["accession"],
             title=row.get("title", ""),
             company=row.get("company", ""),
+            company_current=row.get("company_current", ""),
             ticker=row.get("ticker", ""),
+            entity_id=row.get("entity_id", ""),
             filing_date=_parse_date(row.get("filing_date")),
             period_of_report=_parse_date(row.get("period_of_report")),
             primary_doc_url=row.get("primary_doc_url", ""),
