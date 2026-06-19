@@ -8,8 +8,21 @@ chunker sees readable prose rather than tags or boilerplate.
 from __future__ import annotations
 
 import re
+import warnings
 
 from bs4 import BeautifulSoup
+
+try:  # bs4 emits this when an XML doc is parsed by the HTML parser (e.g. Form 4 XML)
+    from bs4 import XMLParsedAsHTMLWarning
+except ImportError:  # pragma: no cover - older bs4
+    XMLParsedAsHTMLWarning = None
+
+
+def _soup(html: str) -> BeautifulSoup:
+    with warnings.catch_warnings():
+        if XMLParsedAsHTMLWarning is not None:
+            warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+        return BeautifulSoup(html, "lxml")
 
 _WS_RUN = re.compile(r"[ \t\f\v]+")
 _BLANK_LINES = re.compile(r"\n{3,}")
@@ -27,7 +40,7 @@ def normalize_whitespace(text: str) -> str:
 
 def html_to_text(html: str) -> str:
     """Render HTML / inline-XBRL to readable text (scripts/styles removed)."""
-    soup = BeautifulSoup(html, "lxml")
+    soup = _soup(html)
     for tag in soup(["script", "style", "head"]):
         tag.decompose()
     # Inline-XBRL hidden facts live in <ix:header>; drop them if present.

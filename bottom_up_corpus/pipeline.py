@@ -17,6 +17,17 @@ from .entity import EntityRegistry
 from .financials import normalized_rows, render_summary_html
 from .http import Fetcher
 from .models import FilingRecord
+from .ownership import (
+    find_ownership_doc,
+    form345_rows,
+    form345_text,
+    parse_13f,
+    parse_form345,
+    render_13f_html,
+    render_form345_html,
+    thirteenf_rows,
+    thirteenf_text,
+)
 from .sources.edgar_submissions import EdgarSubmissions
 from .sources.edgar_xbrl import EdgarXBRL
 from .storage import SaveStats, Storage
@@ -318,3 +329,106 @@ def _summary_text(ps) -> str:
     for v in ps.values.values():
         lines.append(f"{v['label']}: {v['value']} {v['unit']}")
     return "\n".join(lines)
+
+
+@dataclass
+class OwnershipReport:
+    """Aggregate outcome of an ownership (family E) run."""
+
+    issuers: int = 0
+    downloaded: int = 0
+    parsed_insider: int = 0   # E1 Form 3/4/5
+    parsed_13f: int = 0       # E2 13F-HR
+    passthrough: int = 0      # E3 SC 13D/G (narrative, generic text)
+    errors: int = 0
+    error_items: list[dict] = field(default_factory=list)
+
+
+_OWNERSHIP_SCOPE = (FormType.E1, FormType.E2, FormType.E3)
+
+
+def process_ownership(
+    ciks: Iterable[str],
+    *,
+    scope: Sequence[FormType] | None = None,
+    dry_run: bool = True,
+    overwrite: bool = False,
+    limit: int | None = None,
+    config: Config | None = None,
+    fetcher: Fetcher | None = None,
+    storage: Storage | None = None,
+) -> OwnershipReport:
+    """Download + structure ownership filings already discovered in the manifests.
+
+    Operates on family-E records (run ``discover --forms E --write`` first).
+    Downloads each complete submission (canonical), then for Form 3/4/5 (E1) and
+    13F (E2) parses the structured XML into a readable summary (overriding the
+    poor raw-XML text) and appends normalized rows to ``data/ownership/<cik>.jsonl``.
+    SC 13D/G (E3) keep the generic narrative text. Idempotent; ``limit`` caps new
+    downloads (curated tier is the default usage).
+    """
+    config = config or Config()
+    fetcher = fetcher or Fetcher(config)
+    storage = storage or Storage(config)
+    scope_set = set(scope) if scope else set(_OWNERSHIP_SCOPE)
+
+    report = OwnershipReport()
+    cik_list = list(ciks)
+    report.issuers = len(cik_list)
+
+    for cik in cik_list:
+        manifest = storage.load_manifest(cik)
+        records = [r for r in manifest.values() if r.form_type in scope_set]
+        records.sort(key=lambda r: (r.filing_date or date.min), reverse=True)
+
+        touched: list[FilingRecord] = []
+        rows: list[dict] = []
+        for rec in records:
+            if limit is not None and report.downloaded >= limit:
+                break
+            res = storage.fetch_and_store(rec, fetcher, dry_run=dry_run, overwrite=overwrite)
+            touched.append(rec)
+            if res.status == "error":
+                report.errors += 1
+                report.error_items.append(
+                    {"source": "ownership", "context": rec.doc_id,
+                     "url": rec.submission_url, "error": res.error})
+                continue
+            if res.status == "downloaded":
+                report.downloaded += 1
+            if dry_run or not rec.local_path:
+                continue
+
+            raw = (config.data_dir / rec.local_path).read_text(encoding="utf-8", errors="replace")
+            if rec.form_type is FormType.E1:
+                xml = find_ownership_doc(raw, "E1")
+                filing = parse_form345(xml) if xml else None
+                if filing:
+                    storage.write_ownership_summary(
+                        rec, render_form345_html(filing), form345_text(filing))
+                    rows.extend(form345_rows(rec.cik, rec.accession, filing))
+                    report.parsed_insider += 1
+            elif rec.form_type is FormType.E2:
+                xml = find_ownership_doc(raw, "E2")
+                if xml:
+                    holdings, agg = parse_13f(xml)
+                    rep = (rec.period_of_report or rec.filing_date)
+                    rep_str = rep.isoformat() if rep else ""
+                    storage.write_ownership_summary(
+                        rec,
+                        render_13f_html(holdings, agg, filer=rec.company or rec.cik, report=rep_str),
+                        thirteenf_text(holdings, agg, filer=rec.company or rec.cik, report=rep_str))
+                    rows.extend(thirteenf_rows(rec.cik, rec.accession, holdings))
+                    report.parsed_13f += 1
+            else:  # E3 narrative — generic text from fetch_and_store is kept
+                report.passthrough += 1
+
+        if not dry_run:
+            if touched:
+                storage.save_records(touched, dry_run=False)
+            if rows:
+                storage.write_ownership_table(cik, rows)
+
+    if not dry_run and report.error_items:
+        storage.record_errors(report.error_items)
+    return report
