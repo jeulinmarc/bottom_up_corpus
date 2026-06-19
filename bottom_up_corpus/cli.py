@@ -17,7 +17,8 @@ from .completeness import build_matrix, summarize
 from .config import Config, normalize_cik
 from .entity import EntityRegistry
 from .http import Fetcher
-from .pipeline import discover_universe, download_universe
+from .pipeline import discover_universe, download_universe, render_universe
+from .rag import iter_items
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
 from .taxonomy import FULL_SCOPE, FormType, parse_scope
@@ -171,6 +172,48 @@ def _cmd_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_render_pdf(args: argparse.Namespace) -> int:
+    cfg = Config()
+    ciks = _ciks_for(args, cfg)
+    scope = parse_scope(args.forms)
+    dry_run = not args.write
+    try:
+        rep = render_universe(
+            ciks, scope=scope, dry_run=dry_run, overwrite=args.overwrite,
+            limit=args.limit, config=cfg,
+        )
+    except RuntimeError as exc:  # e.g. Chrome not installed
+        print(f"render-pdf: {exc}", file=sys.stderr)
+        return 1
+    mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
+    print(f"render-pdf [{mode}] — rendered={rep.rendered} would-render={rep.would_render} "
+          f"skipped={rep.skipped} no-primary={rep.no_primary} errors={rep.errors}")
+    if rep.error_items:
+        print(f"  errors logged: {len(rep.error_items)} (see discovery_errors.jsonl)")
+    return 0
+
+
+def _cmd_rag_items(args: argparse.Namespace) -> int:
+    cfg = Config()
+    ciks = None
+    if args.universe:
+        ciks = list(Universe(cfg).iter_ciks(args.universe))
+    elif args.ciks:
+        ciks = [c for c in args.ciks.split(",") if c.strip()]
+    items = iter_items(
+        ciks=ciks, doctypes=args.forms, year_min=args.year_min,
+        year_max=args.year_max, prefer=args.prefer, config=cfg,
+    )
+    n = 0
+    for it in items:
+        n += 1
+        if n <= args.show:
+            p = it.payload
+            print(f"{it.doc_id}  {p['doc_type']:<3} {p.get('year')}  {p['company']}  -> {it.path}")
+    print(f"rag-items: {n} ingestible item(s) [prefer={args.prefer}]")
+    return 0
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     cfg = Config()
     ciks = _ciks_for(args, cfg)
@@ -317,6 +360,28 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--years", default=None, help="year range, e.g. 2006-2025 (default: last 20)")
     rp.add_argument("--csv", default="", help="optional CSV output path")
     rp.set_defaults(func=_cmd_report)
+
+    rd = sub.add_parser("render-pdf", help="render downloaded primary docs to PDF (separate batch)")
+    rdsrc = rd.add_mutually_exclusive_group(required=True)
+    rdsrc.add_argument("--universe", help="universe name")
+    rdsrc.add_argument("--ciks", help="comma-separated CIKs")
+    rd.add_argument("--forms", default=None, help="scope selector (default: narrative A-D)")
+    rd.add_argument("--write", action="store_true", help="render+persist (else dry-run)")
+    rd.add_argument("--overwrite", action="store_true", help="re-render already-rendered filings")
+    rd.add_argument("--limit", type=int, default=None, help="cap number of new renders")
+    rd.set_defaults(func=_cmd_render_pdf)
+
+    ri = sub.add_parser("rag-items", help="preview SourceItems the RAG would ingest")
+    risrc = ri.add_mutually_exclusive_group(required=False)
+    risrc.add_argument("--universe", help="universe name")
+    risrc.add_argument("--ciks", help="comma-separated CIKs (default: all manifests)")
+    ri.add_argument("--forms", default=None, help="scope selector (default: all)")
+    ri.add_argument("--year-min", type=int, default=None, dest="year_min")
+    ri.add_argument("--year-max", type=int, default=None, dest="year_max")
+    ri.add_argument("--prefer", choices=["pdf", "text", "primary"], default="pdf",
+                    help="which stored artifact to feed (default: pdf)")
+    ri.add_argument("--show", type=int, default=10, help="how many items to print")
+    ri.set_defaults(func=_cmd_rag_items)
 
     return p
 

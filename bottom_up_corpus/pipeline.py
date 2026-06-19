@@ -157,3 +157,81 @@ def download_universe(
     if not dry_run and report.error_items:
         storage.record_errors(report.error_items)
     return report
+
+
+@dataclass
+class RenderReport:
+    """Aggregate outcome of a PDF-render run."""
+
+    rendered: int = 0
+    would_render: int = 0
+    skipped: int = 0
+    no_primary: int = 0
+    errors: int = 0
+    error_items: list[dict] = field(default_factory=list)
+
+
+def render_universe(
+    ciks: Iterable[str],
+    *,
+    renderer=None,
+    scope: Sequence[FormType] | None = None,
+    dry_run: bool = True,
+    overwrite: bool = False,
+    limit: int | None = None,
+    config: Config | None = None,
+    storage: Storage | None = None,
+) -> RenderReport:
+    """Render downloaded primary documents to PDF (separate batch).
+
+    Walks each issuer's manifest and renders the primary document of every
+    record that has been downloaded (Phase 2) but not yet rendered. ``renderer``
+    defaults to a headless-Chrome renderer; pass one explicitly to override (or
+    in tests). ``limit`` caps the number of *new* renders. Idempotent.
+    """
+    config = config or Config()
+    storage = storage or Storage(config)
+    scope_set = set(scope) if scope else None
+
+    if renderer is None and not dry_run:
+        # Imported lazily so dry-runs / tests don't require Chrome.
+        from .render import make_chrome_renderer
+
+        renderer = make_chrome_renderer()
+
+    report = RenderReport()
+    for cik in ciks:
+        manifest = storage.load_manifest(cik)
+        records = [
+            r for r in manifest.values()
+            if scope_set is None or r.form_type in scope_set
+        ]
+        records.sort(key=lambda r: (r.filing_date or date.min), reverse=True)
+
+        touched = []
+        for rec in records:
+            if limit is not None and report.rendered >= limit:
+                break
+            res = storage.render_record(rec, renderer, dry_run=dry_run, overwrite=overwrite)
+            touched.append(rec)
+            if res.status == "rendered":
+                report.rendered += 1
+            elif res.status == "would-render":
+                report.would_render += 1
+            elif res.status == "skipped":
+                report.skipped += 1
+            elif res.status == "no-primary":
+                report.no_primary += 1
+            elif res.status == "error":
+                report.errors += 1
+                report.error_items.append(
+                    {"source": "render", "context": rec.doc_id,
+                     "url": rec.primary_doc_url, "error": res.error}
+                )
+
+        if not dry_run and touched:
+            storage.save_records(touched, dry_run=False)
+
+    if not dry_run and report.error_items:
+        storage.record_errors(report.error_items)
+    return report

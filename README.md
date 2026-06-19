@@ -130,15 +130,36 @@ top of that anchor:
   python -m bottom_up_corpus build-universe --ciks 1288776,320193 --name historical --write
   ```
 
+Download + decompose (full submission → primary document → cleaned text):
+
+```bash
+python -m bottom_up_corpus download --universe sp_curated --write          # or: discover ... --download
+```
+
+Render PDFs (separate batch; needs Chrome/Chromium via `BOTTOM_UP_CORPUS_CHROME`
+or PATH) and preview what the RAG would ingest:
+
+```bash
+python -m bottom_up_corpus render-pdf --universe sp_curated --years 2015-2025 --write
+python -m bottom_up_corpus rag-items  --universe sp_curated --prefer pdf
+```
+
 Completeness matrix (discovered vs. expected per issuer/form/year):
 
 ```bash
 python -m bottom_up_corpus report --universe sp_curated --years 2015-2025 --csv data/reports/matrix.csv
 ```
 
-Download + complete-submission decomposition, text extraction, XBRL (`xbrl`),
-the separate `render-pdf` batch, and the `RAGDataOrchestrator` connector land in
-subsequent phases (see the plan/`docs/`).
+## Feeding the RAG
+
+The corpus plugs into the RAG stack (`mvp-graph-rag` / `eigenmind`) via
+`RAGDataOrchestrator`. `bottom_up_corpus.rag.iter_items()` yields
+`SourceItem(doc_id, path, payload)` straight from the manifests (PDF by default,
+text fallback). The full contract + the ready-to-paste orchestrator connector are
+in [`docs/INGESTION_RAG.md`](docs/INGESTION_RAG.md).
+
+Still to come: XBRL structured financials (`xbrl`) and the full international
+source adapters (EDINET, DART, ESEF, …).
 
 ## SEC fair access
 

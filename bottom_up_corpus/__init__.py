@@ -16,7 +16,9 @@ from .extract import clean_text
 from .http import Fetcher
 from .models import FilingRecord
 from .naming import name_as_of, parse_former_names
-from .pipeline import discover_universe, download_universe
+from .pipeline import discover_universe, download_universe, render_universe
+from .rag import SourceItem, iter_items
+from .render import find_chrome, make_chrome_renderer
 from .storage import Storage
 from .submission import parse_submission, select_primary
 from .taxonomy import (
@@ -45,6 +47,11 @@ __all__ = [
     "resolve_ciks",
     "discover_universe",
     "download_universe",
+    "render_universe",
+    "make_chrome_renderer",
+    "find_chrome",
+    "iter_items",
+    "SourceItem",
     "build_matrix",
     "parse_submission",
     "select_primary",

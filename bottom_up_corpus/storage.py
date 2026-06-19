@@ -49,6 +49,15 @@ class DownloadResult:
     error: str | None = None
 
 
+@dataclass
+class RenderResult:
+    """Outcome of rendering a single filing's primary document to PDF."""
+
+    doc_id: str
+    status: str  # rendered | skipped | would-render | no-primary | error
+    error: str | None = None
+
+
 class Storage:
     """Read/write per-issuer manifests and append discovery errors."""
 
@@ -185,6 +194,46 @@ class Storage:
             record.text_path = self._rel(text_path)
 
         return DownloadResult(record.doc_id, "downloaded", bytes=len(data))
+
+    # ---- PDF rendering (Phase 3, separate batch) ----
+    def render_record(
+        self,
+        record: FilingRecord,
+        renderer,
+        *,
+        dry_run: bool = False,
+        overwrite: bool = False,
+    ) -> RenderResult:
+        """Render a filing's primary document to PDF via ``renderer``.
+
+        ``renderer`` is a ``Callable[[Path, Path], None]`` (see
+        :func:`bottom_up_corpus.render.make_chrome_renderer`). Requires the
+        primary document to have been downloaded (Phase 2). Mutates ``record``
+        with ``pdf_path``. Idempotent: an existing PDF is skipped unless
+        ``overwrite``.
+        """
+        if not record.primary_path:
+            return RenderResult(record.doc_id, "no-primary")
+
+        src = self.config.data_dir / record.primary_path
+        if not src.exists():
+            return RenderResult(record.doc_id, "no-primary",
+                                error=f"primary not on disk: {record.primary_path}")
+
+        pdf_path = self.raw_dir_for(record) / f"{record.doc_id}.pdf"
+        if pdf_path.exists() and not overwrite:
+            record.pdf_path = self._rel(pdf_path)
+            return RenderResult(record.doc_id, "skipped")
+        if dry_run:
+            return RenderResult(record.doc_id, "would-render")
+
+        try:
+            renderer(src, pdf_path)
+        except Exception as exc:  # noqa: BLE001
+            return RenderResult(record.doc_id, "error", error=str(exc))
+
+        record.pdf_path = self._rel(pdf_path)
+        return RenderResult(record.doc_id, "rendered")
 
     # ---- discovery errors ----
     def record_errors(self, errors: Iterable[dict]) -> int:
