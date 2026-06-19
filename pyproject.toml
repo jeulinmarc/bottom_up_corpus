@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bottom_up_corpus"
+version = "0.1.0"
+description = "Open-data corpus of company filings (SEC EDGAR + extensions) — the bottom-up/micro counterpart to cb_corpus."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pandas>=2.0",
+    "python-dateutil>=2.9",
+]
+
+[project.scripts]
+bottom_up_corpus = "bottom_up_corpus.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bottom_up_corpus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
