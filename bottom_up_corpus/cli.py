@@ -50,6 +50,27 @@ def _parse_years(spec: str | None) -> list[int]:
     return sorted(years)
 
 
+def _period_args(args: argparse.Namespace):
+    """Parse --years / --since / --until into (year_min, year_max, since, until).
+
+    ``--years`` (``YYYY`` or ``YYYY-YYYY``) bounds by filing year; ``--since`` /
+    ``--until`` (``YYYY-MM-DD``) add exact-date bounds. All optional, AND-combined.
+    """
+    year_min = year_max = None
+    if getattr(args, "years", None):
+        ys = _parse_years(args.years)
+        year_min, year_max = min(ys), max(ys)
+    since = date.fromisoformat(args.since) if getattr(args, "since", None) else None
+    until = date.fromisoformat(args.until) if getattr(args, "until", None) else None
+    return year_min, year_max, since, until
+
+
+def _add_period_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--years", default=None, help="filing-year filter, e.g. 2010-2020 or 2024")
+    p.add_argument("--since", default=None, help="start date filter (YYYY-MM-DD)")
+    p.add_argument("--until", default=None, help="end date filter (YYYY-MM-DD)")
+
+
 def _ciks_for(args: argparse.Namespace, config: Config) -> list[str]:
     """Resolve the CIK set from --ciks or --universe."""
     if getattr(args, "ciks", None):
@@ -185,8 +206,8 @@ def _cmd_discover(args: argparse.Namespace) -> int:
 
     if args.download:
         dl = download_universe(
-            ciks, scope=scope, dry_run=False, overwrite=args.overwrite,
-            limit=args.limit, config=cfg,
+            ciks, scope=scope, year_min=min(years), year_max=max(years),
+            dry_run=False, overwrite=args.overwrite, limit=args.limit, config=cfg,
         )
         print(f"download — got={dl.downloaded} skipped={dl.skipped} errors={dl.errors} "
               f"bytes={dl.bytes:,}")
@@ -197,10 +218,11 @@ def _cmd_download(args: argparse.Namespace) -> int:
     cfg = Config()
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms)
+    year_min, year_max, since, until = _period_args(args)
     dry_run = not args.write
     dl = download_universe(
-        ciks, scope=scope, dry_run=dry_run, overwrite=args.overwrite,
-        limit=args.limit, config=cfg,
+        ciks, scope=scope, year_min=year_min, year_max=year_max, since=since, until=until,
+        dry_run=dry_run, overwrite=args.overwrite, limit=args.limit, config=cfg,
     )
     mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
     print(f"download [{mode}] — got={dl.downloaded} skipped={dl.skipped} "
@@ -214,11 +236,12 @@ def _cmd_render_pdf(args: argparse.Namespace) -> int:
     cfg = Config()
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms)
+    year_min, year_max, since, until = _period_args(args)
     dry_run = not args.write
     try:
         rep = render_universe(
-            ciks, scope=scope, dry_run=dry_run, overwrite=args.overwrite,
-            limit=args.limit, config=cfg,
+            ciks, scope=scope, year_min=year_min, year_max=year_max, since=since, until=until,
+            dry_run=dry_run, overwrite=args.overwrite, limit=args.limit, config=cfg,
         )
     except RuntimeError as exc:  # e.g. Chrome not installed
         print(f"render-pdf: {exc}", file=sys.stderr)
@@ -251,9 +274,11 @@ def _cmd_ownership(args: argparse.Namespace) -> int:
     cfg = Config()
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms) if args.forms else None
+    year_min, year_max, since, until = _period_args(args)
     dry_run = not args.write
-    rep = process_ownership(ciks, scope=scope, dry_run=dry_run, overwrite=args.overwrite,
-                            limit=args.limit, config=cfg)
+    rep = process_ownership(ciks, scope=scope, year_min=year_min, year_max=year_max,
+                            since=since, until=until, dry_run=dry_run,
+                            overwrite=args.overwrite, limit=args.limit, config=cfg)
     mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
     print(f"ownership [{mode}] — {rep.issuers} issuers, downloaded={rep.downloaded}")
     print(f"  insider(E1)={rep.parsed_insider} 13F(E2)={rep.parsed_13f} "
@@ -420,6 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
     dlsrc.add_argument("--universe", help="universe name")
     dlsrc.add_argument("--ciks", help="comma-separated CIKs")
     dl.add_argument("--forms", default=None, help="scope selector (default: narrative A-D)")
+    _add_period_flags(dl)
     dl.add_argument("--write", action="store_true", help="persist files+manifest (else dry-run)")
     dl.add_argument("--overwrite", action="store_true", help="re-download already-stored filings")
     dl.add_argument("--limit", type=int, default=None, help="cap number of new downloads")
@@ -439,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     rdsrc.add_argument("--universe", help="universe name")
     rdsrc.add_argument("--ciks", help="comma-separated CIKs")
     rd.add_argument("--forms", default=None, help="scope selector (default: narrative A-D)")
+    _add_period_flags(rd)
     rd.add_argument("--write", action="store_true", help="render+persist (else dry-run)")
     rd.add_argument("--overwrite", action="store_true", help="re-render already-rendered filings")
     rd.add_argument("--limit", type=int, default=None, help="cap number of new renders")
@@ -457,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     owsrc.add_argument("--universe", help="universe name (curated tier recommended)")
     owsrc.add_argument("--ciks", help="comma-separated CIKs")
     ow.add_argument("--forms", default="E", help="scope selector (default: E = E1,E2,E3)")
+    _add_period_flags(ow)
     ow.add_argument("--write", action="store_true", help="download+persist summaries (else dry-run)")
     ow.add_argument("--overwrite", action="store_true", help="re-download already-stored filings")
     ow.add_argument("--limit", type=int, default=None, help="cap number of new downloads")
