@@ -37,22 +37,100 @@ France INPI, Brazil CVM, …).
 Default crawl scope (`FULL_SCOPE`) is the narrative families **A–D**; E and F
 are opt-in.
 
-## Storage layout
+## Storage layout & file naming
 
 ```
 data/
-├── manifest/<cik>.jsonl       # per-issuer manifest (committed)
-├── universe/                  # curated issuer lists (committed)
-├── raw/<cik>/<form>/<year>/   # full submission + primary doc + text (git-ignored)
-├── discovery_errors.jsonl     # append-only audit trail
-└── reports/                   # completeness matrices, CSV exports
+├── manifest/<cik>.jsonl        # INDEX: one JSON line per filing (committed) — the map
+├── universe/<name>.jsonl       # curated issuer lists, ticker<->cik (committed)
+│   └── <name>_changes.jsonl    # dated index changes (e.g. sp500_changes.jsonl)
+├── financials/<cik>.jsonl      # normalized XBRL metrics, one row per metric (committed)
+├── ownership/<cik>.jsonl       # normalized insider/13F rows (committed)
+├── discovery_errors.jsonl      # append-only audit trail
+├── reports/                    # completeness matrices, CSV exports
+└── raw/<cik>/<code>/<year>/    # the actual documents (git-ignored, regenerable)
 ```
 
-Each filing is stored as up to three layered artifacts: the **full
-complete-submission `.txt`** (the exhaustive canonical artifact — primary
-document + all exhibits + XBRL), the decomposed **primary document**, and a
-cleaned **extracted-text** file for RAG. PDF rendering is a **separate batch
-step** (like cb_corpus's `convert-html`), run only on chosen subsets.
+The layout is *machine-first* (stable ids, short codes), so **use the manifest as
+your entry point — don't browse `raw/` by hand**: every manifest line already
+contains the exact file paths.
+
+### The path `raw/<cik>/<code>/<year>/<doc_id>.<type>`
+
+- **`<cik>`** — SEC Central Index Key, **zero-padded to 10 digits** (Apple =
+  `0000320193`). Permanent (never changes on rename); also the manifest filename.
+- **`<code>`** — the **internal family code** (not the raw SEC form):
+
+  | Code | Form | | Code | Form |
+  |---|---|---|---|---|
+  | A1 | 10-K | | C1 | DEF 14A |
+  | A2 | 10-Q | | C2 | other proxy |
+  | A3 | 20-F | | D1/D2/D3 | S-1 / S-4 / 424B |
+  | A4 | 40-F | | E1 | Form 3/4/5 (insider) |
+  | B1 | 8-K | | E2 | 13F (holdings) |
+  | B2 | 6-K | | E3 | SC 13D/G |
+  |  |  | | F1 | XBRL financials |
+
+- **`<year>`** — filing year (`filing_date`).
+- **`<doc_id>`** — `sha1(cik | code | accession)` truncated to 16 hex. **Stable**
+  (date corrections don't change it) and unique per filing; it's the shared stem
+  of all that filing's files.
+
+### Files for one filing (shared `<doc_id>`)
+
+| Suffix | Contents |
+|---|---|
+| `<doc_id>.submission.txt` | the **complete submission** (SGML: primary doc + all exhibits + XBRL) — canonical archive |
+| `<doc_id>.primary.{htm,html,xml}` | the decomposed **primary document** (or the generated summary for F1/E) |
+| `<doc_id>.txt` | the cleaned **extracted text** (what the RAG reads) |
+| `<doc_id>.pdf` | the rendered **PDF** (after `render-pdf`) |
+
+Special cases: **F1** (financials) has no submission — instead
+`raw/<cik>/F1/companyfacts.json` (raw XBRL, one per issuer) plus a generated
+`.primary.html`/`.txt` summary per period. **E1/E2** (ownership) download the
+submission, then replace the primary/text with a structured summary
+(insider transactions, or 13F holdings).
+
+### The manifest is the map
+
+`data/manifest/<cik>.jsonl` — one JSON object per filing, carrying the metadata
+**and the exact file paths** so you never decode a hash by hand:
+
+```jsonc
+{
+  "cik":"0000320193", "ticker":"AAPL",
+  "company":"Apple Inc.",          // name as of the filing date (point-in-time)
+  "company_current":"Apple Inc.", "entity_id":"",
+  "form_type":"A1", "family":"A", "sec_form":"10-K",   // internal code + raw form
+  "accession":"0000320193-25-000079", "title":"Apple Inc. 10-K ...",
+  "filing_date":"2025-10-31", "period_of_report":"2025-09-27", "year":2025,
+  "primary_doc_url":"https://www.sec.gov/Archives/edgar/.../aapl-...htm",  // EDGAR link
+  "submission_url":"...0000320193-25-000079.txt",
+  "sha256":"…", "provenance":"edgar_submissions",
+  "local_path":"raw/0000320193/A1/2025/<doc_id>.submission.txt",
+  "primary_path":"raw/0000320193/A1/2025/<doc_id>.primary.htm",
+  "text_path":"raw/0000320193/A1/2025/<doc_id>.txt",
+  "pdf_path":"raw/0000320193/A1/2025/<doc_id>.pdf",
+  "doc_id":"<16-hex>"
+}
+```
+
+The `financials/<cik>.jsonl` and `ownership/<cik>.jsonl` files are flat,
+queryable tables (one row per metric / transaction / holding) — for analysis,
+not navigation.
+
+### Navigation recipes
+
+```bash
+# ticker -> CIK
+grep -i '"AAPL"' data/universe/sp500.jsonl
+
+# list a company's 10-Ks with their cleaned-text paths
+jq -r 'select(.sec_form=="10-K") | "\(.year)  \(.text_path)"' data/manifest/0000320193.jsonl
+
+# all files of one filing share the doc_id stem:
+ls data/raw/0000320193/A1/2025/<doc_id>.*
+```
 
 ## Install & test
 
