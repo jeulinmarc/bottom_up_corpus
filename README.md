@@ -263,6 +263,17 @@ keyed on its **period end** (so prior-year comparatives land in their own period
 not the report's year) and stamped with the **publication date**. The summaries
 flow through `render-pdf` and `rag-items` like any other document.
 
+Each period carries ~40 **reported** line items (income statement, balance sheet
+incl. all debt components and lease liabilities, cash flow, per-share) plus a
+block of **derived metrics** computed from them and stored as `kind="derived"`
+rows: total debt, total debt incl. leases, net debt, EBITDA, free cash flow,
+working capital, tangible book value, the margin set (gross/operating/net/EBITDA/
+FCF), returns (ROE/ROA), effective tax rate, leverage & coverage ratios
+(debt/equity, debt/assets, net debt/EBITDA, interest coverage) and liquidity
+ratios (current/quick/cash). A derived metric is emitted only when all of its
+inputs are present, so a missing component is never treated as zero. Returns are
+period-scoped (a quarter's ROE is the quarter's, not annualised).
+
 Ownership filings (family E) — structured insider transactions and institutional
 holdings:
 

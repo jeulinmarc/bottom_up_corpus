@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from bottom_up_corpus.financials import (
     build_period_summaries,
     normalized_rows,
@@ -72,3 +74,48 @@ def test_normalized_rows():
     assert all(r["cik"] == "0000320193" and r["fy"] == 2023 for r in rows)
     rev = next(r for r in rows if r["concept"] == "revenue")
     assert rev["value"] == 383285000000 and rev["publication_date"] == "2023-11-01"
+    assert rev["kind"] == "reported"
+    # Derived metrics are emitted alongside reported ones, flagged by kind.
+    debt = next(r for r in rows if r["concept"] == "total_debt")
+    assert debt["kind"] == "derived" and debt["unit"] == "USD"
+
+
+def test_derived_aggregates():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    d = fy.derived
+    # Total debt sums noncurrent + current portion + commercial paper.
+    assert d["total_debt"]["value"] == 95281000000 + 9822000000 + 5985000000
+    # EBITDA = operating income + D&A.
+    assert d["ebitda"]["value"] == 114301000000 + 11519000000
+    # Net debt = total debt - cash - short-term investments.
+    assert d["net_debt"]["value"] == 111088000000 - 29965000000 - 31590000000
+    # Free cash flow = CFO - capex.
+    assert d["free_cash_flow"]["value"] == 110543000000 - 10959000000
+
+
+def test_derived_ratios():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    d = fy.derived
+    assert d["debt_to_equity"]["value"] == pytest.approx(111088000000 / 62146000000)
+    assert d["debt_to_equity"]["unit"] == "x"
+    assert d["net_debt_to_ebitda"]["value"] == pytest.approx(49533000000 / 125820000000)
+    assert d["current_ratio"]["value"] == pytest.approx(143566000000 / 145308000000)
+    assert d["ebitda_margin"]["value"] == pytest.approx(125820000000 / 383285000000 * 100)
+    assert d["ebitda_margin"]["unit"] == "%"
+    assert d["effective_tax_rate"]["value"] == pytest.approx(16741000000 / 113736000000 * 100)
+    assert d["interest_coverage"]["value"] == pytest.approx(114301000000 / 3933000000)
+
+
+def test_derived_omits_metrics_with_missing_inputs():
+    # A bare period with no debt/EBITDA inputs yields no leverage metrics.
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived({"revenue": {"value": 100.0, "unit": "USD", "label": "Revenue"}})
+    assert "total_debt" not in d and "ebitda" not in d and "net_debt_to_ebitda" not in d
+
+
+def test_derived_rendered_in_html():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    html = render_summary_html(fy)
+    assert "Derived metrics" in html
+    assert "EBITDA" in html and "Net debt / EBITDA" in html
+    assert "Total debt" in html

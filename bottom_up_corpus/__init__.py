@@ -15,7 +15,13 @@ from .entity import Entity, EntityRegistry
 from .extract import clean_text
 from .http import Fetcher
 from .models import FilingRecord
-from .financials import CONCEPTS, PeriodSummary, build_period_summaries
+from .financials import (
+    CONCEPTS,
+    DERIVED,
+    PeriodSummary,
+    build_period_summaries,
+    compute_derived,
+)
 from .naming import name_as_of, parse_former_names
 from .ownership import parse_13f, parse_form345
 from .pipeline import (
@@ -72,8 +78,10 @@ __all__ = [
     "parse_form345",
     "parse_13f",
     "build_period_summaries",
+    "compute_derived",
     "PeriodSummary",
     "CONCEPTS",
+    "DERIVED",
     "make_chrome_renderer",
     "find_chrome",
     "iter_items",
