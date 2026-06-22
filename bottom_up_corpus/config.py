@@ -6,7 +6,9 @@ a per-host request rate at or below the SEC's published limit of 10 requests per
 second.
 
 Set ``contact`` (or the ``BOTTOM_UP_CORPUS_CONTACT`` env var) before any live
-crawl -- the SEC requires a real contact in the User-Agent.
+crawl -- the SEC asks for a real contact in the User-Agent. There is no default
+contact: if neither is set, the User-Agent carries only the tool name and no
+email address is sent.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ _DEFAULT_RPS = 8.0
 
 
 def _default_contact() -> str:
-    return os.environ.get("BOTTOM_UP_CORPUS_CONTACT", "jeulinmarc@gmail.com")
+    # No hardcoded default: an unset env var means no contact is sent at all.
+    return os.environ.get("BOTTOM_UP_CORPUS_CONTACT", "")
 
 
 @dataclass
@@ -54,8 +57,15 @@ class Config:
 
     @property
     def user_agent(self) -> str:
-        """SEC-compliant User-Agent string (must carry a contact address)."""
-        return f"bottom_up_corpus/0.1 ({self.contact})"
+        """SEC-compliant User-Agent string.
+
+        Carries a contact address when one is configured; with no contact set
+        it falls back to the bare tool name so we never broadcast a default
+        email address.
+        """
+        if self.contact:
+            return f"bottom_up_corpus/0.1 ({self.contact})"
+        return "bottom_up_corpus/0.1"
 
     @property
     def min_delay_seconds(self) -> float:
