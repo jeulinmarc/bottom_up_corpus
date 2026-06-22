@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from datetime import date
 
@@ -28,7 +29,7 @@ from .rag import iter_items
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
 from .taxonomy import FULL_SCOPE, FormType, parse_scope
-from .universe import Universe, resolve_ciks, resolve_tickers
+from .universe import Universe, issuers_from_sp500, resolve_ciks, resolve_tickers
 
 
 def _parse_years(spec: str | None) -> list[int]:
@@ -87,6 +88,37 @@ def _cmd_config(args: argparse.Namespace) -> int:
 def _cmd_build_universe(args: argparse.Namespace) -> int:
     cfg = Config()
     fetcher = Fetcher(cfg)
+
+    if getattr(args, "index", None):
+        if args.index != "sp500":
+            raise SystemExit("error: only --index sp500 is supported (see plan/README)")
+        name = args.name if args.name != "curated" else "sp500"
+        issuers, changes, unresolved = issuers_from_sp500(
+            fetcher, start=args.since, current_only=args.current_only)
+        mode = "historical union" if not args.current_only else "current snapshot"
+        if unresolved:
+            print(f"NOTE: {len(unresolved)} member(s) without a resolvable CIK "
+                  f"(likely delisted; recorded with cik=\"\"): {', '.join(unresolved[:15])}"
+                  f"{' …' if len(unresolved) > 15 else ''}", file=sys.stderr)
+        if args.write:
+            uni = Universe(cfg)
+            path = uni.save(name, issuers)
+            crows = 0
+            if changes:
+                cpath = uni.path(name).with_name(f"{name}_changes.jsonl")
+                with cpath.open("w", encoding="utf-8") as fh:
+                    for ch in changes:
+                        fh.write(json.dumps(ch, ensure_ascii=False) + "\n")
+                crows = len(changes)
+            print(f"wrote {len(issuers)} issuers ({mode}) -> {path}"
+                  + (f"; {crows} dated changes -> {cpath}" if crows else ""))
+        else:
+            resolved = sum(1 for it in issuers if it.cik)
+            print(f"[dry-run] S&P 500 {mode}: {len(issuers)} members "
+                  f"({resolved} with CIK, {len(issuers) - resolved} unresolved), "
+                  f"{len(changes)} dated changes. Re-run with --write to persist.")
+        return 0
+
     issuers: list = []
     if args.tickers:
         tickers = [t for t in args.tickers.split(",") if t.strip()]
@@ -342,10 +374,13 @@ def build_parser() -> argparse.ArgumentParser:
     cf = sub.add_parser("config", help="print the effective runtime configuration")
     cf.set_defaults(func=_cmd_config)
 
-    bu = sub.add_parser("build-universe", help="resolve tickers/CIKs -> a curated list")
+    bu = sub.add_parser("build-universe", help="resolve tickers/CIKs/index -> a curated list")
     bu.add_argument("--tickers", default="", help="comma-separated tickers, e.g. AAPL,MSFT")
     bu.add_argument("--ciks", default="", help="comma-separated CIKs (for delisted/historical issuers)")
-    bu.add_argument("--name", default="curated", help="universe name (file stem)")
+    bu.add_argument("--index", choices=["sp500"], help="build from an index's composition (historical)")
+    bu.add_argument("--since", default=None, help="with --index: window start (YYYY) for the historical union")
+    bu.add_argument("--current-only", action="store_true", help="with --index: today's members only (no history)")
+    bu.add_argument("--name", default="curated", help="universe name (file stem; defaults to index name)")
     bu.add_argument("--write", action="store_true", help="persist to data/universe/<name>.jsonl")
     bu.set_defaults(func=_cmd_build_universe)
 

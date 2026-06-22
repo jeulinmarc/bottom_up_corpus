@@ -84,7 +84,20 @@ Issuer universe (curated tier, version-controlled under `data/universe/`):
 # Resolve tickers -> CIKs via the official SEC map (dry-run, then --write).
 python -m bottom_up_corpus build-universe --tickers AAPL,MSFT,GOOGL --name sp_curated --write
 python -m bottom_up_corpus list-universe --name sp_curated
+
+# Build the S&P 500 from its composition (the only index with open dated history):
+python -m bottom_up_corpus build-universe --index sp500 --current-only --write   # today's ~500 members
+python -m bottom_up_corpus build-universe --index sp500 --since 2010 --write      # historical UNION (all
+#   companies that were ever members since 2010) + a dated data/universe/sp500_changes.jsonl
 ```
+
+`--index sp500` reconstructs membership from Wikipedia (current table + the dated
+changes table), so the historical union is **not survivorship-biased on
+selection**. CIKs are filled for current/active members; since-delisted members
+are kept with `cik=""` and reported (open data can't reliably map reused/retired
+tickers). For survivorship-free *filing* coverage, `discover-index` (all filers)
+remains the lever. Russell 1000 / Nasdaq-100 have no open dated source (not
+supported).
 
 Discovery (metadata into per-issuer manifests; **dry-run by default**, `--write`
 to persist):
