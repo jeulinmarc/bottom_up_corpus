@@ -36,7 +36,14 @@ from .taxonomy import (
     from_edgar_form,
     parse_scope,
 )
-from .universe import Issuer, Universe, resolve_ciks, resolve_tickers
+from .indices import sp500_changes, sp500_current, sp500_membership
+from .universe import (
+    Issuer,
+    Universe,
+    issuers_from_sp500,
+    resolve_ciks,
+    resolve_tickers,
+)
 
 __all__ = [
     "Config",
@@ -53,6 +60,10 @@ __all__ = [
     "Issuer",
     "resolve_tickers",
     "resolve_ciks",
+    "issuers_from_sp500",
+    "sp500_current",
+    "sp500_changes",
+    "sp500_membership",
     "discover_universe",
     "download_universe",
     "render_universe",
