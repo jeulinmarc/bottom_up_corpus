@@ -1,0 +1,8 @@
+# Code owners for bottom_up_corpus.
+# Used with branch protection ("Require review from Code Owners") to require the
+# owner's approval on any pull request before it can merge to the default branch.
+# NOTE: this file only declares owners — enforcement must be enabled in
+# Settings -> Branches/Rules for `main`.
+
+# Default: every file in the repo is owned by the repo owner.
+* @jeulinmarc
