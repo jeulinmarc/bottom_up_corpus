@@ -17,7 +17,13 @@ from .completeness import build_matrix, summarize
 from .config import Config, normalize_cik
 from .entity import EntityRegistry
 from .http import Fetcher
-from .pipeline import discover_universe, download_universe, fetch_financials, render_universe
+from .pipeline import (
+    discover_universe,
+    download_universe,
+    fetch_financials,
+    process_ownership,
+    render_universe,
+)
 from .rag import iter_items
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
@@ -209,6 +215,22 @@ def _cmd_xbrl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ownership(args: argparse.Namespace) -> int:
+    cfg = Config()
+    ciks = _ciks_for(args, cfg)
+    scope = parse_scope(args.forms) if args.forms else None
+    dry_run = not args.write
+    rep = process_ownership(ciks, scope=scope, dry_run=dry_run, overwrite=args.overwrite,
+                            limit=args.limit, config=cfg)
+    mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
+    print(f"ownership [{mode}] — {rep.issuers} issuers, downloaded={rep.downloaded}")
+    print(f"  insider(E1)={rep.parsed_insider} 13F(E2)={rep.parsed_13f} "
+          f"narrative(E3)={rep.passthrough} errors={rep.errors}")
+    if rep.error_items:
+        print(f"  errors logged: {len(rep.error_items)} (see discovery_errors.jsonl)")
+    return 0
+
+
 def _cmd_rag_items(args: argparse.Namespace) -> int:
     cfg = Config()
     ciks = None
@@ -394,6 +416,16 @@ def build_parser() -> argparse.ArgumentParser:
     xb.add_argument("--years", default=None, help="keep periods with fiscal year >= min(years)")
     xb.add_argument("--write", action="store_true", help="persist summaries+facts (else dry-run)")
     xb.set_defaults(func=_cmd_xbrl)
+
+    ow = sub.add_parser("ownership", help="download+structure ownership filings (family E)")
+    owsrc = ow.add_mutually_exclusive_group(required=True)
+    owsrc.add_argument("--universe", help="universe name (curated tier recommended)")
+    owsrc.add_argument("--ciks", help="comma-separated CIKs")
+    ow.add_argument("--forms", default="E", help="scope selector (default: E = E1,E2,E3)")
+    ow.add_argument("--write", action="store_true", help="download+persist summaries (else dry-run)")
+    ow.add_argument("--overwrite", action="store_true", help="re-download already-stored filings")
+    ow.add_argument("--limit", type=int, default=None, help="cap number of new downloads")
+    ow.set_defaults(func=_cmd_ownership)
 
     ri = sub.add_parser("rag-items", help="preview SourceItems the RAG would ingest")
     risrc = ri.add_mutually_exclusive_group(required=False)

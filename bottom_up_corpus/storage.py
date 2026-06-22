@@ -267,6 +267,28 @@ class Storage:
         txt.write_text(text, encoding="utf-8")
         record.text_path = self._rel(txt)
 
+    # ---- ownership summaries (Phase 4b) ----
+    def write_ownership_summary(self, record: FilingRecord, html: str, text: str) -> None:
+        """Write a structured ownership summary (HTML primary + clean text)."""
+        dest_dir = self.raw_dir_for(record)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        primary = dest_dir / f"{record.doc_id}.primary.html"
+        primary.write_text(html, encoding="utf-8")
+        record.primary_path = self._rel(primary)
+        txt = dest_dir / f"{record.doc_id}.txt"
+        txt.write_text(text, encoding="utf-8")
+        record.text_path = self._rel(txt)
+
+    def write_ownership_table(self, cik: str, rows: Iterable[dict]) -> str:
+        """Write the normalized ownership rows data/ownership/<cik>.jsonl."""
+        cik = normalize_cik(cik)
+        path = self.config.ownership_dir / f"{cik}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return self._rel(path)
+
     # ---- discovery errors ----
     def record_errors(self, errors: Iterable[dict]) -> int:
         """Append discovery errors to the audit trail. Returns count written."""

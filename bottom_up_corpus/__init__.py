@@ -17,10 +17,12 @@ from .http import Fetcher
 from .models import FilingRecord
 from .financials import CONCEPTS, PeriodSummary, build_period_summaries
 from .naming import name_as_of, parse_former_names
+from .ownership import parse_13f, parse_form345
 from .pipeline import (
     discover_universe,
     download_universe,
     fetch_financials,
+    process_ownership,
     render_universe,
 )
 from .rag import SourceItem, iter_items
@@ -55,6 +57,9 @@ __all__ = [
     "download_universe",
     "render_universe",
     "fetch_financials",
+    "process_ownership",
+    "parse_form345",
+    "parse_13f",
     "build_period_summaries",
     "PeriodSummary",
     "CONCEPTS",

@@ -164,6 +164,22 @@ keyed on its **period end** (so prior-year comparatives land in their own period
 not the report's year) and stamped with the **publication date**. The summaries
 flow through `render-pdf` and `rag-items` like any other document.
 
+Ownership filings (family E) — structured insider transactions and institutional
+holdings:
+
+```bash
+python -m bottom_up_corpus discover  --universe sp_curated --forms E --write
+python -m bottom_up_corpus ownership --universe sp_curated --write
+```
+
+`ownership` downloads each E filing (canonical submission) and, for **Form 3/4/5**
+(E1) and **13F** (E2), parses the structured XML into a readable summary
+(insider/role/transactions; holdings/top-positions/portfolio value) that flows
+through `render-pdf`/`rag-items`, plus a normalized `data/ownership/<cik>.jsonl`
+table. **SC 13D/G** (E3) are narrative and pass through as text. Bounded to the
+curated tier by default (Form 4 alone is ~4.6M filings universe-wide); use
+`--limit` to cap a run.
+
 ## Feeding the RAG
 
 The corpus plugs into the RAG stack (`mvp-graph-rag` / `eigenmind`) via

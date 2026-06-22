@@ -84,6 +84,10 @@ class Config:
         return self.data_dir / "financials"
 
     @property
+    def ownership_dir(self) -> Path:
+        return self.data_dir / "ownership"
+
+    @property
     def discovery_errors_path(self) -> Path:
         return self.data_dir / "discovery_errors.jsonl"
 
