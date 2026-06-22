@@ -146,6 +146,11 @@ compliance:
 export BOTTOM_UP_CORPUS_CONTACT="you@example.com"
 ```
 
+There is **no default contact**. If `BOTTOM_UP_CORPUS_CONTACT` is unset, the
+`User-Agent` carries only the tool name (`bottom_up_corpus/0.1`) and no email
+address is sent — so cloning the repo never leaks anyone's address. The SEC asks
+for a real contact, so set it before crawling.
+
 ## Usage
 
 Inspection:

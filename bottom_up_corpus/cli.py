@@ -103,6 +103,12 @@ def _cmd_config(args: argparse.Namespace) -> int:
     print(f"manifest_dir      : {cfg.manifest_dir}")
     print(f"universe_dir      : {cfg.universe_dir}")
     print(f"raw_dir           : {cfg.raw_dir}")
+    if not cfg.contact:
+        print(
+            "\nNo contact set: the User-Agent carries no email address. "
+            "Set BOTTOM_UP_CORPUS_CONTACT before any live crawl "
+            "(e.g. export BOTTOM_UP_CORPUS_CONTACT=you@example.com)."
+        )
     return 0
 
 

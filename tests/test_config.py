@@ -15,6 +15,16 @@ def test_user_agent_carries_contact():
     assert cfg.user_agent.startswith("bottom_up_corpus/")
 
 
+def test_no_contact_means_no_email_in_user_agent(monkeypatch):
+    # With the env var unset there is no default contact, and the User-Agent
+    # must not embed any email address.
+    monkeypatch.delenv("BOTTOM_UP_CORPUS_CONTACT", raising=False)
+    cfg = Config()
+    assert cfg.contact == ""
+    assert "@" not in cfg.user_agent
+    assert cfg.user_agent == "bottom_up_corpus/0.1"
+
+
 def test_rps_above_sec_limit_is_rejected():
     with pytest.raises(ValueError):
         Config(requests_per_second=SEC_MAX_REQUESTS_PER_SECOND + 1)
