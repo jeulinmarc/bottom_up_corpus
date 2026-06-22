@@ -34,6 +34,26 @@ from .storage import SaveStats, Storage
 from .taxonomy import FULL_SCOPE, FormType
 
 
+def _in_period(
+    rec: FilingRecord,
+    year_min: int | None,
+    year_max: int | None,
+    since: date | None,
+    until: date | None,
+) -> bool:
+    """True if a record falls within the requested year/date window (all bounds AND-ed)."""
+    y, d = rec.year, rec.filing_date
+    if year_min is not None and (y is None or y < year_min):
+        return False
+    if year_max is not None and (y is None or y > year_max):
+        return False
+    if since is not None and (d is None or d < since):
+        return False
+    if until is not None and (d is None or d > until):
+        return False
+    return True
+
+
 @dataclass
 class RunReport:
     """Aggregate outcome of a discovery run."""
@@ -120,6 +140,10 @@ def download_universe(
     ciks: Iterable[str],
     *,
     scope: Sequence[FormType] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    since: date | None = None,
+    until: date | None = None,
     dry_run: bool = True,
     overwrite: bool = False,
     limit: int | None = None,
@@ -130,9 +154,9 @@ def download_universe(
     """Download + decompose filings already present in the issuers' manifests.
 
     Reads each issuer's manifest, fetches the complete submission for each record
-    (optionally filtered by ``scope``), decomposes it, and persists the updated
-    record. ``limit`` caps the number of *new* downloads across the run (handy
-    for live smoke tests). Idempotent: already-downloaded filings are skipped.
+    (optionally filtered by ``scope`` and a year/date window), decomposes it, and
+    persists the updated record. ``limit`` caps the number of *new* downloads
+    across the run. Idempotent: already-downloaded filings are skipped.
     """
     config = config or Config()
     fetcher = fetcher or Fetcher(config)
@@ -144,7 +168,8 @@ def download_universe(
         manifest = storage.load_manifest(cik)
         records = [
             r for r in manifest.values()
-            if scope_set is None or r.form_type in scope_set
+            if (scope_set is None or r.form_type in scope_set)
+            and _in_period(r, year_min, year_max, since, until)
         ]
         records.sort(key=lambda r: (r.filing_date or date.min), reverse=True)
 
@@ -190,6 +215,10 @@ def render_universe(
     *,
     renderer=None,
     scope: Sequence[FormType] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    since: date | None = None,
+    until: date | None = None,
     dry_run: bool = True,
     overwrite: bool = False,
     limit: int | None = None,
@@ -218,7 +247,8 @@ def render_universe(
         manifest = storage.load_manifest(cik)
         records = [
             r for r in manifest.values()
-            if scope_set is None or r.form_type in scope_set
+            if (scope_set is None or r.form_type in scope_set)
+            and _in_period(r, year_min, year_max, since, until)
         ]
         records.sort(key=lambda r: (r.filing_date or date.min), reverse=True)
 
@@ -351,6 +381,10 @@ def process_ownership(
     ciks: Iterable[str],
     *,
     scope: Sequence[FormType] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    since: date | None = None,
+    until: date | None = None,
     dry_run: bool = True,
     overwrite: bool = False,
     limit: int | None = None,
@@ -378,7 +412,11 @@ def process_ownership(
 
     for cik in cik_list:
         manifest = storage.load_manifest(cik)
-        records = [r for r in manifest.values() if r.form_type in scope_set]
+        records = [
+            r for r in manifest.values()
+            if r.form_type in scope_set
+            and _in_period(r, year_min, year_max, since, until)
+        ]
         records.sort(key=lambda r: (r.filing_date or date.min), reverse=True)
 
         touched: list[FilingRecord] = []

@@ -78,6 +78,34 @@ def test_download_universe_limit(apple_fetcher, config):
     assert report.downloaded == 1
 
 
+def test_download_year_filter(apple_fetcher, config):
+    st = Storage(config)
+    st.save_records([
+        _apple_10k(),  # filed 2024-11-01
+        FilingRecord(cik="320193", form_type=FormType.A1, sec_form="10-K",
+                     accession="0000320193-23-000106", company="Apple Inc.",
+                     filing_date=date(2023, 11, 1), submission_url=SUB_URL),
+    ], dry_run=False)
+    # Only the 2024 filing is in range.
+    report = download_universe(["320193"], year_min=2024, dry_run=False,
+                               config=config, fetcher=apple_fetcher, storage=st)
+    assert report.downloaded == 1
+
+
+def test_download_date_window(apple_fetcher, config):
+    from datetime import date as _d
+    st = Storage(config)
+    st.save_records([
+        _apple_10k(),  # 2024-11-01
+        FilingRecord(cik="320193", form_type=FormType.A1, sec_form="10-K",
+                     accession="0000320193-23-000106", company="Apple Inc.",
+                     filing_date=date(2023, 11, 1), submission_url=SUB_URL),
+    ], dry_run=False)
+    report = download_universe(["320193"], since=_d(2024, 1, 1), until=_d(2024, 12, 31),
+                               dry_run=False, config=config, fetcher=apple_fetcher, storage=st)
+    assert report.downloaded == 1
+
+
 def test_download_universe_records_error(make_fetcher, config):
     st = Storage(config)
     st.save_records([_apple_10k()], dry_run=False)

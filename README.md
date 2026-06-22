@@ -225,6 +225,9 @@ Download + decompose (full submission → primary document → cleaned text):
 
 ```bash
 python -m bottom_up_corpus download --universe sp_curated --write          # or: discover ... --download
+# filter by period (filing year and/or exact dates) — also on render-pdf / ownership:
+python -m bottom_up_corpus download --universe sp_curated --years 2010-2020 --write
+python -m bottom_up_corpus download --universe sp_curated --since 2015-01-01 --until 2019-12-31 --write
 ```
 
 Render PDFs (separate batch; needs Chrome/Chromium via `BOTTOM_UP_CORPUS_CHROME`
