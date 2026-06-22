@@ -358,6 +358,10 @@ def _summary_text(ps) -> str:
              f"source {ps.sec_form} accession {ps.accession}", ""]
     for v in ps.values.values():
         lines.append(f"{v['label']}: {v['value']} {v['unit']}")
+    derived = ps.derived
+    if derived:
+        lines += ["", "Derived metrics:"]
+        lines += [f"{v['label']}: {v['value']} {v['unit']}" for v in derived.values()]
     return "\n".join(lines)
 
 

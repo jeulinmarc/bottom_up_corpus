@@ -1,10 +1,13 @@
 """Curated financial concepts + period grouping for SEC XBRL company facts.
 
 The SEC `companyfacts` API returns hundreds of raw XBRL concepts. For the RAG we
-distil a curated ~20 line items (income statement / balance sheet / cash flow /
-per-share), grouped into **one summary per reporting period as the company
-reports it** (annual / quarterly / semi-annual), each carrying its publication
-(filing) date. The full raw JSON is kept separately for exhaustivity.
+distil a curated ~40 line items (income statement / balance sheet / cash flow /
+per-share) and compute a block of **derived metrics** on top of them (total debt,
+EBITDA, net debt, free cash flow, margins, returns, and leverage / coverage /
+liquidity ratios -- see :func:`compute_derived`). Everything is grouped into
+**one summary per reporting period as the company reports it** (annual /
+quarterly / semi-annual), each carrying its publication (filing) date. The full
+raw JSON is kept separately for exhaustivity.
 
 Fact points carry: ``start``/``end`` (duration vs instant), ``val``, ``unit``,
 ``accn``, ``fy``, ``fp`` (``FY``/``Q1``-``Q3``), ``form``, ``filed`` (= the
@@ -32,23 +35,40 @@ class Concept:
     unit: str = "USD"      # expected unit (USD / USD/shares / shares)
 
 
-# Curated set (~20). Order = display order in the summary.
+# Curated set (~40 raw line items). Order = display order in the summary. These
+# are the *reported* figures; ratios/aggregates (total debt, EBITDA, leverage,
+# margins…) are computed from them in :func:`compute_derived`.
 CONCEPTS: tuple[Concept, ...] = (
-    # Income statement (duration)
+    # --- Income statement (duration) ---
     Concept("revenue", "Revenue",
             ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
              "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"), False),
     Concept("cost_of_revenue", "Cost of revenue",
             ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold"), False),
     Concept("gross_profit", "Gross profit", ("GrossProfit",), False),
-    Concept("operating_income", "Operating income", ("OperatingIncomeLoss",), False),
+    Concept("sga_expense", "SG&A expense",
+            ("SellingGeneralAndAdministrativeExpense",
+             "GeneralAndAdministrativeExpense"), False),
     Concept("rnd_expense", "R&D expense", ("ResearchAndDevelopmentExpense",), False),
+    Concept("operating_income", "Operating income", ("OperatingIncomeLoss",), False),
+    Concept("interest_expense", "Interest expense",
+            ("InterestExpense", "InterestExpenseNonoperating", "InterestAndDebtExpense"), False),
+    Concept("pretax_income", "Pretax income",
+            ("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic"), False),
     Concept("income_tax", "Income tax expense", ("IncomeTaxExpenseBenefit",), False),
     Concept("net_income", "Net income", ("NetIncomeLoss", "ProfitLoss"), False),
-    # Per share (duration, USD/shares)
+    # Depreciation & amortization (cash-flow statement; needed for EBITDA)
+    Concept("dep_amort", "Depreciation & amortization",
+            ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet",
+             "DepreciationAndAmortization", "Depreciation"), False),
+    # --- Per share (duration, USD/shares) ---
     Concept("eps_basic", "EPS (basic)", ("EarningsPerShareBasic",), False, "USD/shares"),
     Concept("eps_diluted", "EPS (diluted)", ("EarningsPerShareDiluted",), False, "USD/shares"),
-    # Cash flow (duration)
+    Concept("dividends_per_share", "Dividends declared per share",
+            ("CommonStockDividendsPerShareDeclared",), False, "USD/shares"),
+    # --- Cash flow (duration) ---
     Concept("cfo", "Cash from operations",
             ("NetCashProvidedByUsedInOperatingActivities",
              "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"), False),
@@ -56,24 +76,217 @@ CONCEPTS: tuple[Concept, ...] = (
             ("NetCashProvidedByUsedInInvestingActivities",), False),
     Concept("cff", "Cash from financing",
             ("NetCashProvidedByUsedInFinancingActivities",), False),
-    # Balance sheet (instant)
+    Concept("capex", "Capital expenditures",
+            ("PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets",
+             "PaymentsForCapitalImprovements"), False),
+    Concept("stock_comp", "Stock-based compensation", ("ShareBasedCompensation",), False),
+    Concept("dividends_paid", "Dividends paid",
+            ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends"), False),
+    Concept("buybacks", "Share repurchases", ("PaymentsForRepurchaseOfCommonStock",), False),
+    # --- Balance sheet (instant) ---
     Concept("assets", "Total assets", ("Assets",), True),
     Concept("assets_current", "Current assets", ("AssetsCurrent",), True),
+    Concept("cash", "Cash & equivalents",
+            ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"), True),
+    Concept("short_term_investments", "Short-term investments",
+            ("ShortTermInvestments", "MarketableSecuritiesCurrent"), True),
+    Concept("receivables", "Accounts receivable",
+            ("AccountsReceivableNetCurrent", "ReceivablesNetCurrent"), True),
+    Concept("inventory", "Inventory", ("InventoryNet",), True),
+    Concept("ppe_net", "Property, plant & equipment (net)",
+            ("PropertyPlantAndEquipmentNet",), True),
+    Concept("goodwill", "Goodwill", ("Goodwill",), True),
+    Concept("intangibles", "Intangible assets (ex-goodwill)",
+            ("IntangibleAssetsNetExcludingGoodwill", "FiniteLivedIntangibleAssetsNet"), True),
     Concept("liabilities", "Total liabilities", ("Liabilities",), True),
     Concept("liabilities_current", "Current liabilities", ("LiabilitiesCurrent",), True),
+    Concept("payables", "Accounts payable",
+            ("AccountsPayableCurrent", "AccountsPayableAndAccruedLiabilitiesCurrent"), True),
+    # Debt components (needed for total debt / leverage). Long-term debt is
+    # anchored on the noncurrent tag so it does not overlap the current portion.
+    Concept("long_term_debt", "Long-term debt (noncurrent)",
+            ("LongTermDebtNoncurrent", "LongTermDebt"), True),
+    Concept("lt_debt_current", "Long-term debt (current portion)",
+            ("LongTermDebtCurrent",), True),
+    Concept("short_term_debt", "Short-term borrowings",
+            ("ShortTermBorrowings", "CommercialPaper", "NotesPayableCurrent", "DebtCurrent"), True),
+    # Lease liabilities (for adjusted / lease-inclusive leverage, post ASC 842)
+    Concept("finance_lease_current", "Finance lease liability (current)",
+            ("FinanceLeaseLiabilityCurrent",), True),
+    Concept("finance_lease_noncurrent", "Finance lease liability (noncurrent)",
+            ("FinanceLeaseLiabilityNoncurrent",), True),
+    Concept("operating_lease_current", "Operating lease liability (current)",
+            ("OperatingLeaseLiabilityCurrent",), True),
+    Concept("operating_lease_noncurrent", "Operating lease liability (noncurrent)",
+            ("OperatingLeaseLiabilityNoncurrent",), True),
     Concept("equity", "Stockholders' equity",
             ("StockholdersEquity",
              "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"), True),
-    Concept("cash", "Cash & equivalents",
-            ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"), True),
-    Concept("long_term_debt", "Long-term debt",
-            ("LongTermDebtNoncurrent", "LongTermDebt"), True),
-    # Shares (instant, shares)
+    # --- Shares (instant, shares) ---
     Concept("shares_outstanding", "Shares outstanding",
             ("CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"), True, "shares"),
+    Concept("wavg_shares_diluted", "Weighted-avg diluted shares",
+            ("WeightedAverageNumberOfDilutedSharesOutstanding",), False, "shares"),
 )
 
 CONCEPTS_BY_KEY = {c.key: c for c in CONCEPTS}
+
+
+@dataclass(frozen=True)
+class Derived:
+    """A computed metric (ratio or aggregate) derived from reported concepts."""
+
+    key: str
+    label: str
+    unit: str  # USD | USD/shares | x (multiple) | % (percent)
+
+
+# Display order for the derived block. The aggregates (total debt, EBITDA, net
+# debt, FCF) are the inputs the user explicitly asked for; the ratios build on
+# them. Each is emitted only when every input concept is present for the period.
+DERIVED: tuple[Derived, ...] = (
+    # Aggregates
+    Derived("total_debt", "Total debt", "USD"),
+    Derived("total_debt_incl_leases", "Total debt incl. leases", "USD"),
+    Derived("net_debt", "Net debt", "USD"),
+    Derived("ebitda", "EBITDA", "USD"),
+    Derived("free_cash_flow", "Free cash flow", "USD"),
+    Derived("working_capital", "Working capital", "USD"),
+    Derived("tangible_book_value", "Tangible book value", "USD"),
+    # Margins (%)
+    Derived("gross_margin", "Gross margin", "%"),
+    Derived("operating_margin", "Operating margin", "%"),
+    Derived("net_margin", "Net margin", "%"),
+    Derived("ebitda_margin", "EBITDA margin", "%"),
+    Derived("fcf_margin", "FCF margin", "%"),
+    # Returns (%) — period-scoped (not annualised for quarters)
+    Derived("roe", "Return on equity", "%"),
+    Derived("roa", "Return on assets", "%"),
+    Derived("effective_tax_rate", "Effective tax rate", "%"),
+    # Leverage / coverage (multiples)
+    Derived("debt_to_equity", "Debt / equity", "x"),
+    Derived("debt_to_assets", "Debt / assets", "x"),
+    Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x"),
+    Derived("interest_coverage", "Interest coverage (EBIT/interest)", "x"),
+    # Liquidity (multiples)
+    Derived("current_ratio", "Current ratio", "x"),
+    Derived("quick_ratio", "Quick ratio", "x"),
+    Derived("cash_ratio", "Cash ratio", "x"),
+    # Efficiency / per share
+    Derived("asset_turnover", "Asset turnover", "x"),
+    Derived("book_value_per_share", "Book value per share", "USD/shares"),
+)
+
+DERIVED_BY_KEY = {d.key: d for d in DERIVED}
+
+
+def _num(values: dict, key: str) -> float | None:
+    """Numeric reported value for ``key``, or None if absent/non-numeric."""
+    v = values.get(key)
+    if v is not None and isinstance(v.get("value"), (int, float)):
+        return float(v["value"])
+    return None
+
+
+def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
+    """Compute ratios/aggregates from reported concept ``values``.
+
+    Each metric is emitted only when all of its required inputs are present, so
+    a missing component is never silently treated as zero -- the exceptions are
+    additive *components* (current debt, short-term investments, leases, ...)
+    that default to 0 when untagged, which matches how filers report them.
+    Margins, returns and the tax rate are expressed in percent; leverage,
+    coverage and liquidity ratios as multiples (``x``). Returns are period-scoped
+    (a quarterly summary's ROE is the quarter's, not annualised).
+    """
+    out: dict[str, dict] = {}
+
+    def put(key: str, val: float | None) -> None:
+        if val is None or (isinstance(val, float) and val != val):  # skip None/NaN
+            return
+        d = DERIVED_BY_KEY[key]
+        out[key] = {"value": val, "unit": d.unit, "label": d.label}
+
+    def div(a: float | None, b: float | None) -> float | None:
+        if a is None or b is None or b == 0:
+            return None
+        return a / b
+
+    def pct(a: float | None, b: float | None) -> float | None:
+        r = div(a, b)
+        return r * 100 if r is not None else None
+
+    def opt(key: str) -> float:  # additive component: missing -> 0
+        return _num(values, key) or 0.0
+
+    rev = _num(values, "revenue")
+    oi = _num(values, "operating_income")
+    ni = _num(values, "net_income")
+    eq = _num(values, "equity")
+    assets = _num(values, "assets")
+    ac, lc = _num(values, "assets_current"), _num(values, "liabilities_current")
+    cash = _num(values, "cash")
+
+    # Aggregates
+    ltd = _num(values, "long_term_debt")
+    total_debt = None
+    if ltd is not None:
+        total_debt = ltd + opt("lt_debt_current") + opt("short_term_debt")
+    put("total_debt", total_debt)
+
+    leases = (opt("finance_lease_current") + opt("finance_lease_noncurrent")
+              + opt("operating_lease_current") + opt("operating_lease_noncurrent"))
+    if total_debt is not None and leases:
+        put("total_debt_incl_leases", total_debt + leases)
+
+    net_debt = None
+    if total_debt is not None and cash is not None:
+        net_debt = total_debt - cash - opt("short_term_investments")
+    put("net_debt", net_debt)
+
+    da = _num(values, "dep_amort")
+    ebitda = oi + da if (oi is not None and da is not None) else None
+    put("ebitda", ebitda)
+
+    cfo, capex = _num(values, "cfo"), _num(values, "capex")
+    fcf = cfo - capex if (cfo is not None and capex is not None) else None
+    put("free_cash_flow", fcf)
+
+    if ac is not None and lc is not None:
+        put("working_capital", ac - lc)
+    if eq is not None:
+        put("tangible_book_value", eq - opt("goodwill") - opt("intangibles"))
+
+    # Margins (%)
+    put("gross_margin", pct(_num(values, "gross_profit"), rev))
+    put("operating_margin", pct(oi, rev))
+    put("net_margin", pct(ni, rev))
+    put("ebitda_margin", pct(ebitda, rev))
+    put("fcf_margin", pct(fcf, rev))
+
+    # Returns / tax (%)
+    put("roe", pct(ni, eq))
+    put("roa", pct(ni, assets))
+    put("effective_tax_rate", pct(_num(values, "income_tax"), _num(values, "pretax_income")))
+
+    # Leverage / coverage (x)
+    put("debt_to_equity", div(total_debt, eq))
+    put("debt_to_assets", div(total_debt, assets))
+    put("net_debt_to_ebitda", div(net_debt, ebitda))
+    put("interest_coverage", div(oi, _num(values, "interest_expense")))
+
+    # Liquidity (x)
+    put("current_ratio", div(ac, lc))
+    if ac is not None:
+        put("quick_ratio", div(ac - opt("inventory"), lc))
+    if cash is not None:
+        put("cash_ratio", div(cash + opt("short_term_investments"), lc))
+
+    # Efficiency / per share
+    put("asset_turnover", div(rev, assets))
+    put("book_value_per_share", div(eq, _num(values, "shares_outstanding")))
+
+    return out
 
 
 @dataclass
@@ -108,6 +321,11 @@ class PeriodSummary:
         if self.frequency == "semi-annual":
             return f"Half-year ended {end}"
         return f"Quarter ended {end}"
+
+    @property
+    def derived(self) -> dict[str, dict]:
+        """Computed ratios/aggregates (total debt, EBITDA, leverage, ...)."""
+        return compute_derived(self.values)
 
 
 def _to_date(value: str | None) -> date | None:
@@ -254,20 +472,46 @@ def _fmt(value, unit: str) -> str:
         return f"{value:,.2f}"
     if unit == "shares":
         return f"{value:,.0f}"
+    if unit == "%":
+        return f"{value:,.1f}%"
+    if unit == "x":
+        return f"{value:,.2f}x"
     return f"{value:,.0f}"
 
 
-def render_summary_html(summary: PeriodSummary) -> str:
-    """Render a period summary as a small standalone HTML document."""
+def _metric_table(items, caption: str) -> str:
     rows = "\n".join(
         f"<tr><td>{html.escape(v['label'])}</td>"
         f"<td style='text-align:right'>{_fmt(v['value'], v['unit'])}</td>"
         f"<td>{html.escape(v['unit'])}</td></tr>"
-        for v in summary.values.values()
+        for v in items
     )
+    return (
+        f"<h2>{html.escape(caption)}</h2>"
+        f"<table border='1' cellpadding='4' cellspacing='0'>"
+        f"<thead><tr><th>Metric</th><th>Value</th><th>Unit</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+
+
+def render_summary_html(summary: PeriodSummary) -> str:
+    """Render a period summary as a small standalone HTML document.
+
+    Two tables: the *reported* line items and the *derived* metrics (total debt,
+    EBITDA, leverage and other ratios computed from them).
+    """
     pub = summary.publication_date.isoformat() if summary.publication_date else "n/a"
     end = summary.period_end.isoformat() if summary.period_end else "n/a"
     title = f"{summary.company} — {summary.period_label} financial summary"
+    reported = _metric_table(summary.values.values(), "Reported figures")
+    derived = summary.derived
+    derived_tbl = (
+        _metric_table(
+            (derived[k] for k in DERIVED_BY_KEY if k in derived),
+            "Derived metrics (computed)",
+        )
+        if derived else ""
+    )
     return (
         f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title></head>"
         f"<body><h1>{html.escape(title)}</h1>"
@@ -277,21 +521,31 @@ def render_summary_html(summary: PeriodSummary) -> str:
         f"<b>Publication date (filed): {pub}</b><br>"
         f"Source form: {html.escape(summary.sec_form)} — accession {html.escape(summary.accession)}<br>"
         f"Data: SEC XBRL company facts (us-gaap)</p>"
-        f"<table border='1' cellpadding='4' cellspacing='0'>"
-        f"<thead><tr><th>Metric</th><th>Value</th><th>Unit</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table></body></html>"
+        f"{reported}{derived_tbl}</body></html>"
     )
 
 
 def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
-    """Flatten a period summary into queryable rows for data/financials/<cik>.jsonl."""
-    return [
-        {
-            "cik": cik, "fy": summary.fy, "frequency": summary.frequency,
-            "period_end": summary.period_end.isoformat() if summary.period_end else None,
-            "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
-            "sec_form": summary.sec_form, "accession": summary.accession,
-            "concept": key, "label": v["label"], "value": v["value"], "unit": v["unit"],
-        }
+    """Flatten a period summary into queryable rows for data/financials/<cik>.jsonl.
+
+    Emits both ``kind="reported"`` rows (raw XBRL concepts) and ``kind="derived"``
+    rows (computed ratios/aggregates), so leverage, EBITDA, total debt, etc. are
+    queryable alongside the line items they came from.
+    """
+    base = {
+        "cik": cik, "fy": summary.fy, "frequency": summary.frequency,
+        "period_end": summary.period_end.isoformat() if summary.period_end else None,
+        "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
+        "sec_form": summary.sec_form, "accession": summary.accession,
+    }
+    rows = [
+        {**base, "kind": "reported", "concept": key,
+         "label": v["label"], "value": v["value"], "unit": v["unit"]}
         for key, v in summary.values.items()
     ]
+    rows += [
+        {**base, "kind": "derived", "concept": key,
+         "label": v["label"], "value": v["value"], "unit": v["unit"]}
+        for key, v in summary.derived.items()
+    ]
+    return rows

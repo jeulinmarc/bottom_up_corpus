@@ -162,6 +162,59 @@ SAMPLE_FACTS = {
             {"end": "2023-09-30", "val": 352583000000,
              "accn": "acc-amend", "fy": 2023, "fp": "FY", "form": "10-K/A", "filed": "2024-02-01"},
         ]}},
+        # Inputs for the derived block (total debt / EBITDA / FCF / leverage).
+        "GrossProfit": {"label": "Gross profit", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 169148000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "OperatingIncomeLoss": {"label": "Operating income", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 114301000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "DepreciationDepletionAndAmortization": {"label": "D&A", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 11519000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "InterestExpense": {"label": "Interest expense", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 3933000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "IncomeTaxExpenseBenefit": {"label": "Income tax", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 16741000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": {
+            "label": "Pretax income", "units": {"USD": [
+                {"start": "2022-10-01", "end": "2023-09-30", "val": 113736000000,
+                 "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "NetCashProvidedByUsedInOperatingActivities": {"label": "CFO", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 110543000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "PaymentsToAcquirePropertyPlantAndEquipment": {"label": "Capex", "units": {"USD": [
+            {"start": "2022-10-01", "end": "2023-09-30", "val": 10959000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "LongTermDebtNoncurrent": {"label": "LT debt", "units": {"USD": [
+            {"end": "2023-09-30", "val": 95281000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "LongTermDebtCurrent": {"label": "LT debt current", "units": {"USD": [
+            {"end": "2023-09-30", "val": 9822000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "CommercialPaper": {"label": "Commercial paper", "units": {"USD": [
+            {"end": "2023-09-30", "val": 5985000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "StockholdersEquity": {"label": "Equity", "units": {"USD": [
+            {"end": "2023-09-30", "val": 62146000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "AssetsCurrent": {"label": "Current assets", "units": {"USD": [
+            {"end": "2023-09-30", "val": 143566000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "LiabilitiesCurrent": {"label": "Current liabilities", "units": {"USD": [
+            {"end": "2023-09-30", "val": 145308000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "InventoryNet": {"label": "Inventory", "units": {"USD": [
+            {"end": "2023-09-30", "val": 6331000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "CashAndCashEquivalentsAtCarryingValue": {"label": "Cash", "units": {"USD": [
+            {"end": "2023-09-30", "val": 29965000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
+        "ShortTermInvestments": {"label": "ST investments", "units": {"USD": [
+            {"end": "2023-09-30", "val": 31590000000,
+             "accn": "acc-fy23", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2023-11-01"}]}},
     }},
 }
 
