@@ -143,6 +143,45 @@ def test_annual_only_ratios_present_for_annual_periods():
     assert "net_debt_to_ebitda" in compute_derived(_full_inputs())
 
 
+def test_reporting_currency_defaults_and_ties():
+    from bottom_up_corpus.financials import reporting_currency
+    assert reporting_currency({}) is None
+    # Tie between two currencies breaks towards USD.
+    assert reporting_currency({"a": [{"unit": "USD"}], "b": [{"unit": "EUR"}]}) == "USD"
+    # Non-monetary units are not currencies.
+    assert reporting_currency({"a": [{"unit": "USD/shares"}, {"unit": "shares"}]}) is None
+
+
+def test_currency_filter_ignores_convenience_translation():
+    from bottom_up_corpus.financials import (
+        build_period_summaries,
+        flatten_points,
+        reporting_currency,
+    )
+
+    def dur(val, filed):
+        return {"start": "2022-01-01", "end": "2022-12-31", "val": val,
+                "accn": "a", "fy": 2022, "fp": "FY", "form": "20-F", "filed": filed}
+
+    facts = {"facts": {"us-gaap": {
+        "Revenues": {"label": "Revenue", "units": {
+            "EUR": [dur(1000, "2023-01-01")],
+            "USD": [dur(1100, "2023-06-01")],  # later-filed convenience translation
+        }},
+        "OperatingIncomeLoss": {"label": "OI", "units": {"EUR": [dur(200, "2023-01-01")]}},
+        "NetIncomeLoss": {"label": "NI", "units": {"EUR": [dur(150, "2023-01-01")]}},
+    }}}
+    # EUR dominates (3 facts vs 1), so it is the reporting currency.
+    assert reporting_currency(flatten_points(facts)) == "EUR"
+    fy = next(x for x in build_period_summaries(facts, company="X", company_current="X")
+              if x.frequency == "annual")
+    # The later USD value must NOT win over the primary EUR fact (no currency mix).
+    assert fy.values["revenue"]["value"] == 1000
+    assert fy.values["revenue"]["unit"] == "EUR"
+    # Margins stay currency-invariant (EUR/EUR): net margin = 150/1000 = 15%.
+    assert fy.derived["net_margin"]["value"] == pytest.approx(15.0)
+
+
 def test_derived_omits_metrics_with_missing_inputs():
     # A bare period with no debt/EBITDA inputs yields no leverage metrics.
     from bottom_up_corpus.financials import compute_derived

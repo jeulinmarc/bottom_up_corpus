@@ -19,9 +19,14 @@ are resolved by taking the latest ``filed``.
 from __future__ import annotations
 
 import html
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
+
+# A bare ISO-4217 currency unit (e.g. "USD", "EUR"), as opposed to composite or
+# non-monetary XBRL units like "USD/shares", "shares" or "pure".
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 @dataclass(frozen=True)
@@ -373,6 +378,37 @@ def _points_for(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
     return []
 
 
+def reporting_currency(flat: dict[str, list[dict]]) -> str | None:
+    """The issuer's dominant monetary currency (most frequent currency unit).
+
+    A filer reports its monetary facts in a single functional currency, but the
+    feed can also carry convenience translations (e.g. a USD value alongside the
+    primary EUR one). Ties break towards USD. Returns None if there are no
+    monetary facts at all.
+    """
+    counts: Counter[str] = Counter()
+    for points in flat.values():
+        for p in points:
+            unit = p.get("unit", "")
+            if _CURRENCY_RE.match(unit):
+                counts[unit] += 1
+    if not counts:
+        return None
+    return max(counts, key=lambda u: (counts[u], u == "USD"))
+
+
+def _currency_filtered(points: list[dict], concept: Concept, currency: str | None) -> list[dict]:
+    """Drop monetary points not in the issuer's reporting currency.
+
+    Without this, a EUR fact (or a stray convenience translation) would be summed
+    and divided alongside USD facts as if it were USD. Non-monetary concepts
+    (per-share, share counts) and currency-less feeds pass through untouched.
+    """
+    if currency is None or concept.unit != "USD":
+        return points
+    return [p for p in points if p.get("unit") == currency]
+
+
 def _classify_frequency(days: int) -> str | None:
     """Map a duration (days) to a reporting frequency, or None if non-standard.
 
@@ -408,6 +444,7 @@ def build_period_summaries(
     ``name_for_date(d)`` optionally supplies the point-in-time issuer name.
     """
     flat = flatten_points(facts)
+    currency = reporting_currency(flat)
 
     # Duration facts -> (period_end, frequency) -> concept -> [points]
     duration: dict[tuple[date, str], dict[str, list[dict]]] = {}
@@ -416,7 +453,7 @@ def build_period_summaries(
     freqs_seen: set[str] = set()
 
     for concept in CONCEPTS:
-        for p in _points_for(concept, flat):
+        for p in _currency_filtered(_points_for(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             if not end:
                 continue
