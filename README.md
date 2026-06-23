@@ -165,6 +165,9 @@ python -m bottom_up_corpus --data-dir /data/corpus --contact you@example.com dis
   (default: `./data`). Use it to target a corpus outside the working directory.
 - `--contact EMAIL` — contact for the SEC `User-Agent`; overrides
   `$BOTTOM_UP_CORPUS_CONTACT`.
+- `--insecure` — disable TLS certificate verification. Use **only** behind a
+  trusted SSL-inspection proxy (e.g. a corporate network that re-signs HTTPS); it
+  turns off certificate validation for every request.
 
 Inspection:
 
@@ -321,8 +324,11 @@ The corpus plugs into the RAG stack (`mvp-graph-rag` / `eigenmind`) via
 text fallback). The full contract + the ready-to-paste orchestrator connector are
 in [`docs/INGESTION_RAG.md`](docs/INGESTION_RAG.md).
 
-Still to come: XBRL structured financials (`xbrl`) and the full international
-source adapters (EDINET, DART, ESEF, …).
+SEC EDGAR coverage is complete — narrative families A–D, ownership (E), and
+structured XBRL financials (F1) all flow end-to-end. Still to come: the
+international source adapters (Japan EDINET, Korea DART, EU ESEF / filings.xbrl.org,
+UK Companies House, France INPI, Brazil CVM), each mapping to the same
+`FilingRecord` schema.
 
 ## SEC fair access
 
