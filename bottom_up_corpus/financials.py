@@ -194,7 +194,9 @@ def _num(values: dict, key: str) -> float | None:
     return None
 
 
-def compute_derived(values: dict[str, dict], frequency: str = "annual") -> dict[str, dict]:
+def compute_derived(
+    values: dict[str, dict], frequency: str = "annual", currency: str = "USD"
+) -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
     Each metric is emitted only when all of its required inputs are present, so
@@ -221,7 +223,14 @@ def compute_derived(values: dict[str, dict], frequency: str = "annual") -> dict[
         d = DERIVED_BY_KEY[key]
         if d.annual_only and frequency != "annual":  # stock/flow ratio: annual only
             return
-        out[key] = {"value": val, "unit": d.unit, "label": d.label}
+        # Monetary units carry the issuer's reporting currency; ratios (%, x) don't.
+        if d.unit == "USD":
+            unit = currency
+        elif d.unit == "USD/shares":
+            unit = f"{currency}/shares"
+        else:
+            unit = d.unit
+        out[key] = {"value": val, "unit": unit, "label": d.label}
 
     def div(a: float | None, b: float | None) -> float | None:
         if a is None or b is None or b == 0:
@@ -324,6 +333,7 @@ class PeriodSummary:
     company_current: str
     # key -> {"value", "unit", "label"}
     values: dict[str, dict] = field(default_factory=dict)
+    currency: str = "USD"          # issuer's monetary reporting currency
 
     @property
     def fy(self) -> int | None:
@@ -341,7 +351,7 @@ class PeriodSummary:
     @property
     def derived(self) -> dict[str, dict]:
         """Computed ratios/aggregates (total debt, EBITDA, leverage, ...)."""
-        return compute_derived(self.values, self.frequency)
+        return compute_derived(self.values, self.frequency, self.currency)
 
 
 def _to_date(value: str | None) -> date | None:
@@ -510,6 +520,7 @@ def build_period_summaries(
             sec_form=first.get("form") or "XBRL",
             accession=first.get("accn") or f"XBRL-{end.isoformat()}-{freq}",
             company=pit or company, company_current=company_current, values=values,
+            currency=currency or "USD",
         ))
 
     summaries.sort(key=lambda s: (s.period_end or date.min, s.frequency), reverse=True)
@@ -519,7 +530,7 @@ def build_period_summaries(
 def _fmt(value, unit: str) -> str:
     if not isinstance(value, (int, float)):
         return html.escape(str(value))
-    if unit == "USD/shares":
+    if unit.endswith("/shares"):  # any currency per share, e.g. USD/shares, EUR/shares
         return f"{value:,.2f}"
     if unit == "shares":
         return f"{value:,.0f}"
@@ -527,7 +538,7 @@ def _fmt(value, unit: str) -> str:
         return f"{value:,.1f}%"
     if unit == "x":
         return f"{value:,.2f}x"
-    return f"{value:,.0f}"
+    return f"{value:,.0f}"  # monetary (whole units of the reporting currency)
 
 
 def _metric_table(items, caption: str) -> str:
@@ -585,6 +596,7 @@ def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
     """
     base = {
         "cik": cik, "fy": summary.fy, "frequency": summary.frequency,
+        "currency": summary.currency,
         "period_end": summary.period_end.isoformat() if summary.period_end else None,
         "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
         "sec_form": summary.sec_form, "accession": summary.accession,

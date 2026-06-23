@@ -178,8 +178,36 @@ def test_currency_filter_ignores_convenience_translation():
     # The later USD value must NOT win over the primary EUR fact (no currency mix).
     assert fy.values["revenue"]["value"] == 1000
     assert fy.values["revenue"]["unit"] == "EUR"
+    assert fy.currency == "EUR"
     # Margins stay currency-invariant (EUR/EUR): net margin = 150/1000 = 15%.
     assert fy.derived["net_margin"]["value"] == pytest.approx(15.0)
+    assert fy.derived["net_margin"]["unit"] == "%"  # ratio: no currency
+
+
+def test_derived_rows_carry_reporting_currency():
+    # A USD issuer's derived monetary rows stay USD; ratios stay %/x.
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    assert fy.currency == "USD"
+    assert fy.derived["total_debt"]["unit"] == "USD"
+    assert fy.derived["net_debt_to_ebitda"]["unit"] == "x"
+    # normalized_rows surface the currency explicitly on every row.
+    rows = normalized_rows("0000320193", fy)
+    assert all(r["currency"] == "USD" for r in rows)
+
+
+def test_compute_derived_relabels_units_for_foreign_currency():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {
+        "revenue": {"value": 100.0, "unit": "EUR", "label": ""},
+        "operating_income": {"value": 20.0, "unit": "EUR", "label": ""},
+        "equity": {"value": 200.0, "unit": "EUR", "label": ""},
+        "long_term_debt": {"value": 50.0, "unit": "EUR", "label": ""},
+        "shares_outstanding": {"value": 10.0, "unit": "shares", "label": ""},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["total_debt"]["unit"] == "EUR"            # monetary -> currency
+    assert d["book_value_per_share"]["unit"] == "EUR/shares"  # per-share -> ccy/shares
+    assert d["debt_to_equity"]["unit"] == "x"          # ratio unchanged
 
 
 def test_derived_omits_metrics_with_missing_inputs():
