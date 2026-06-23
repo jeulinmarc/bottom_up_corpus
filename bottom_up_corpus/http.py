@@ -10,6 +10,7 @@ Parallels ``cb_corpus.http``. Provides a small :class:`Fetcher` that:
 
 from __future__ import annotations
 
+import random
 import time
 from urllib.parse import urlsplit
 
@@ -73,12 +74,33 @@ class Fetcher:
             except (requests.RequestException, requests.HTTPError) as exc:
                 last_exc = exc
                 if attempt < self.config.max_retries:
-                    time.sleep(2 ** attempt)  # 1s, 2s, 4s, ...
+                    time.sleep(self._backoff_seconds(attempt, exc))
                     continue
                 raise
         # Unreachable, but keeps type-checkers happy.
         assert last_exc is not None
         raise last_exc
+
+    _BACKOFF_CAP_SECONDS = 30.0
+
+    def _backoff_seconds(self, attempt: int, exc: Exception) -> float:
+        """How long to wait before the next retry.
+
+        Honors a server ``Retry-After`` (delta-seconds form) when present --
+        EDGAR sends it on 429/503 -- otherwise exponential backoff (2**attempt),
+        capped and jittered (50-100%) so concurrent clients hitting the same
+        throttle don't retry in lockstep (thundering herd).
+        """
+        resp = getattr(exc, "response", None)
+        headers = getattr(resp, "headers", None)
+        retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+        if retry_after:
+            try:
+                return max(0.0, float(retry_after))
+            except (TypeError, ValueError):
+                pass  # HTTP-date form is not parsed; fall through to backoff
+        base = min(2.0 ** attempt, self._BACKOFF_CAP_SECONDS)
+        return base * (0.5 + random.random() * 0.5)
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         """Fetch and decode a text body."""
