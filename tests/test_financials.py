@@ -104,6 +104,82 @@ def test_derived_ratios():
     assert d["ebitda_margin"]["unit"] == "%"
     assert d["effective_tax_rate"]["value"] == pytest.approx(16741000000 / 113736000000 * 100)
     assert d["interest_coverage"]["value"] == pytest.approx(114301000000 / 3933000000)
+    # Label must reflect the actual numerator (operating income), not EBIT.
+    assert "EBIT" not in d["interest_coverage"]["label"]
+    assert "income" in d["interest_coverage"]["label"]
+
+
+def _full_inputs():
+    # Minimal inputs that yield both stock/flow ratios and stock/stock + flow/flow ones.
+    def v(x):
+        return {"value": float(x), "unit": "USD", "label": ""}
+    return {
+        "revenue": v(100), "operating_income": v(20), "net_income": v(10),
+        "equity": v(200), "assets": v(400), "cash": v(30),
+        "long_term_debt": v(50), "dep_amort": v(5),
+    }
+
+
+def test_annual_only_ratios_suppressed_for_sub_annual_periods():
+    # net_debt/EBITDA and asset turnover divide a balance-sheet stock by a flow,
+    # so a quarterly value would be ~4x off -- they must not be emitted.
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_full_inputs(), frequency="quarterly")
+    assert "net_debt_to_ebitda" not in d
+    assert "asset_turnover" not in d
+    # Stock/stock and flow/flow ratios are still meaningful sub-annually.
+    assert d["debt_to_equity"]["value"] == pytest.approx(50 / 200)
+    assert d["ebitda_margin"]["value"] == pytest.approx(25 / 100 * 100)
+    # Same gate applies to semi-annual periods.
+    assert "net_debt_to_ebitda" not in compute_derived(_full_inputs(), frequency="semi-annual")
+
+
+def test_annual_only_ratios_present_for_annual_periods():
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_full_inputs(), frequency="annual")
+    assert d["net_debt_to_ebitda"]["value"] == pytest.approx((50 - 30) / (20 + 5))
+    assert d["asset_turnover"]["value"] == pytest.approx(100 / 400)
+    # Default frequency is annual, preserving the previous call signature behavior.
+    assert "net_debt_to_ebitda" in compute_derived(_full_inputs())
+
+
+def test_reporting_currency_defaults_and_ties():
+    from bottom_up_corpus.financials import reporting_currency
+    assert reporting_currency({}) is None
+    # Tie between two currencies breaks towards USD.
+    assert reporting_currency({"a": [{"unit": "USD"}], "b": [{"unit": "EUR"}]}) == "USD"
+    # Non-monetary units are not currencies.
+    assert reporting_currency({"a": [{"unit": "USD/shares"}, {"unit": "shares"}]}) is None
+
+
+def test_currency_filter_ignores_convenience_translation():
+    from bottom_up_corpus.financials import (
+        build_period_summaries,
+        flatten_points,
+        reporting_currency,
+    )
+
+    def dur(val, filed):
+        return {"start": "2022-01-01", "end": "2022-12-31", "val": val,
+                "accn": "a", "fy": 2022, "fp": "FY", "form": "20-F", "filed": filed}
+
+    facts = {"facts": {"us-gaap": {
+        "Revenues": {"label": "Revenue", "units": {
+            "EUR": [dur(1000, "2023-01-01")],
+            "USD": [dur(1100, "2023-06-01")],  # later-filed convenience translation
+        }},
+        "OperatingIncomeLoss": {"label": "OI", "units": {"EUR": [dur(200, "2023-01-01")]}},
+        "NetIncomeLoss": {"label": "NI", "units": {"EUR": [dur(150, "2023-01-01")]}},
+    }}}
+    # EUR dominates (3 facts vs 1), so it is the reporting currency.
+    assert reporting_currency(flatten_points(facts)) == "EUR"
+    fy = next(x for x in build_period_summaries(facts, company="X", company_current="X")
+              if x.frequency == "annual")
+    # The later USD value must NOT win over the primary EUR fact (no currency mix).
+    assert fy.values["revenue"]["value"] == 1000
+    assert fy.values["revenue"]["unit"] == "EUR"
+    # Margins stay currency-invariant (EUR/EUR): net margin = 150/1000 = 15%.
+    assert fy.derived["net_margin"]["value"] == pytest.approx(15.0)
 
 
 def test_derived_omits_metrics_with_missing_inputs():

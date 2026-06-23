@@ -295,6 +295,7 @@ def fetch_financials(
     ciks: Iterable[str],
     *,
     since_year: int | None = None,
+    until_year: int | None = None,
     dry_run: bool = True,
     config: Config | None = None,
     fetcher: Fetcher | None = None,
@@ -317,7 +318,8 @@ def fetch_financials(
     report = FinancialsReport(issuers=len(cik_list))
     for cik in cik_list:
         source = EdgarXBRL(fetcher=fetcher, config=config)
-        facts, summaries = source.period_summaries(cik, since_year=since_year)
+        facts, summaries = source.period_summaries(
+            cik, since_year=since_year, until_year=until_year)
         report.errors.extend(source.errors)
         if not facts or not summaries:
             continue

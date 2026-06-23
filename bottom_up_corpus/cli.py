@@ -71,6 +71,20 @@ def _add_period_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--until", default=None, help="end date filter (YYYY-MM-DD)")
 
 
+def _config(args: argparse.Namespace) -> Config:
+    """Build a Config, honoring the top-level --data-dir / --contact overrides.
+
+    Both default to None on the namespace, so an unset flag falls through to the
+    Config defaults (``./data`` and the BOTTOM_UP_CORPUS_CONTACT env var).
+    """
+    kw: dict = {}
+    if getattr(args, "data_dir", None):
+        kw["data_dir"] = args.data_dir
+    if getattr(args, "contact", None):
+        kw["contact"] = args.contact
+    return Config(**kw)
+
+
 def _ciks_for(args: argparse.Namespace, config: Config) -> list[str]:
     """Resolve the CIK set from --ciks or --universe."""
     if getattr(args, "ciks", None):
@@ -94,7 +108,7 @@ def _cmd_list_forms(args: argparse.Namespace) -> int:
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     print(f"version           : {__version__}")
     print(f"data_dir          : {cfg.data_dir}")
     print(f"user_agent        : {cfg.user_agent}")
@@ -113,7 +127,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_build_universe(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     fetcher = Fetcher(cfg)
 
     if getattr(args, "index", None):
@@ -171,7 +185,7 @@ def _cmd_build_universe(args: argparse.Namespace) -> int:
 
 
 def _cmd_list_universe(args: argparse.Namespace) -> int:
-    uni = Universe(Config())
+    uni = Universe(_config(args))
     if not args.name:
         names = uni.names()
         print("universes:", ", ".join(names) if names else "(none)")
@@ -184,11 +198,13 @@ def _cmd_list_universe(args: argparse.Namespace) -> int:
 
 
 def _cmd_discover(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms)
-    years = _parse_years(args.years)
-    since = date(min(years), 1, 1) if years else None
+    year_min, year_max, since, until = _period_args(args)
+    # Discovery takes a single lower-bound date: prefer an explicit --since, else
+    # the --years lower bound, else the documented last-20-years default.
+    disc_since = since or date(min(_parse_years(args.years)), 1, 1)
     dry_run = not args.write
 
     # --download implies persisting the manifest (records must exist on disk).
@@ -198,7 +214,7 @@ def _cmd_discover(args: argparse.Namespace) -> int:
     report = discover_universe(
         ciks,
         scope=scope,
-        since=since,
+        since=disc_since,
         dry_run=dry_run,
         max_rounds=args.rounds,
         config=cfg,
@@ -211,8 +227,12 @@ def _cmd_discover(args: argparse.Namespace) -> int:
         print(f"  discovery errors: {len(report.errors)} (see discovery_errors.jsonl)")
 
     if args.download:
+        # Use the same period filter as the standalone `download` command: bounds
+        # are applied only when --years/--since/--until were given (no implicit
+        # 20-year cap that would silently skip in-scope filings).
         dl = download_universe(
-            ciks, scope=scope, year_min=min(years), year_max=max(years),
+            ciks, scope=scope, year_min=year_min, year_max=year_max,
+            since=since, until=until,
             dry_run=False, overwrite=args.overwrite, limit=args.limit, config=cfg,
         )
         print(f"download — got={dl.downloaded} skipped={dl.skipped} errors={dl.errors} "
@@ -221,7 +241,7 @@ def _cmd_discover(args: argparse.Namespace) -> int:
 
 
 def _cmd_download(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms)
     year_min, year_max, since, until = _period_args(args)
@@ -239,7 +259,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
 
 
 def _cmd_render_pdf(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms)
     year_min, year_max, since, until = _period_args(args)
@@ -261,12 +281,14 @@ def _cmd_render_pdf(args: argparse.Namespace) -> int:
 
 
 def _cmd_xbrl(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = _ciks_for(args, cfg)
     years = _parse_years(args.years) if args.years else None
     since_year = min(years) if years else None
+    until_year = max(years) if years else None
     dry_run = not args.write
-    rep = fetch_financials(ciks, since_year=since_year, dry_run=dry_run, config=cfg)
+    rep = fetch_financials(ciks, since_year=since_year, until_year=until_year,
+                           dry_run=dry_run, config=cfg)
     mode = "DRY-RUN (nothing written)" if dry_run else "WROTE"
     s = rep.stats
     print(f"xbrl [{mode}] — {rep.issuers} issuers, {rep.periods} period summaries (F1)")
@@ -277,7 +299,7 @@ def _cmd_xbrl(args: argparse.Namespace) -> int:
 
 
 def _cmd_ownership(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms) if args.forms else None
     year_min, year_max, since, until = _period_args(args)
@@ -295,7 +317,7 @@ def _cmd_ownership(args: argparse.Namespace) -> int:
 
 
 def _cmd_rag_items(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = None
     if args.universe:
         ciks = list(Universe(cfg).iter_ciks(args.universe))
@@ -316,7 +338,7 @@ def _cmd_rag_items(args: argparse.Namespace) -> int:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     ciks = _ciks_for(args, cfg)
     scope = parse_scope(args.forms)
     years = _parse_years(args.years)
@@ -334,7 +356,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
 
 def _cmd_entities(args: argparse.Namespace) -> int:
-    reg = EntityRegistry(Config()).load()
+    reg = EntityRegistry(_config(args)).load()
     if args.cik:
         ent = reg.resolve(args.cik)
         if ent:
@@ -353,7 +375,7 @@ def _cmd_entities(args: argparse.Namespace) -> int:
 
 
 def _cmd_discover_index(args: argparse.Namespace) -> int:
-    cfg = Config()
+    cfg = _config(args)
     scope = parse_scope(args.forms)
     years = _parse_years(args.years)
     reg = EntityRegistry(cfg).load()
@@ -396,6 +418,10 @@ def _cmd_discover_index(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bottom_up_corpus")
     p.add_argument("--version", action="version", version=f"bottom_up_corpus {__version__}")
+    p.add_argument("--data-dir", default=None, dest="data_dir",
+                   help="corpus root holding manifest/, raw/, … (default: ./data)")
+    p.add_argument("--contact", default=None,
+                   help="contact for the SEC User-Agent (overrides $BOTTOM_UP_CORPUS_CONTACT)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     lf = sub.add_parser("list-forms", help="show the filing taxonomy (families A-F)")
@@ -439,6 +465,8 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--ciks", help="comma-separated CIKs to crawl")
     di.add_argument("--forms", default=None, help="scope selector (default: narrative A-D)")
     di.add_argument("--years", default=None, help="year filter, e.g. 2006-2025 (default: last 20)")
+    di.add_argument("--since", default=None, help="start date for the --download step (YYYY-MM-DD)")
+    di.add_argument("--until", default=None, help="end date for the --download step (YYYY-MM-DD)")
     di.add_argument("--rounds", type=int, default=1, help="max convergence rounds")
     di.add_argument("--write", action="store_true", help="persist manifests (else dry-run)")
     di.add_argument("--download", action="store_true", help="also download+decompose (implies --write)")
@@ -481,7 +509,8 @@ def build_parser() -> argparse.ArgumentParser:
     xbsrc = xb.add_mutually_exclusive_group(required=True)
     xbsrc.add_argument("--universe", help="universe name")
     xbsrc.add_argument("--ciks", help="comma-separated CIKs")
-    xb.add_argument("--years", default=None, help="keep periods with fiscal year >= min(years)")
+    xb.add_argument("--years", default=None,
+                    help="keep periods whose fiscal year is in this range, e.g. 2015-2025 or 2024")
     xb.add_argument("--write", action="store_true", help="persist summaries+facts (else dry-run)")
     xb.set_defaults(func=_cmd_xbrl)
 

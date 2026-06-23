@@ -84,6 +84,24 @@ class EntityRegistry:
         return self
 
     def add(self, entity: Entity) -> None:
+        """Register an entity, rejecting conflicts in this trust-root map.
+
+        The alias map is hand-maintained, committed data and is the anchor for
+        cross-CIK joins, so a duplicate ``entity_id`` or a CIK claimed by two
+        different entities is a data error that must fail loudly rather than
+        silently overwrite (last-write-wins) and corrupt attribution.
+        """
+        if entity.entity_id in self._by_id:
+            raise ValueError(
+                f"duplicate entity_id {entity.entity_id!r} in alias map {self.name!r}"
+            )
+        for cik in entity.ciks:
+            prior = self._by_cik.get(cik)
+            if prior is not None and prior.entity_id != entity.entity_id:
+                raise ValueError(
+                    f"CIK {cik} is claimed by both {prior.entity_id!r} and "
+                    f"{entity.entity_id!r} in alias map {self.name!r}"
+                )
         self._by_id[entity.entity_id] = entity
         for cik in entity.ciks:
             self._by_cik[cik] = entity

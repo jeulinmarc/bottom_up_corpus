@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from bottom_up_corpus.models import FilingRecord
 from bottom_up_corpus.storage import Storage
 from bottom_up_corpus.taxonomy import FormType
@@ -68,3 +70,25 @@ def test_record_errors_appends(config):
     n = st.record_errors([{"source": "x", "context": "c", "url": "u", "error": "boom"}])
     assert n == 1
     assert config.discovery_errors_path.exists()
+
+
+def test_write_leaves_no_tmp_file(config):
+    st = Storage(config)
+    st.save_records([_rec()], dry_run=False)
+    path = config.manifest_file("320193")
+    # The atomic write must not leave the staging sibling behind.
+    assert not path.with_name(path.name + ".tmp").exists()
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_load_manifest_skips_corrupt_line(config):
+    st = Storage(config)
+    st.save_records([_rec(), _rec(accession="0000320193-23-000106")], dry_run=False)
+    path = config.manifest_file("320193")
+    # Simulate a truncated/garbled row from an interrupted legacy write.
+    good = path.read_text(encoding="utf-8").splitlines()
+    path.write_text(good[0] + "\n{ this is not json\n" + good[1] + "\n", encoding="utf-8")
+    with pytest.warns(UserWarning, match="unparseable manifest row"):
+        loaded = st.load_manifest("320193")
+    # The two valid rows survive; only the corrupt one is dropped.
+    assert len(loaded) == 2

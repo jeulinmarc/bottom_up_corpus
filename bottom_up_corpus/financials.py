@@ -19,9 +19,14 @@ are resolved by taking the latest ``filed``.
 from __future__ import annotations
 
 import html
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
+
+# A bare ISO-4217 currency unit (e.g. "USD", "EUR"), as opposed to composite or
+# non-monetary XBRL units like "USD/shares", "shares" or "pure".
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,7 @@ class Derived:
     key: str
     label: str
     unit: str  # USD | USD/shares | x (multiple) | % (percent)
+    annual_only: bool = False  # ratio mixing a balance-sheet stock with a flow
 
 
 # Display order for the derived block. The aggregates (total debt, EBITDA, net
@@ -166,14 +172,14 @@ DERIVED: tuple[Derived, ...] = (
     # Leverage / coverage (multiples)
     Derived("debt_to_equity", "Debt / equity", "x"),
     Derived("debt_to_assets", "Debt / assets", "x"),
-    Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x"),
-    Derived("interest_coverage", "Interest coverage (EBIT/interest)", "x"),
+    Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x", annual_only=True),
+    Derived("interest_coverage", "Interest coverage (op. income / interest)", "x"),
     # Liquidity (multiples)
     Derived("current_ratio", "Current ratio", "x"),
     Derived("quick_ratio", "Quick ratio", "x"),
     Derived("cash_ratio", "Cash ratio", "x"),
     # Efficiency / per share
-    Derived("asset_turnover", "Asset turnover", "x"),
+    Derived("asset_turnover", "Asset turnover", "x", annual_only=True),
     Derived("book_value_per_share", "Book value per share", "USD/shares"),
 )
 
@@ -188,7 +194,7 @@ def _num(values: dict, key: str) -> float | None:
     return None
 
 
-def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
+def compute_derived(values: dict[str, dict], frequency: str = "annual") -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
     Each metric is emitted only when all of its required inputs are present, so
@@ -198,6 +204,14 @@ def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
     Margins, returns and the tax rate are expressed in percent; leverage,
     coverage and liquidity ratios as multiples (``x``). Returns are period-scoped
     (a quarterly summary's ROE is the quarter's, not annualised).
+
+    ``frequency`` is the period's reporting frequency (``annual`` |
+    ``quarterly`` | ``semi-annual``). Ratios that divide a balance-sheet *stock*
+    (an instant, e.g. net debt or total assets) by an income/cash-flow *flow*
+    over the period (``annual_only`` metrics) have no meaningful sub-annual value
+    -- a quarterly net-debt/EBITDA would be ~4x the annual figure -- so they are
+    emitted only for annual periods. (Computing a trailing-twelve-months variant
+    would need the prior three quarters, which this single-period view lacks.)
     """
     out: dict[str, dict] = {}
 
@@ -205,6 +219,8 @@ def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
         if val is None or (isinstance(val, float) and val != val):  # skip None/NaN
             return
         d = DERIVED_BY_KEY[key]
+        if d.annual_only and frequency != "annual":  # stock/flow ratio: annual only
+            return
         out[key] = {"value": val, "unit": d.unit, "label": d.label}
 
     def div(a: float | None, b: float | None) -> float | None:
@@ -325,7 +341,7 @@ class PeriodSummary:
     @property
     def derived(self) -> dict[str, dict]:
         """Computed ratios/aggregates (total debt, EBITDA, leverage, ...)."""
-        return compute_derived(self.values)
+        return compute_derived(self.values, self.frequency)
 
 
 def _to_date(value: str | None) -> date | None:
@@ -362,6 +378,37 @@ def _points_for(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
     return []
 
 
+def reporting_currency(flat: dict[str, list[dict]]) -> str | None:
+    """The issuer's dominant monetary currency (most frequent currency unit).
+
+    A filer reports its monetary facts in a single functional currency, but the
+    feed can also carry convenience translations (e.g. a USD value alongside the
+    primary EUR one). Ties break towards USD. Returns None if there are no
+    monetary facts at all.
+    """
+    counts: Counter[str] = Counter()
+    for points in flat.values():
+        for p in points:
+            unit = p.get("unit", "")
+            if _CURRENCY_RE.match(unit):
+                counts[unit] += 1
+    if not counts:
+        return None
+    return max(counts, key=lambda u: (counts[u], u == "USD"))
+
+
+def _currency_filtered(points: list[dict], concept: Concept, currency: str | None) -> list[dict]:
+    """Drop monetary points not in the issuer's reporting currency.
+
+    Without this, a EUR fact (or a stray convenience translation) would be summed
+    and divided alongside USD facts as if it were USD. Non-monetary concepts
+    (per-share, share counts) and currency-less feeds pass through untouched.
+    """
+    if currency is None or concept.unit != "USD":
+        return points
+    return [p for p in points if p.get("unit") == currency]
+
+
 def _classify_frequency(days: int) -> str | None:
     """Map a duration (days) to a reporting frequency, or None if non-standard.
 
@@ -387,6 +434,7 @@ def build_period_summaries(
     company_current: str,
     name_for_date=None,
     since_year: int | None = None,
+    until_year: int | None = None,
 ) -> list[PeriodSummary]:
     """Group curated concepts into one summary per actual reporting period.
 
@@ -397,6 +445,7 @@ def build_period_summaries(
     ``name_for_date(d)`` optionally supplies the point-in-time issuer name.
     """
     flat = flatten_points(facts)
+    currency = reporting_currency(flat)
 
     # Duration facts -> (period_end, frequency) -> concept -> [points]
     duration: dict[tuple[date, str], dict[str, list[dict]]] = {}
@@ -405,7 +454,7 @@ def build_period_summaries(
     freqs_seen: set[str] = set()
 
     for concept in CONCEPTS:
-        for p in _points_for(concept, flat):
+        for p in _currency_filtered(_points_for(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             if not end:
                 continue
@@ -433,6 +482,8 @@ def build_period_summaries(
         if freq not in allowed:
             continue
         if since_year is not None and end.year < since_year:
+            continue
+        if until_year is not None and end.year > until_year:
             continue
 
         values: dict[str, dict] = {}
