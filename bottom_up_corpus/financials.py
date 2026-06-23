@@ -168,7 +168,7 @@ DERIVED: tuple[Derived, ...] = (
     Derived("debt_to_equity", "Debt / equity", "x"),
     Derived("debt_to_assets", "Debt / assets", "x"),
     Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x", annual_only=True),
-    Derived("interest_coverage", "Interest coverage (EBIT/interest)", "x"),
+    Derived("interest_coverage", "Interest coverage (op. income / interest)", "x"),
     # Liquidity (multiples)
     Derived("current_ratio", "Current ratio", "x"),
     Derived("quick_ratio", "Quick ratio", "x"),

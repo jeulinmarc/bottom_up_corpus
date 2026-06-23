@@ -104,6 +104,9 @@ def test_derived_ratios():
     assert d["ebitda_margin"]["unit"] == "%"
     assert d["effective_tax_rate"]["value"] == pytest.approx(16741000000 / 113736000000 * 100)
     assert d["interest_coverage"]["value"] == pytest.approx(114301000000 / 3933000000)
+    # Label must reflect the actual numerator (operating income), not EBIT.
+    assert "EBIT" not in d["interest_coverage"]["label"]
+    assert "income" in d["interest_coverage"]["label"]
 
 
 def _full_inputs():
