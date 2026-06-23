@@ -114,6 +114,19 @@ def test_download_streams_with_download_timeout(cfg, tmp_path):
     assert sess.calls[0]["timeout"] == cfg.download_timeout  # hard deadline, not the 30s one
 
 
+def test_tls_verification_on_by_default(cfg):
+    sess = FakeSession([FakeResponse(text="ok")])
+    Fetcher(cfg, session=sess)
+    assert sess.verify is True
+
+
+def test_tls_verification_can_be_disabled():
+    cfg = Config(contact="test@example.com", verify_tls=False)
+    sess = FakeSession([FakeResponse(text="ok")])
+    Fetcher(cfg, session=sess)
+    assert sess.verify is False
+
+
 def test_retry_after_header_is_honored(monkeypatch):
     cfg = Config(contact="test@example.com", requests_per_second=0)  # no throttle sleep
     sleeps = []

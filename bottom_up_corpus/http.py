@@ -37,6 +37,14 @@ class Fetcher:
                 "Accept-Encoding": "gzip, deflate",
             }
         )
+        # TLS verification applies to every request on the session (incl. streamed
+        # downloads). Disable only behind a trusted MITM/SSL-inspection proxy.
+        self.session.verify = self.config.verify_tls
+        if not self.config.verify_tls:
+            # Otherwise urllib3 emits an InsecureRequestWarning on every request.
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         # Last-request timestamp per host, for spacing.
         self._last_request: dict[str, float] = {}
 

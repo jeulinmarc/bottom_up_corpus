@@ -55,6 +55,20 @@ def test_data_dir_flag_overrides_config(capsys, tmp_path):
     assert str(tmp_path) in out  # the override is reflected, not ./data
 
 
+def test_insecure_flag_disables_tls_verification(capsys):
+    rc = main(["--insecure", "config"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "verify_tls        : False" in out
+
+
+def test_tls_verification_on_by_default_in_config(capsys):
+    rc = main(["config"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "verify_tls        : True" in out
+
+
 def test_data_dir_threaded_into_pipeline(monkeypatch, tmp_path):
     captured: dict = {}
     monkeypatch.setattr("bottom_up_corpus.cli.discover_universe",

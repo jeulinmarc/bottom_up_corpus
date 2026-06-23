@@ -40,6 +40,7 @@ class Config:
     timeout: float = 30.0          # connect/read inactivity timeout
     download_timeout: float = 120.0  # hard deadline for a single body download
     max_retries: int = 3           # retries with exponential backoff (2**n s)
+    verify_tls: bool = True        # disable only behind a trusted SSL-inspection proxy
 
     # Storage behaviour.
     store_full_submission: bool = True  # keep the complete-submission .txt
