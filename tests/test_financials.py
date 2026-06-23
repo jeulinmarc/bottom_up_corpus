@@ -91,6 +91,10 @@ def test_derived_aggregates():
     assert d["net_debt"]["value"] == 111088000000 - 29965000000 - 31590000000
     # Free cash flow = CFO - capex.
     assert d["free_cash_flow"]["value"] == 110543000000 - 10959000000
+    # Integer-valued aggregates stay exact ints (no spurious .0 in the JSONL).
+    assert isinstance(d["total_debt"]["value"], int)
+    assert isinstance(d["net_debt"]["value"], int)
+    assert isinstance(d["ebitda"]["value"], int)
 
 
 def test_derived_ratios():

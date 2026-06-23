@@ -186,11 +186,26 @@ DERIVED: tuple[Derived, ...] = (
 DERIVED_BY_KEY = {d.key: d for d in DERIVED}
 
 
-def _num(values: dict, key: str) -> float | None:
-    """Numeric reported value for ``key``, or None if absent/non-numeric."""
+def _num(values: dict, key: str) -> float | int | None:
+    """Numeric reported value for ``key``, or None if absent/non-numeric.
+
+    Integral values are returned as ``int`` so monetary aggregates that only add
+    and subtract them (total debt, net debt, EBITDA, FCF) stay exact and serialize
+    without a spurious ``.0``. Integers up to 2**53 are exact in float64 anyway, so
+    this is about clean output, not lost precision -- a full Decimal conversion
+    would add JSON-serialization friction for no accuracy gain. Ratios still divide,
+    which yields float.
+    """
     v = values.get(key)
-    if v is not None and isinstance(v.get("value"), (int, float)):
-        return float(v["value"])
+    if v is None:
+        return None
+    val = v.get("value")
+    if isinstance(val, bool):  # bool is an int subclass but never a financial value
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val) if val.is_integer() else val
     return None
 
 
@@ -241,8 +256,8 @@ def compute_derived(
         r = div(a, b)
         return r * 100 if r is not None else None
 
-    def opt(key: str) -> float:  # additive component: missing -> 0
-        return _num(values, key) or 0.0
+    def opt(key: str) -> float | int:  # additive component: missing -> 0
+        return _num(values, key) or 0
 
     rev = _num(values, "revenue")
     oi = _num(values, "operating_income")
