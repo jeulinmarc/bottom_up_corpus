@@ -153,6 +153,19 @@ for a real contact, so set it before crawling.
 
 ## Usage
 
+### Global options
+
+These come **before** the subcommand and apply to every command:
+
+```bash
+python -m bottom_up_corpus --data-dir /data/corpus --contact you@example.com discover ...
+```
+
+- `--data-dir PATH` — corpus root holding `manifest/`, `raw/`, `universe/`, …
+  (default: `./data`). Use it to target a corpus outside the working directory.
+- `--contact EMAIL` — contact for the SEC `User-Agent`; overrides
+  `$BOTTOM_UP_CORPUS_CONTACT`.
+
 Inspection:
 
 ```bash
@@ -192,6 +205,9 @@ python -m bottom_up_corpus discover --universe sp_curated --years 2006-2025
 python -m bottom_up_corpus discover --universe sp_curated --years 2006-2025 --write --rounds 3
 # Or target specific CIKs / a wider scope (e.g. add ownership family E):
 python -m bottom_up_corpus discover --ciks 320193 --forms A,B,C,D,E --write
+# Discover then download in one step; --since/--until bound the download window
+# (otherwise it downloads everything discovered — no implicit year cap):
+python -m bottom_up_corpus discover --universe sp_curated --download --since 2015-01-01 --write
 # Exhaustive (incl. delisted/merged filers) via the quarterly full-index:
 python -m bottom_up_corpus discover-index --universe sp_curated --years 2006-2025 --write
 ```
@@ -256,6 +272,9 @@ reporting period (annual/quarterly) with its publication date:
 python -m bottom_up_corpus xbrl --universe sp_curated --years 2015-2025 --write
 ```
 
+`--years` is an inclusive fiscal-year range (`2015-2025`) or a single year
+(`2024`); omit it to keep every period.
+
 This fetches SEC XBRL company facts and writes, per issuer: the raw
 `companyfacts.json` (canonical), a normalized `data/financials/<cik>.jsonl`
 table, and an HTML financial summary per period. Each summary is an F1 record
@@ -272,7 +291,11 @@ FCF), returns (ROE/ROA), effective tax rate, leverage & coverage ratios
 (debt/equity, debt/assets, net debt/EBITDA, interest coverage) and liquidity
 ratios (current/quick/cash). A derived metric is emitted only when all of its
 inputs are present, so a missing component is never treated as zero. Returns are
-period-scoped (a quarter's ROE is the quarter's, not annualised).
+period-scoped (a quarter's ROE is the quarter's, not annualised), and ratios that
+divide a balance-sheet stock by a period flow (net debt/EBITDA, asset turnover)
+are emitted for annual periods only. Monetary values carry the issuer's reporting
+currency (each row also records a `currency` field), so a non-USD filer is not
+mislabelled as USD.
 
 Ownership filings (family E) — structured insider transactions and institutional
 holdings:
