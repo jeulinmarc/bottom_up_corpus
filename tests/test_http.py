@@ -15,11 +15,12 @@ from bottom_up_corpus.http import Fetcher
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, *, text="", json_data=None, chunks=None):
+    def __init__(self, status_code=200, *, text="", json_data=None, chunks=None, headers=None):
         self.status_code = status_code
         self._text = text
         self._json = json_data
         self._chunks = chunks or []
+        self.headers = headers or {}
         self.encoding = None
 
     def raise_for_status(self):
@@ -111,6 +112,28 @@ def test_download_streams_with_download_timeout(cfg, tmp_path):
     assert dest.read_bytes() == b"abcde"
     assert sess.calls[0]["stream"] is True
     assert sess.calls[0]["timeout"] == cfg.download_timeout  # hard deadline, not the 30s one
+
+
+def test_retry_after_header_is_honored(monkeypatch):
+    cfg = Config(contact="test@example.com", requests_per_second=0)  # no throttle sleep
+    sleeps = []
+    monkeypatch.setattr("bottom_up_corpus.http.time.sleep", lambda s: sleeps.append(s))
+    sess = FakeSession([FakeResponse(503, headers={"Retry-After": "7"}),
+                        FakeResponse(text="ok")])
+    f = Fetcher(cfg, session=sess)
+    assert f.get_text("https://www.sec.gov/a") == "ok"
+    assert sleeps == [7.0]  # server's delay used verbatim, not the backoff curve
+
+
+def test_backoff_is_jittered_within_bounds(monkeypatch):
+    cfg = Config(contact="test@example.com", requests_per_second=0)  # no throttle sleep
+    sleeps = []
+    monkeypatch.setattr("bottom_up_corpus.http.time.sleep", lambda s: sleeps.append(s))
+    sess = FakeSession([FakeResponse(503), FakeResponse(text="ok")])
+    f = Fetcher(cfg, session=sess)
+    f.get_text("https://www.sec.gov/a")
+    assert len(sleeps) == 1
+    assert 0.5 <= sleeps[0] <= 1.0  # attempt 0: base 1s, jittered to 50-100%
 
 
 def test_throttles_repeated_same_host(monkeypatch):
