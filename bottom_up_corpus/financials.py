@@ -426,12 +426,20 @@ def _currency_filtered(points: list[dict], concept: Concept, currency: str | Non
     """Drop monetary points not in the issuer's reporting currency.
 
     Without this, a EUR fact (or a stray convenience translation) would be summed
-    and divided alongside USD facts as if it were USD. Non-monetary concepts
-    (per-share, share counts) and currency-less feeds pass through untouched.
+    and divided alongside USD facts as if it were USD. Applies to both whole-currency
+    concepts (``USD`` -> the reporting currency) and per-share ones (``USD/shares`` ->
+    ``<ccy>/shares``), so a filer's reported EPS stays in the same currency as the
+    derived per-share metrics. Share counts and currency-less feeds pass through.
     """
-    if currency is None or concept.unit != "USD":
+    if currency is None:
         return points
-    return [p for p in points if p.get("unit") == currency]
+    if concept.unit == "USD":
+        want = currency
+    elif concept.unit == "USD/shares":
+        want = f"{currency}/shares"
+    else:  # non-monetary (shares, pure): nothing to normalize
+        return points
+    return [p for p in points if p.get("unit") == want]
 
 
 def _classify_frequency(days: int) -> str | None:

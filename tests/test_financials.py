@@ -174,6 +174,10 @@ def test_currency_filter_ignores_convenience_translation():
         }},
         "OperatingIncomeLoss": {"label": "OI", "units": {"EUR": [dur(200, "2023-01-01")]}},
         "NetIncomeLoss": {"label": "NI", "units": {"EUR": [dur(150, "2023-01-01")]}},
+        "EarningsPerShareBasic": {"label": "EPS", "units": {
+            "EUR/shares": [dur(1.5, "2023-01-01")],
+            "USD/shares": [dur(1.65, "2023-06-01")],  # per-share convenience translation
+        }},
     }}}
     # EUR dominates (3 facts vs 1), so it is the reporting currency.
     assert reporting_currency(flatten_points(facts)) == "EUR"
@@ -183,9 +187,20 @@ def test_currency_filter_ignores_convenience_translation():
     assert fy.values["revenue"]["value"] == 1000
     assert fy.values["revenue"]["unit"] == "EUR"
     assert fy.currency == "EUR"
+    # Per-share facts are filtered to the reporting currency too, so the reported
+    # EPS unit agrees with the derived per-share metrics (both EUR/shares).
+    assert fy.values["eps_basic"]["value"] == 1.5
+    assert fy.values["eps_basic"]["unit"] == "EUR/shares"
     # Margins stay currency-invariant (EUR/EUR): net margin = 150/1000 = 15%.
     assert fy.derived["net_margin"]["value"] == pytest.approx(15.0)
     assert fy.derived["net_margin"]["unit"] == "%"  # ratio: no currency
+
+
+def test_currency_propagates_to_every_frequency():
+    # The reporting currency is set for each PeriodSummary regardless of frequency.
+    by_freq = {x.frequency: x for x in _summaries()}
+    assert by_freq["annual"].currency == "USD"
+    assert by_freq["quarterly"].currency == "USD"
 
 
 def test_derived_rows_carry_reporting_currency():
