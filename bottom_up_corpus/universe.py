@@ -12,6 +12,7 @@ JSONL under ``data/universe/<name>.jsonl`` and committed to the repo.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -42,19 +43,40 @@ class Issuer:
 
 
 def load_company_tickers(fetcher: Fetcher) -> dict[str, Issuer]:
-    """Fetch the SEC ticker map; return ``{TICKER: Issuer}`` (upper-cased)."""
+    """Fetch the SEC ticker map; return ``{TICKER: Issuer}`` (upper-cased).
+
+    When a ticker maps to more than one CIK (rare, but possible across the SEC
+    feed), the lowest CIK wins -- a deterministic tie-break independent of the
+    feed's row order -- and a warning is emitted so the collision is visible
+    instead of silently resolving to whichever row happened to come last.
+    """
     data = fetcher.get_json(COMPANY_TICKERS_URL)
     # The map is keyed by arbitrary index strings: {"0": {cik_str, ticker, title}, ...}
     rows = data.values() if isinstance(data, dict) else data
     out: dict[str, Issuer] = {}
+    collisions: set[str] = set()
     for row in rows:
         ticker = str(row.get("ticker", "")).upper()
         if not ticker:
             continue
-        out[ticker] = Issuer(
+        issuer = Issuer(
             cik=normalize_cik(row["cik_str"]),
             ticker=ticker,
             company=row.get("title", ""),
+        )
+        existing = out.get(ticker)
+        if existing is None:
+            out[ticker] = issuer
+        elif existing.cik != issuer.cik:
+            collisions.add(ticker)
+            if issuer.cik < existing.cik:  # deterministic: lowest CIK wins
+                out[ticker] = issuer
+    if collisions:
+        sample = ", ".join(sorted(collisions)[:10])
+        warnings.warn(
+            f"company_tickers.json: {len(collisions)} ticker(s) map to multiple "
+            f"CIKs; kept the lowest CIK for each ({sample})",
+            stacklevel=2,
         )
     return out
 

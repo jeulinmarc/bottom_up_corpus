@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from bottom_up_corpus.universe import Issuer, Universe, resolve_ciks, resolve_tickers
+import pytest
+
+from bottom_up_corpus.universe import (
+    Issuer,
+    Universe,
+    load_company_tickers,
+    resolve_ciks,
+    resolve_tickers,
+)
 
 
 def test_resolve_tickers(apple_fetcher):
@@ -32,6 +40,33 @@ def test_universe_dedup_on_save(config):
     uni = Universe(config)
     uni.save("dup", [Issuer(cik="320193", ticker="AAPL"), Issuer(cik="320193", ticker="AAPL")])
     assert len(uni.load("dup")) == 1
+
+
+def test_load_company_tickers_collision_prefers_lowest_cik(make_fetcher):
+    # A ticker mapped to two different CIKs must resolve deterministically (lowest
+    # CIK), independent of feed order, and surface a warning -- not last-write-wins.
+    routes = {"company_tickers.json": {
+        "0": {"cik_str": 789019, "ticker": "DUP", "title": "Higher CIK first"},
+        "1": {"cik_str": 320193, "ticker": "DUP", "title": "Lower CIK second"},
+        "2": {"cik_str": 111, "ticker": "AAPL", "title": "Apple"},
+    }}
+    fetcher = make_fetcher(routes)
+    with pytest.warns(UserWarning, match="multiple"):
+        out = load_company_tickers(fetcher)
+    assert out["DUP"].cik == "0000320193"  # lowest CIK wins regardless of order
+    assert out["AAPL"].cik == "0000000111"
+
+
+def test_load_company_tickers_no_warning_when_clean(make_fetcher):
+    routes = {"company_tickers.json": {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        "1": {"cik_str": 789019, "ticker": "MSFT", "title": "MICROSOFT CORP"},
+    }}
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning would fail the test
+        out = load_company_tickers(make_fetcher(routes))
+    assert out["AAPL"].cik == "0000320193"
 
 
 def test_resolve_ciks_uses_submissions(apple_fetcher):

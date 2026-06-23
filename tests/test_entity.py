@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from bottom_up_corpus.entity import Entity, EntityRegistry
 
 
@@ -51,3 +53,35 @@ def test_missing_registry_is_empty(config):
     reg = EntityRegistry(config).load()  # no file written
     assert reg.entity_id_for("320193") == ""
     assert reg.expand("320193") == ["0000320193"]
+
+
+def test_duplicate_cik_across_entities_raises(config):
+    reg = EntityRegistry(config)
+    reg.add(Entity(entity_id="a", ciks=["111"]))
+    with pytest.raises(ValueError, match="claimed by both"):
+        reg.add(Entity(entity_id="b", ciks=["111"]))
+    # The rejected add left the registry unchanged (no partial mutation). Inspect
+    # internal state directly: a public query would lazy-reload from the (empty) file.
+    assert reg._by_cik["0000000111"].entity_id == "a"
+    assert "b" not in reg._by_id
+
+
+def test_duplicate_entity_id_raises(config):
+    reg = EntityRegistry(config)
+    reg.add(Entity(entity_id="a", ciks=["111"]))
+    with pytest.raises(ValueError, match="duplicate entity_id"):
+        reg.add(Entity(entity_id="a", ciks=["222"]))
+
+
+def test_load_rejects_conflicting_map(config):
+    # Two committed lines claiming the same CIK must fail loudly, not silently
+    # let the last line win and corrupt cross-CIK attribution.
+    reg = EntityRegistry(config)
+    reg.path.parent.mkdir(parents=True, exist_ok=True)
+    reg.path.write_text(
+        '{"entity_id": "a", "ciks": ["0000000111"]}\n'
+        '{"entity_id": "b", "ciks": ["0000000111"]}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="claimed by both"):
+        EntityRegistry(config).load()
