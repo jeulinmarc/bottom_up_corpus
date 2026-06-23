@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
@@ -20,6 +22,23 @@ from .config import Config, normalize_cik
 from .extract import clean_text
 from .models import FilingRecord
 from .submission import filename_from_url, parse_submission, select_primary
+
+
+def _atomic_write_text(path: Path, data: str) -> None:
+    """Write ``data`` to ``path`` atomically: a tmp sibling + ``os.replace``.
+
+    An interrupt (Ctrl-C, crash, disk-full) mid-write leaves the tmp file behind,
+    never a truncated destination, so readers and idempotent re-runs always see a
+    complete prior version rather than a half-written file that fails to parse.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)  # atomic on the same filesystem (tmp is a sibling)
+
+
+def _jsonl(rows: Iterable[dict]) -> str:
+    return "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
 
 
 @dataclass
@@ -71,11 +90,18 @@ class Storage:
         records: dict[str, FilingRecord] = {}
         if not path.exists():
             return records
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
-            rec = FilingRecord.from_row(json.loads(line))
+            try:
+                rec = FilingRecord.from_row(json.loads(line))
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                # One corrupt line (e.g. from an interrupted legacy write) must not
+                # take down the whole issuer's manifest -- skip it and warn.
+                warnings.warn(f"{path}:{lineno}: skipping unparseable manifest row ({exc})",
+                              stacklevel=2)
+                continue
             records[rec.doc_id] = rec
         return records
 
@@ -122,15 +148,12 @@ class Storage:
 
     def _write_manifest(self, cik: str, records: Iterable[FilingRecord]) -> None:
         path = self.config.manifest_file(cik)
-        path.parent.mkdir(parents=True, exist_ok=True)
         # Deterministic order: by filing date then accession, for stable diffs.
         ordered = sorted(
             records,
             key=lambda r: (r.filing_date or date.min, r.accession),
         )
-        with path.open("w", encoding="utf-8") as fh:
-            for rec in ordered:
-                fh.write(json.dumps(rec.to_row(), ensure_ascii=False) + "\n")
+        _atomic_write_text(path, _jsonl(rec.to_row() for rec in ordered))
 
     # ---- download + decomposition (Phase 2) ----
     def raw_dir_for(self, record: FilingRecord) -> Path:
@@ -173,8 +196,7 @@ class Storage:
             return DownloadResult(record.doc_id, "error", error=str(exc))
 
         data = raw.encode("utf-8", "replace")
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        sub_path.write_text(raw, encoding="utf-8")
+        _atomic_write_text(sub_path, raw)
         record.local_path = self._rel(sub_path)
         record.sha256 = hashlib.sha256(data).hexdigest()
 
@@ -186,11 +208,11 @@ class Storage:
         if primary and primary.text:
             ext = Path(primary.filename).suffix or ".txt"
             primary_path = dest_dir / f"{record.doc_id}.primary{ext}"
-            primary_path.write_text(primary.text, encoding="utf-8")
+            _atomic_write_text(primary_path, primary.text)
             record.primary_path = self._rel(primary_path)
 
             text_path = dest_dir / f"{record.doc_id}.txt"
-            text_path.write_text(clean_text(primary.text, primary.filename), encoding="utf-8")
+            _atomic_write_text(text_path, clean_text(primary.text, primary.filename))
             record.text_path = self._rel(text_path)
 
         return DownloadResult(record.doc_id, "downloaded", bytes=len(data))
@@ -240,53 +262,44 @@ class Storage:
         """Write the raw company-facts JSON once per issuer. Returns (rel_path, sha256)."""
         cik = normalize_cik(cik)
         path = self.config.raw_dir / cik / "F1" / "companyfacts.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
         blob = json.dumps(facts, ensure_ascii=False)
-        path.write_text(blob, encoding="utf-8")
+        _atomic_write_text(path, blob)
         return self._rel(path), hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     def write_financials_table(self, cik: str, rows: Iterable[dict]) -> str:
         """Write the normalized, queryable facts table data/financials/<cik>.jsonl."""
         cik = normalize_cik(cik)
         path = self.config.financials_dir / f"{cik}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _atomic_write_text(path, _jsonl(rows))
         return self._rel(path)
 
     def write_financial_summary(self, record: FilingRecord, html: str, text: str) -> None:
         """Write a period summary's HTML (primary) + clean text; mutate record paths."""
         dest_dir = self.raw_dir_for(record)
-        dest_dir.mkdir(parents=True, exist_ok=True)
         primary = dest_dir / f"{record.doc_id}.primary.html"
-        primary.write_text(html, encoding="utf-8")
+        _atomic_write_text(primary, html)
         record.primary_path = self._rel(primary)
         record.sha256 = hashlib.sha256(html.encode("utf-8")).hexdigest()
         txt = dest_dir / f"{record.doc_id}.txt"
-        txt.write_text(text, encoding="utf-8")
+        _atomic_write_text(txt, text)
         record.text_path = self._rel(txt)
 
     # ---- ownership summaries (Phase 4b) ----
     def write_ownership_summary(self, record: FilingRecord, html: str, text: str) -> None:
         """Write a structured ownership summary (HTML primary + clean text)."""
         dest_dir = self.raw_dir_for(record)
-        dest_dir.mkdir(parents=True, exist_ok=True)
         primary = dest_dir / f"{record.doc_id}.primary.html"
-        primary.write_text(html, encoding="utf-8")
+        _atomic_write_text(primary, html)
         record.primary_path = self._rel(primary)
         txt = dest_dir / f"{record.doc_id}.txt"
-        txt.write_text(text, encoding="utf-8")
+        _atomic_write_text(txt, text)
         record.text_path = self._rel(txt)
 
     def write_ownership_table(self, cik: str, rows: Iterable[dict]) -> str:
         """Write the normalized ownership rows data/ownership/<cik>.jsonl."""
         cik = normalize_cik(cik)
         path = self.config.ownership_dir / f"{cik}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _atomic_write_text(path, _jsonl(rows))
         return self._rel(path)
 
     # ---- discovery errors ----
