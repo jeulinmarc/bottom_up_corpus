@@ -82,6 +82,8 @@ def _config(args: argparse.Namespace) -> Config:
         kw["data_dir"] = args.data_dir
     if getattr(args, "contact", None):
         kw["contact"] = args.contact
+    if getattr(args, "insecure", False):
+        kw["verify_tls"] = False
     return Config(**kw)
 
 
@@ -114,6 +116,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
     print(f"user_agent        : {cfg.user_agent}")
     print(f"requests_per_sec  : {cfg.requests_per_second} (SEC max 10)")
     print(f"min_delay_seconds : {cfg.min_delay_seconds:.4f}")
+    print(f"verify_tls        : {cfg.verify_tls}")
     print(f"manifest_dir      : {cfg.manifest_dir}")
     print(f"universe_dir      : {cfg.universe_dir}")
     print(f"raw_dir           : {cfg.raw_dir}")
@@ -422,6 +425,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="corpus root holding manifest/, raw/, … (default: ./data)")
     p.add_argument("--contact", default=None,
                    help="contact for the SEC User-Agent (overrides $BOTTOM_UP_CORPUS_CONTACT)")
+    p.add_argument("--insecure", action="store_true",
+                   help="disable TLS certificate verification (only behind a trusted SSL-inspection proxy)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     lf = sub.add_parser("list-forms", help="show the filing taxonomy (families A-F)")
