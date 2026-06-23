@@ -19,7 +19,13 @@ from .config import Config
 
 
 class Fetcher:
-    """Polite, throttled HTTP client shared across discovery and download."""
+    """Polite, throttled HTTP client shared across discovery and download.
+
+    Not thread-safe: the per-host throttle state is unguarded, so a single
+    ``Fetcher`` is meant to be reused *sequentially* within one thread. The
+    pipeline is single-threaded, so no lock is needed; if concurrent crawling is
+    ever added, give each worker its own ``Fetcher`` or guard ``_throttle``.
+    """
 
     def __init__(self, config: Config | None = None, session: requests.Session | None = None):
         self.config = config or Config()

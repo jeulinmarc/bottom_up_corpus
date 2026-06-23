@@ -1,0 +1,136 @@
+"""Unit tests for the SEC fair-access HTTP layer.
+
+These exercise Fetcher directly against a fake requests.Session -- the rest of
+the suite mocks Fetcher wholesale, leaving throttling, retry/backoff, status
+handling, streaming and the User-Agent header (the SEC-compliance surface)
+otherwise untested.
+"""
+from __future__ import annotations
+
+import pytest
+import requests
+
+from bottom_up_corpus.config import Config
+from bottom_up_corpus.http import Fetcher
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, *, text="", json_data=None, chunks=None):
+        self.status_code = status_code
+        self._text = text
+        self._json = json_data
+        self._chunks = chunks or []
+        self.encoding = None
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code}", response=self)
+
+    @property
+    def text(self):
+        return self._text
+
+    def json(self):
+        return self._json
+
+    def iter_content(self, chunk_size=1):
+        yield from self._chunks
+
+
+class FakeSession:
+    """Returns canned responses in order (repeating the last); records calls."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.headers = {}
+        self.calls = []
+        self._i = 0
+
+    def get(self, url, stream=False, timeout=None):
+        self.calls.append({"url": url, "stream": stream, "timeout": timeout})
+        resp = self.responses[min(self._i, len(self.responses) - 1)]
+        self._i += 1
+        return resp
+
+
+@pytest.fixture
+def cfg():
+    return Config(contact="test@example.com")
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    # Collapse retry/throttle backoff so tests don't actually wait.
+    monkeypatch.setattr("bottom_up_corpus.http.time.sleep", lambda _s: None)
+
+
+def test_user_agent_carries_contact(cfg):
+    sess = FakeSession([FakeResponse(text="ok")])
+    Fetcher(cfg, session=sess)
+    ua = sess.headers["User-Agent"]
+    assert ua.startswith("bottom_up_corpus/")
+    assert "test@example.com" in ua
+
+
+def test_retries_on_429_then_succeeds(cfg):
+    sess = FakeSession([FakeResponse(429), FakeResponse(text="ok")])
+    f = Fetcher(cfg, session=sess)
+    assert f.get_text("https://www.sec.gov/a") == "ok"
+    assert len(sess.calls) == 2  # one retry
+
+
+def test_retries_on_503_then_raises_after_max(cfg):
+    cfg = Config(contact="test@example.com", max_retries=2)
+    sess = FakeSession([FakeResponse(503)])
+    f = Fetcher(cfg, session=sess)
+    with pytest.raises(requests.HTTPError):
+        f.get("https://www.sec.gov/a")
+    assert len(sess.calls) == 3  # initial attempt + 2 retries
+
+
+def test_default_timeout_passed_through(cfg):
+    sess = FakeSession([FakeResponse(text="ok")])
+    f = Fetcher(cfg, session=sess)
+    f.get_text("https://www.sec.gov/a")
+    assert sess.calls[0]["timeout"] == cfg.timeout
+    assert sess.calls[0]["stream"] is False
+
+
+def test_get_json_parses(cfg):
+    sess = FakeSession([FakeResponse(json_data={"a": 1})])
+    f = Fetcher(cfg, session=sess)
+    assert f.get_json("https://data.sec.gov/x")["a"] == 1
+
+
+def test_download_streams_with_download_timeout(cfg, tmp_path):
+    sess = FakeSession([FakeResponse(chunks=[b"abc", b"", b"de"])])
+    f = Fetcher(cfg, session=sess)
+    dest = tmp_path / "nested" / "f.txt"
+    written = f.download("https://www.sec.gov/big", dest)
+    assert written == 5
+    assert dest.read_bytes() == b"abcde"
+    assert sess.calls[0]["stream"] is True
+    assert sess.calls[0]["timeout"] == cfg.download_timeout  # hard deadline, not the 30s one
+
+
+def test_throttles_repeated_same_host(monkeypatch):
+    cfg = Config(contact="test@example.com", requests_per_second=10.0)  # min_delay 0.1s
+    sleeps = []
+    monkeypatch.setattr("bottom_up_corpus.http.time.sleep", lambda s: sleeps.append(s))
+
+    class Clock:
+        def __init__(self, vals):
+            self.vals, self.i = list(vals), 0
+
+        def __call__(self):
+            v = self.vals[min(self.i, len(self.vals) - 1)]
+            self.i += 1
+            return v
+
+    # call1 sets last=100.0; call2 reads 100.05 (->wait 0.05) then sets 100.2.
+    monkeypatch.setattr("bottom_up_corpus.http.time.monotonic", Clock([100.0, 100.05, 100.2]))
+    sess = FakeSession([FakeResponse(text="ok")])
+    f = Fetcher(cfg, session=sess)
+    f.get_text("https://www.sec.gov/a")
+    f.get_text("https://www.sec.gov/a")
+    assert sleeps and sleeps[0] == pytest.approx(0.05, abs=1e-6)
