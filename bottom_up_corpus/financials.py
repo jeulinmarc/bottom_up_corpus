@@ -434,6 +434,7 @@ def build_period_summaries(
     company_current: str,
     name_for_date=None,
     since_year: int | None = None,
+    until_year: int | None = None,
 ) -> list[PeriodSummary]:
     """Group curated concepts into one summary per actual reporting period.
 
@@ -481,6 +482,8 @@ def build_period_summaries(
         if freq not in allowed:
             continue
         if since_year is not None and end.year < since_year:
+            continue
+        if until_year is not None and end.year > until_year:
             continue
 
         values: dict[str, dict] = {}

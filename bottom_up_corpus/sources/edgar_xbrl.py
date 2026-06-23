@@ -42,7 +42,7 @@ class EdgarXBRL(Source):
         return data
 
     def period_summaries(
-        self, cik: str, *, since_year: int | None = None
+        self, cik: str, *, since_year: int | None = None, until_year: int | None = None
     ) -> tuple[dict | None, list[PeriodSummary]]:
         """Return ``(raw_companyfacts, [PeriodSummary, ...])`` for a CIK."""
         facts = self.companyfacts(cik)
@@ -58,10 +58,12 @@ class EdgarXBRL(Source):
 
         summaries = build_period_summaries(
             facts, company=current, company_current=current,
-            name_for_date=name_for_date, since_year=since_year,
+            name_for_date=name_for_date, since_year=since_year, until_year=until_year,
         )
         return facts, summaries
 
     # Uniform Source surface (kept for symmetry with other sources).
-    def discover(self, cik: str, *, since_year: int | None = None) -> Sequence[PeriodSummary]:
-        return self.period_summaries(cik, since_year=since_year)[1]
+    def discover(
+        self, cik: str, *, since_year: int | None = None, until_year: int | None = None
+    ) -> Sequence[PeriodSummary]:
+        return self.period_summaries(cik, since_year=since_year, until_year=until_year)[1]
