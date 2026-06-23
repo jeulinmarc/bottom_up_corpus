@@ -9,9 +9,9 @@ from bottom_up_corpus.taxonomy import FormType
 
 
 def test_expected_counts():
-    assert expected_count(FormType.A1, 2024) == 1   # 10-K
-    assert expected_count(FormType.A2, 2024) == 3   # 10-Q
-    assert expected_count(FormType.B1, 2024) is None  # 8-K event-driven
+    assert expected_count(FormType.A1) == 1   # 10-K
+    assert expected_count(FormType.A2) == 3   # 10-Q
+    assert expected_count(FormType.B1) is None  # 8-K event-driven
 
 
 def _seed(storage: Storage):

@@ -123,11 +123,13 @@ def sp500_membership(fetcher: Fetcher, start: str | None = None) -> tuple[list[d
     """Reconstruct the union of members over a window + the dated changes.
 
     Returns ``(members, changes)`` where ``members`` is
-    ``[{ticker, company, cik, first_seen, last_seen}]`` — the union of every
-    company that was an S&P 500 member at any point from ``start`` (ISO date or
-    ``YYYY``) to today. ``last_seen="current"`` for present members; otherwise the
-    last removal date. ``cik`` is filled for current members (from the table) and
-    left ``""`` for since-removed ones (resolved best-effort by the caller).
+    ``[{ticker, company, cik, first_seen, last_seen}]`` — the union of the current
+    constituents and every company named in the changes table from ``start`` (ISO
+    date or ``YYYY``) to today. This is best-effort, not exhaustive: a company that
+    joined and left entirely before the earliest change row (so it appears in
+    neither source) is not recovered. ``last_seen="current"`` for present members;
+    otherwise the last removal date. ``cik`` is filled for current members (from the
+    table) and left ``""`` for since-removed ones (resolved best-effort by the caller).
     """
     if start and len(start) == 4:
         start = f"{start}-01-01"

@@ -32,7 +32,12 @@ EXPECTED_PER_YEAR: dict[FormType, int | None] = {
 }
 
 
-def expected_count(form: FormType, year: int) -> int | None:
+def expected_count(form: FormType) -> int | None:
+    """Expected filings per year for a form, or None if its cadence is event-driven.
+
+    The cadence is the same for every year (no IPO/delisting pro-rating), so this
+    takes no year -- it would imply a year-specific behavior that does not exist.
+    """
     return EXPECTED_PER_YEAR.get(form)
 
 
@@ -73,7 +78,7 @@ def build_matrix(
         for form in scope:
             for year in sorted(year_set):
                 discovered = counts.get((form, year), 0)
-                exp = expected_count(form, year)
+                exp = expected_count(form)
                 rows.append(
                     {
                         "cik": cik,
