@@ -139,6 +139,7 @@ class Derived:
     key: str
     label: str
     unit: str  # USD | USD/shares | x (multiple) | % (percent)
+    annual_only: bool = False  # ratio mixing a balance-sheet stock with a flow
 
 
 # Display order for the derived block. The aggregates (total debt, EBITDA, net
@@ -166,14 +167,14 @@ DERIVED: tuple[Derived, ...] = (
     # Leverage / coverage (multiples)
     Derived("debt_to_equity", "Debt / equity", "x"),
     Derived("debt_to_assets", "Debt / assets", "x"),
-    Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x"),
+    Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x", annual_only=True),
     Derived("interest_coverage", "Interest coverage (EBIT/interest)", "x"),
     # Liquidity (multiples)
     Derived("current_ratio", "Current ratio", "x"),
     Derived("quick_ratio", "Quick ratio", "x"),
     Derived("cash_ratio", "Cash ratio", "x"),
     # Efficiency / per share
-    Derived("asset_turnover", "Asset turnover", "x"),
+    Derived("asset_turnover", "Asset turnover", "x", annual_only=True),
     Derived("book_value_per_share", "Book value per share", "USD/shares"),
 )
 
@@ -188,7 +189,7 @@ def _num(values: dict, key: str) -> float | None:
     return None
 
 
-def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
+def compute_derived(values: dict[str, dict], frequency: str = "annual") -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
     Each metric is emitted only when all of its required inputs are present, so
@@ -198,6 +199,14 @@ def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
     Margins, returns and the tax rate are expressed in percent; leverage,
     coverage and liquidity ratios as multiples (``x``). Returns are period-scoped
     (a quarterly summary's ROE is the quarter's, not annualised).
+
+    ``frequency`` is the period's reporting frequency (``annual`` |
+    ``quarterly`` | ``semi-annual``). Ratios that divide a balance-sheet *stock*
+    (an instant, e.g. net debt or total assets) by an income/cash-flow *flow*
+    over the period (``annual_only`` metrics) have no meaningful sub-annual value
+    -- a quarterly net-debt/EBITDA would be ~4x the annual figure -- so they are
+    emitted only for annual periods. (Computing a trailing-twelve-months variant
+    would need the prior three quarters, which this single-period view lacks.)
     """
     out: dict[str, dict] = {}
 
@@ -205,6 +214,8 @@ def compute_derived(values: dict[str, dict]) -> dict[str, dict]:
         if val is None or (isinstance(val, float) and val != val):  # skip None/NaN
             return
         d = DERIVED_BY_KEY[key]
+        if d.annual_only and frequency != "annual":  # stock/flow ratio: annual only
+            return
         out[key] = {"value": val, "unit": d.unit, "label": d.label}
 
     def div(a: float | None, b: float | None) -> float | None:
@@ -325,7 +336,7 @@ class PeriodSummary:
     @property
     def derived(self) -> dict[str, dict]:
         """Computed ratios/aggregates (total debt, EBITDA, leverage, ...)."""
-        return compute_derived(self.values)
+        return compute_derived(self.values, self.frequency)
 
 
 def _to_date(value: str | None) -> date | None:

@@ -106,6 +106,40 @@ def test_derived_ratios():
     assert d["interest_coverage"]["value"] == pytest.approx(114301000000 / 3933000000)
 
 
+def _full_inputs():
+    # Minimal inputs that yield both stock/flow ratios and stock/stock + flow/flow ones.
+    def v(x):
+        return {"value": float(x), "unit": "USD", "label": ""}
+    return {
+        "revenue": v(100), "operating_income": v(20), "net_income": v(10),
+        "equity": v(200), "assets": v(400), "cash": v(30),
+        "long_term_debt": v(50), "dep_amort": v(5),
+    }
+
+
+def test_annual_only_ratios_suppressed_for_sub_annual_periods():
+    # net_debt/EBITDA and asset turnover divide a balance-sheet stock by a flow,
+    # so a quarterly value would be ~4x off -- they must not be emitted.
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_full_inputs(), frequency="quarterly")
+    assert "net_debt_to_ebitda" not in d
+    assert "asset_turnover" not in d
+    # Stock/stock and flow/flow ratios are still meaningful sub-annually.
+    assert d["debt_to_equity"]["value"] == pytest.approx(50 / 200)
+    assert d["ebitda_margin"]["value"] == pytest.approx(25 / 100 * 100)
+    # Same gate applies to semi-annual periods.
+    assert "net_debt_to_ebitda" not in compute_derived(_full_inputs(), frequency="semi-annual")
+
+
+def test_annual_only_ratios_present_for_annual_periods():
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_full_inputs(), frequency="annual")
+    assert d["net_debt_to_ebitda"]["value"] == pytest.approx((50 - 30) / (20 + 5))
+    assert d["asset_turnover"]["value"] == pytest.approx(100 / 400)
+    # Default frequency is annual, preserving the previous call signature behavior.
+    assert "net_debt_to_ebitda" in compute_derived(_full_inputs())
+
+
 def test_derived_omits_metrics_with_missing_inputs():
     # A bare period with no debt/EBITDA inputs yields no leverage metrics.
     from bottom_up_corpus.financials import compute_derived
