@@ -316,6 +316,41 @@ def load_cusip_crosswalk(path: Path | str) -> dict[str, set[str]]:
     return out
 
 
+def write_cusip_crosswalk(path: Path | str, pairs: Iterable[tuple[str, str]]) -> int:
+    """Merge ``(cik, cusip6)`` pairs into a ``cik,cusip6`` CSV at ``path`` (dedup).
+
+    Loads any existing rows (via the same schema :func:`load_cusip_crosswalk`
+    reads), unions the new pairs (CIKs normalized to 10 digits, CUSIP6 upper-cased),
+    and rewrites a sorted, de-duplicated CSV. Returns the total row count. Pure file
+    I/O -- used to grow the ``--fts-cache`` across runs.
+    """
+    import csv
+
+    p = Path(path)
+    rows: set[tuple[str, str]] = set()
+    if p.exists():
+        for c6, ciks in load_cusip_crosswalk(p).items():
+            for cik in ciks:
+                rows.add((cik, c6))
+    for cik, c6 in pairs:
+        cik = str(cik).strip()
+        c6 = str(c6).strip().upper()
+        if not cik or not c6:
+            continue
+        try:
+            rows.add((normalize_cik(cik), c6))
+        except ValueError:
+            continue
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["cik", "cusip6"])
+        for cik, c6 in sorted(rows):
+            w.writerow([cik, c6])
+    return len(rows)
+
+
 def resolve_cusips(
     cusip6s: Iterable[str], crosswalk: dict[str, set[str]]
 ) -> tuple[dict[str, str], list[str]]:

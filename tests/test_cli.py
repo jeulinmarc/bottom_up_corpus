@@ -288,3 +288,64 @@ def test_enrich_openfigi_uses_env_api_key(monkeypatch, tmp_path):
     rc = main(["enrich-openfigi", "--from-file", str(src)])
     assert rc == 0
     assert captured["api_key"] == "envkey"
+
+
+class _BoomFTS:
+    """An EdgarFTS stand-in whose resolve() must never be called."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def resolve(self, cusip):
+        raise AssertionError("fts.resolve called for a cached CUSIP")
+
+
+def test_fts_cache_read_skips_fts(monkeypatch, tmp_path):
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: {})
+    monkeypatch.setattr("bottom_up_corpus.cli.EdgarFTS", _BoomFTS)
+    bonds = tmp_path / "u.csv"
+    bonds.write_text("Ticker,CUSIP\nTKM,25156PAA0\n", encoding="utf-8")
+    cache = tmp_path / "cache.csv"
+    cache.write_text("cik,cusip6\n0000999999,25156P\n", encoding="utf-8")
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--from-file", str(bonds), "--name", "u", "--fts", "--fts-cache", str(cache), "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    by_ticker = {i.ticker: i for i in Universe(cfg).load("u")}
+    assert by_ticker["TKM"].cik == "0000999999"
+    assert by_ticker["TKM"].resolution == "cusip"
+
+
+class _OneHitFTS:
+    """Confirmed hit for 25156PAA0; mismatched (unverified) hit for 88888XAA0."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def resolve(self, cusip):
+        if cusip == "25156PAA0":
+            return ("0000999999", "DEUTSCHE TELEKOM INTL FIN")
+        if cusip == "88888XAA0":
+            return ("0000888888", "PPLUS TRUST SERIES DCNA-1")  # name mismatch -> unverified
+        return None
+
+
+def test_fts_cache_writes_confirmed_only_without_write_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: {})
+    monkeypatch.setattr("bottom_up_corpus.cli.EdgarFTS", _OneHitFTS)
+    bonds = tmp_path / "u.csv"
+    bonds.write_text(
+        "Ticker,CUSIP,Issuer\n"
+        "TKM,25156PAA0,Deutsche Telekom Intl Finance\n"
+        "FOO,88888XAA0,Foo Industries\n",
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache.csv"
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--from-file", str(bonds), "--name", "u", "--fts", "--fts-cache", str(cache)])
+    assert rc == 0
+    from bottom_up_corpus.universe import load_cusip_crosswalk
+    xw = load_cusip_crosswalk(cache)
+    assert xw == {"25156P": {"0000999999"}}
+    assert "88888X" not in xw
+    assert not (tmp_path / "data" / "universe" / "u.jsonl").exists()

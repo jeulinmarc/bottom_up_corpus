@@ -44,6 +44,7 @@ from .universe import (
     reconcile_identifiers,
     resolve_ciks,
     resolve_tickers,
+    write_cusip_crosswalk,
 )
 
 
@@ -267,11 +268,14 @@ def _build_universe_from_file(args: argparse.Namespace, cfg, fetcher) -> int:
     crosswalk: dict[str, set[str]] = {}
     if args.crosswalk:
         crosswalk = load_cusip_crosswalk(args.crosswalk)
-    elif has_cusip:
+    elif has_cusip and not args.fts_cache:
         n = sum(1 for r in rows if r["cusip6"] and not r["cik"])
         print(f"WARNING: {n} row(s) carry a CUSIP but no --crosswalk was given; "
               f"resolving via CIK/ticker only (pass --crosswalk to use CUSIP6->CIK "
               f"and to cross-check tickers).", file=sys.stderr)
+    if args.fts_cache and Path(args.fts_cache).exists():
+        for c6, ciks in load_cusip_crosswalk(args.fts_cache).items():
+            crosswalk.setdefault(c6, set()).update(ciks)
 
     ticker_table = load_company_tickers(fetcher) if any(r["ticker"] for r in rows) else {}
     fts = EdgarFTS(fetcher) if args.fts else None
@@ -291,6 +295,14 @@ def _build_universe_from_file(args: argparse.Namespace, cfg, fetcher) -> int:
           f"[{by_kind.get('name_mismatch', 0)} name_mismatch, {by_kind.get('name_match', 0)} name_match]; "
           f"fts {fts_conf} confirmed / {fts_unv} unverified; "
           f"{len(unresolved)} unresolved (of {len(rows)} input names)", file=sys.stderr)
+
+    if args.fts_cache:
+        pairs = [(i.cik, i.cusip6) for i in issuers
+                 if i.resolution == "fts:confirmed" and i.cik and i.cusip6]
+        if pairs:
+            total = write_cusip_crosswalk(args.fts_cache, pairs)
+            print(f"fts-cache: merged {len(pairs)} confirmed pair(s) -> {args.fts_cache} "
+                  f"({total} total)", file=sys.stderr)
 
     if args.write:
         uni = Universe(cfg)
@@ -576,6 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="resolve still-unresolved rows via EDGAR full-text search (network, opt-in)")
     bu.add_argument("--fts-limit", type=int, default=None,
                     help="cap the number of --fts lookups (for bounded runs)")
+    bu.add_argument("--fts-cache", default=None,
+                    help="CSV cache of CUSIP6->CIK (read to skip EFTS; fts:confirmed hits appended). "
+                         "Written whenever given, independent of --write.")
     bu.add_argument("--equity-index", choices=["sp500"], dest="equity_index",
                     help="build from an equity index's composition (fetched by name)")
     bu.add_argument("--index", choices=["sp500"], dest="index_legacy",

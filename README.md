@@ -223,6 +223,12 @@ triage. `--fts-limit N` caps the lookups for a bounded run. Many remaining
 unresolved names are structurally outside SEC financials (144A/Reg-S private
 placements, non-profit/muni issuers) and no lookup recovers them.
 
+`--fts-cache FILE` makes `--fts` durable: the file (a `cik,cusip6` CSV) is read into
+the offline crosswalk so cached issuers resolve without hitting EFTS, and each run's
+**confirmed** resolutions are appended back to it. It is written whenever given
+(independent of `--write`), since its value is in repeated/iterative runs; only
+`fts:confirmed` pairs are cached, never `fts:unverified`.
+
 Identifier enrichment (triage, not resolution) via the free
 [OpenFIGI](https://www.openfigi.com/api) API — useful to label *why* an unresolved
 issuer is unresolved, and reusable across jurisdictions (it is not SEC-specific):
