@@ -17,7 +17,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .config import Config, normalize_cik
+from .config import Config, cusip6 as to_cusip6, normalize_cik
 from .http import Fetcher
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -107,6 +107,167 @@ def resolve_tickers(
         else:
             unresolved.append(t)
     return issuers, unresolved
+
+
+_NAME_NOISE = {
+    "INC", "CORP", "CORPORATION", "CO", "COMPANY", "COS", "LLC", "LP", "PLC", "SA",
+    "NV", "AG", "AB", "LTD", "LIMITED", "GROUP", "HOLDINGS", "HOLDING", "FINANCE",
+    "FINANCIAL", "CAPITAL", "FUNDING", "USA", "US", "INTERNATIONAL", "INTL", "THE",
+    "OF", "AND", "&",
+}
+
+
+def _name_tokens(name: str) -> set[str]:
+    """Significant alphanumeric tokens of a company name (legal-form words dropped)."""
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in str(name).upper())
+    return {t for t in cleaned.split() if t and t not in _NAME_NOISE}
+
+
+def _names_match(a: str, b: str) -> bool:
+    """True when two company names share a significant token (ignoring legal forms).
+
+    Deliberately loose: one shared token counts (so "Coca-Cola Company" ~ "COCA
+    COLA CO"), which can over-match ("American Airlines" ~ "American Express").
+    Acceptable: a match only downgrades a collision's review priority, never drops.
+    """
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    return bool(ta and tb and (ta & tb))
+
+
+def _find_column(headers: list[str], candidates: Iterable[str]) -> str | None:
+    """Return the first header whose lower-cased name matches a candidate."""
+    lower = {h.lower().strip(): h for h in headers}
+    for cand in candidates:
+        if cand in lower:
+            return lower[cand]
+    return None
+
+
+def read_identifier_csv(
+    path: Path | str, *, ticker_col: str | None = None,
+    cusip_col: str | None = None, cik_col: str | None = None,
+) -> list[dict]:
+    """Read a CSV of issuer identifiers into one row per issuer.
+
+    Auto-detects a CIK column (``CIK``), a ticker column (``Ticker``), and a
+    CUSIP/ISIN column (``CUSIP`` preferred, else ``ISIN``) unless overridden; a
+    name column (``Issuer``/``Company``/``Name``) is used for humans. Rows are
+    grouped by ticker if present, else by CIK, else by CUSIP6; within a group the
+    most common CIK and CUSIP6 are kept (a bond file has many rows per issuer).
+    Returns ``[{cik, ticker, cusip6, name}, ...]``.
+    """
+    import csv
+    from collections import Counter
+
+    with Path(path).open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        headers = reader.fieldnames or []
+        kcol = cik_col or _find_column(headers, ("cik",))
+        tcol = ticker_col or _find_column(headers, ("ticker",))
+        ccol = cusip_col or _find_column(headers, ("cusip", "isin"))
+        ncol = _find_column(headers, ("issuer", "company", "name"))
+        if not (kcol or tcol or ccol):
+            raise ValueError(
+                f"CSV needs a CIK, ticker, or CUSIP/ISIN column; headers: {headers}")
+        records = list(reader)
+
+    groups: dict[str, dict] = {}
+    for row in records:
+        cik = (row.get(kcol, "") if kcol else "").strip()
+        ticker = (row.get(tcol, "") if tcol else "").strip().upper()
+        raw_id = (row.get(ccol, "") if ccol else "").strip()
+        c6 = to_cusip6(raw_id) if raw_id else ""
+        name = (row.get(ncol, "") if ncol else "").strip()
+        key = ticker or cik or c6
+        if not key:
+            continue
+        g = groups.setdefault(key, {"ticker": ticker, "cik_votes": Counter(),
+                                    "cusip6_votes": Counter(), "name": ""})
+        if cik:
+            g["cik_votes"][cik] += 1
+        if c6:
+            g["cusip6_votes"][c6] += 1
+        if name and not g["name"]:
+            g["name"] = name
+
+    out: list[dict] = []
+    for g in groups.values():
+        cik_votes: Counter = g["cik_votes"]
+        c6_votes: Counter = g["cusip6_votes"]
+        out.append({
+            "cik": cik_votes.most_common(1)[0][0] if cik_votes else "",
+            "ticker": g["ticker"],
+            "cusip6": c6_votes.most_common(1)[0][0] if c6_votes else "",
+            "name": g["name"],
+        })
+    return out
+
+
+def reconcile_identifiers(
+    rows: Iterable[dict],
+    ticker_table: dict[str, Issuer],
+    crosswalk: dict[str, set[str]],
+) -> tuple[list[Issuer], list[dict], list[str]]:
+    """Resolve each row by authority CIK > CUSIP > ticker, cross-checking ticker vs CUSIP.
+
+    Returns ``(issuers, collisions, unresolved)``:
+
+    * a valid **provided CIK** wins (``resolution="cik"``); ticker/cusip on that row
+      are not used (v1 trusts the explicit CIK without cross-checking it);
+    * else **both** ticker->CIK and CUSIP6->CIK agree -> ``resolution="both"``; only
+      one resolves -> ``"ticker"`` / ``"cusip"``;
+    * else **both resolve but disagree** -> a ``collision`` dict (recycled-ticker
+      hazard), classified ``name_match`` / ``name_mismatch`` and **excluded** from
+      ``issuers`` (caller decides what to do);
+    * else -> the identifier string in ``unresolved``.
+    """
+    rows = list(rows)
+    all_c6 = [(r.get("cusip6") or "").strip().upper() for r in rows]
+    cusip_ciks, _ = resolve_cusips([c for c in all_c6 if c], crosswalk)
+
+    issuers: list[Issuer] = []
+    collisions: list[dict] = []
+    unresolved: list[str] = []
+    for row in rows:
+        raw_cik = (row.get("cik") or "").strip()
+        ticker = (row.get("ticker") or "").strip().upper()
+        c6 = (row.get("cusip6") or "").strip().upper()
+        name = (row.get("name") or "").strip()
+
+        if raw_cik:
+            try:
+                cik = normalize_cik(raw_cik)
+            except ValueError:
+                cik = ""
+            if cik:
+                issuers.append(Issuer(cik=cik, ticker=ticker, company=name,
+                                      cusip6=c6, resolution="cik"))
+                continue
+
+        from_ticker = ticker_table.get(ticker) if ticker else None
+        cik_ticker = from_ticker.cik if from_ticker else ""
+        cik_cusip = cusip_ciks.get(c6, "") if c6 else ""
+        company = (from_ticker.company if from_ticker else "") or name
+
+        if cik_ticker and cik_cusip:
+            if cik_ticker == cik_cusip:
+                issuers.append(Issuer(cik=cik_ticker, ticker=ticker, company=company,
+                                      cusip6=c6, resolution="both"))
+            else:
+                sec_ticker_name = from_ticker.company if from_ticker else ""
+                kind = "name_match" if _names_match(name, sec_ticker_name) else "name_mismatch"
+                collisions.append({"ticker": ticker, "cusip6": c6, "name": name,
+                                   "cik_ticker": cik_ticker, "cik_cusip": cik_cusip,
+                                   "sec_ticker_name": sec_ticker_name, "kind": kind})
+        elif cik_ticker:
+            issuers.append(Issuer(cik=cik_ticker, ticker=ticker, company=company,
+                                  cusip6=c6, resolution="ticker"))
+        elif cik_cusip:
+            issuers.append(Issuer(cik=cik_cusip, ticker=ticker, company=company,
+                                  cusip6=c6, resolution="cusip"))
+        else:
+            unresolved.append(ticker or c6)
+    return issuers, collisions, unresolved
 
 
 def load_cusip_crosswalk(path: Path | str) -> dict[str, set[str]]:

@@ -7,6 +7,8 @@ from bottom_up_corpus.universe import (
     Universe,
     load_company_tickers,
     load_cusip_crosswalk,
+    read_identifier_csv,
+    reconcile_identifiers,
     resolve_ciks,
     resolve_cusips,
     resolve_tickers,
@@ -140,3 +142,83 @@ def test_resolve_cusips_ambiguous_multi_cik_is_unresolved(tmp_path):
     with pytest.warns(UserWarning, match="multiple CIKs"):
         resolved, unresolved = resolve_cusips(["DUPDUP"], xw)
     assert resolved == {} and unresolved == ["DUPDUP"]
+
+
+TICKER_TABLE = {
+    "AAPL": Issuer(cik="320193", ticker="AAPL", company="Apple Inc."),
+    "DT": Issuer(cik="1773383", ticker="DT", company="Dynatrace, Inc."),
+    "KO": Issuer(cik="21344", ticker="KO", company="COCA COLA CO"),
+}
+CROSSWALK = {
+    "037833": {"0000320193"},
+    "25156P": {"0000999999"},
+    "191216": {"0000888888"},
+}
+
+
+def test_reconcile_provided_cik_is_authoritative():
+    rows = [{"cik": "1750", "ticker": "AAPL", "cusip6": "037833", "name": "AAR Corp"}]
+    issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
+    assert collisions == [] and unresolved == []
+    assert issuers[0].cik == "0000001750"
+    assert issuers[0].resolution == "cik"
+
+
+def test_reconcile_both_sources_agree():
+    rows = [{"cik": "", "ticker": "AAPL", "cusip6": "037833", "name": "Apple Inc."}]
+    issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
+    assert collisions == [] and unresolved == []
+    assert issuers[0].cik == "0000320193" and issuers[0].resolution == "both"
+
+
+def test_reconcile_flags_homonym_collision():
+    rows = [{"cik": "", "ticker": "DT", "cusip6": "25156P", "name": "Deutsche Telekom Intl"}]
+    issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
+    assert issuers == []
+    assert collisions[0]["ticker"] == "DT"
+    assert collisions[0]["cik_ticker"] == "0001773383"
+    assert collisions[0]["cik_cusip"] == "0000999999"
+    assert collisions[0]["kind"] == "name_mismatch"
+    assert collisions[0]["sec_ticker_name"] == "Dynatrace, Inc."
+
+
+def test_reconcile_classifies_collision_name_match():
+    rows = [{"cik": "", "ticker": "KO", "cusip6": "191216", "name": "The Coca-Cola Company"}]
+    _, collisions, _ = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
+    assert collisions[0]["kind"] == "name_match"
+
+
+def test_reconcile_ticker_only_and_cusip_only_and_unresolved():
+    rows = [
+        {"cik": "", "ticker": "AAPL", "cusip6": "ZZZZZZ", "name": ""},
+        {"cik": "", "ticker": "TKM", "cusip6": "25156P", "name": "DT Fin"},
+        {"cik": "", "ticker": "NOPE", "cusip6": "ZZZZZZ", "name": "Mystery"},
+    ]
+    issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
+    assert {i.resolution for i in issuers} == {"ticker", "cusip"}
+    assert {i.cik for i in issuers} == {"0000320193", "0000999999"}
+    assert unresolved == ["NOPE"]
+
+
+def test_read_identifier_csv_autodetects_cik_ticker_cusip(tmp_path):
+    csv_path = tmp_path / "u.csv"
+    csv_path.write_text(
+        "CIK,Ticker,CUSIP,Issuer\n"
+        "0000320193,AAPL,037833AA0,Apple Inc\n"
+        "0000320193,AAPL,037833BB1,Apple Inc\n"
+        ",AFL,001055AY8,Aflac Inc\n",
+        encoding="utf-8",
+    )
+    rows = read_identifier_csv(csv_path)
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["AAPL"]["cik"] == "0000320193"
+    assert by_ticker["AAPL"]["cusip6"] == "037833"
+    assert by_ticker["AFL"]["cik"] == ""
+    assert by_ticker["AFL"]["cusip6"] == "001055"
+
+
+def test_read_identifier_csv_derives_cusip6_from_isin(tmp_path):
+    csv_path = tmp_path / "u.csv"
+    csv_path.write_text("Ticker,ISIN\nABBV,US00287YAD56\n", encoding="utf-8")
+    rows = read_identifier_csv(csv_path)
+    assert rows[0]["cusip6"] == "00287Y"
