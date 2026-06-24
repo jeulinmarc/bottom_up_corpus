@@ -11,6 +11,10 @@ with the architecture designed to add other open company-disclosure systems
 later (Japan EDINET, Korea DART, EU ESEF / filings.xbrl.org, UK Companies House,
 France INPI, Brazil CVM, …).
 
+> **How it works:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
+> layer map, the end-to-end corpus lifecycle, the issuer-resolution waterfall, and
+> diagrams.
+
 ## Core principles (shared with cb_corpus)
 
 - **Official primary sources only** — every document comes from the issuer's
