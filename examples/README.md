@@ -12,7 +12,7 @@ export BOTTOM_UP_CORPUS_CONTACT="you@example.com"
 
 Scripts that hit SEC EDGAR are bounded (one issuer, a filing or two) and write any
 artifacts to a temporary directory, so they leave the repo's `data/` untouched.
-Several run **fully offline** (no network): `06`, `08`, `11`.
+Several run **fully offline** (no network): `06`, `08`, `11`, `15`.
 
 There is one runnable example per capability. See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)
 for how the pieces fit together.
@@ -45,3 +45,4 @@ for how the pieces fit together.
 | `12_sp500_historical.py` | Build the S&P 500 as a historical union (`first_seen`/`last_seen`) |
 | `13_discover_index.py` | Exhaustive discovery via the quarterly full-index, incl. delisted *(downloads a large index)* |
 | `14_completeness_report.py` | Audit coverage with the completeness matrix (ok / partial / missing) |
+| `15_name_resolution.py` | Resolve company names → CIKs via the SEC name index (former names, collision detection) *(offline)* |
