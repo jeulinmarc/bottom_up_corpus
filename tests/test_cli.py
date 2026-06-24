@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import types
 from datetime import date
 
 from bottom_up_corpus.cli import _parse_years, main
+from bottom_up_corpus.config import Config
+from bottom_up_corpus.universe import Issuer, Universe
 
 
 def _stats():
@@ -126,3 +129,86 @@ def test_xbrl_years_passes_both_bounds(monkeypatch):
     main(["xbrl", "--ciks", "320193", "--years", "2015-2018"])
     # --years is a real range now, not a lower bound only.
     assert captured["since_year"] == 2015 and captured["until_year"] == 2018
+
+
+def _patch_ticker_table(monkeypatch):
+    table = {
+        "AAPL": Issuer(cik="320193", ticker="AAPL", company="Apple Inc."),
+        "DT": Issuer(cik="1773383", ticker="DT", company="Dynatrace, Inc."),
+    }
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: table)
+
+
+def _write_bonds_and_crosswalk(tmp_path):
+    bonds = tmp_path / "u.csv"
+    bonds.write_text(
+        "Ticker,CUSIP,Issuer\n"
+        "AAPL,037833AA0,Apple Inc\n"
+        "DT,25156PAA0,Deutsche Telekom Intl\n",
+        encoding="utf-8",
+    )
+    xw = tmp_path / "xw.csv"
+    xw.write_text("cik,cusip6,cusip8\n320193.0,037833,03783310\n999999.0,25156P,25156P10\n",
+                  encoding="utf-8")
+    return bonds, xw
+
+
+def test_build_universe_from_file_keeps_collision_preferring_cusip(monkeypatch, tmp_path):
+    _patch_ticker_table(monkeypatch)
+    bonds, xw = _write_bonds_and_crosswalk(tmp_path)
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--from-file", str(bonds), "--crosswalk", str(xw), "--name", "u", "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    by_ticker = {i.ticker: i for i in Universe(cfg).load("u")}
+    assert by_ticker["AAPL"].cik == "0000320193"
+    assert by_ticker["DT"].cik == "0000999999"
+    assert by_ticker["DT"].resolution.startswith("collision")
+    coll = Universe(cfg).path("u").with_name("u_collisions.jsonl")
+    rows = [json.loads(l) for l in coll.read_text().splitlines() if l.strip()]
+    assert rows[0]["ticker"] == "DT" and rows[0]["kind"] == "name_mismatch"
+
+
+def test_build_universe_from_file_drop_collisions(monkeypatch, tmp_path):
+    _patch_ticker_table(monkeypatch)
+    bonds, xw = _write_bonds_and_crosswalk(tmp_path)
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe", "--from-file",
+               str(bonds), "--crosswalk", str(xw), "--name", "u", "--drop-collisions", "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    tickers = {i.ticker for i in Universe(cfg).load("u")}
+    assert "AAPL" in tickers and "DT" not in tickers
+
+
+def test_build_universe_from_file_warns_without_crosswalk(monkeypatch, tmp_path, capsys):
+    _patch_ticker_table(monkeypatch)
+    bonds = tmp_path / "u.csv"
+    bonds.write_text("Ticker,CUSIP\nAAPL,037833AA0\n", encoding="utf-8")
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--from-file", str(bonds), "--name", "u", "--write"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "no --crosswalk" in err.lower() or "without a crosswalk" in err.lower()
+    cfg = Config(data_dir=tmp_path / "data")
+    assert {i.ticker for i in Universe(cfg).load("u")} == {"AAPL"}
+
+
+def test_equity_index_flag_builds_sp500(monkeypatch, tmp_path):
+    monkeypatch.setattr("bottom_up_corpus.cli.issuers_from_sp500",
+                        lambda fetcher, **kw: ([Issuer(cik="320193", ticker="AAPL")], [], []))
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--equity-index", "sp500", "--current-only", "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    assert [i.ticker for i in Universe(cfg).load("sp500")] == ["AAPL"]
+
+
+def test_legacy_index_alias_still_works_with_deprecation_notice(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("bottom_up_corpus.cli.issuers_from_sp500",
+                        lambda fetcher, **kw: ([Issuer(cik="320193", ticker="AAPL")], [], []))
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--index", "sp500", "--current-only", "--write"])
+    assert rc == 0
+    assert "deprecated" in capsys.readouterr().err.lower()
+    cfg = Config(data_dir=tmp_path / "data")
+    assert [i.ticker for i in Universe(cfg).load("sp500")] == ["AAPL"]

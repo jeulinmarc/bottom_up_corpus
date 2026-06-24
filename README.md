@@ -184,19 +184,35 @@ Issuer universe (curated tier, version-controlled under `data/universe/`):
 python -m bottom_up_corpus build-universe --tickers AAPL,MSFT,GOOGL --name sp_curated --write
 python -m bottom_up_corpus list-universe --name sp_curated
 
-# Build the S&P 500 from its composition (the only index with open dated history):
-python -m bottom_up_corpus build-universe --index sp500 --current-only --write   # today's ~500 members
-python -m bottom_up_corpus build-universe --index sp500 --since 2010 --write      # historical UNION (all
+# Build the S&P 500 from its composition (the only equity index with open dated history):
+python -m bottom_up_corpus build-universe --equity-index sp500 --current-only --write   # today's ~500 members
+python -m bottom_up_corpus build-universe --equity-index sp500 --since 2010 --write      # historical UNION (all
 #   companies that were ever members since 2010) + a dated data/universe/sp500_changes.jsonl
+
+# From a CSV of identifiers (a credit-index constituents export or any list):
+# auto-detects CIK / Ticker / CUSIP / ISIN columns; authority CIK > CUSIP > ticker.
+python -m bottom_up_corpus build-universe --from-file credit_universe.csv \
+    --crosswalk cik-cusip-maps.csv --name credit_demo --write
 ```
 
-`--index sp500` reconstructs membership from Wikipedia (current table + the dated
-changes table), so the historical union is **not survivorship-biased on
+`--equity-index sp500` reconstructs membership from Wikipedia (current table + the
+dated changes table), so the historical union is **not survivorship-biased on
 selection**. CIKs are filled for current/active members; since-delisted members
 are kept with `cik=""` and reported (open data can't reliably map reused/retired
 tickers). For survivorship-free *filing* coverage, `discover-index` (all filers)
 remains the lever. Russell 1000 / Nasdaq-100 have no open dated source (not
-supported).
+supported). (`--index` is a deprecated alias for `--equity-index`.)
+
+Equity indices are fetched by name; **credit** indices are proprietary, so you
+bring their constituents as a file via `--from-file`. The file's `CIK` column
+(when present) is authoritative; otherwise each issuer resolves by CUSIP6->CIK
+(needs `--crosswalk`, a `cik,cusip6,cusip8` CSV) and/or ticker->CIK. When the two
+derived sources disagree — a recycled ticker pointing at a different company than
+the bond's CUSIP6 — the row is a **collision**, classified `name_match` /
+`name_mismatch` and written to `data/universe/<name>_collisions.jsonl`; collisions
+are kept by default resolved to the `--prefer` CIK (default `cusip`), or excluded
+with `--drop-collisions`. A CUSIP-bearing file without `--crosswalk` resolves via
+CIK/ticker only (with a warning), not an error.
 
 Discovery (metadata into per-issuer manifests; **dry-run by default**, `--write`
 to persist):

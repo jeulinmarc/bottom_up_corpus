@@ -116,3 +116,28 @@ def normalize_cik(cik: str | int) -> str:
     if not digits:
         raise ValueError(f"not a valid CIK: {cik!r}")
     return digits.zfill(10)
+
+
+def normalize_cusip(cusip: str) -> str:
+    """Return a CUSIP upper-cased and trimmed; validate length (8 or 9) + charset.
+
+    A full CUSIP is 9 alphanumeric characters (issuer 6 + issue 2 + check 1); the
+    8-character form (no check digit) also occurs in feeds and is accepted.
+    """
+    value = str(cusip).strip().upper()
+    if len(value) not in (8, 9) or not value.isalnum():
+        raise ValueError(f"not a valid CUSIP: {cusip!r}")
+    return value
+
+
+def cusip6(value: str) -> str:
+    """Return the 6-character issuer prefix (CUSIP6) from a CUSIP or US ISIN.
+
+    A US ISIN is ``"US"`` + the 9-char CUSIP + a check digit (12 chars total);
+    its embedded CUSIP6 is characters 2..8. Anything else is treated as a CUSIP
+    and truncated to its first 6 characters.
+    """
+    s = str(value).strip().upper()
+    if len(s) == 12 and s[:2].isalpha():
+        return s[2:8]
+    return s[:6]
