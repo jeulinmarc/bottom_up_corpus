@@ -5,7 +5,9 @@ import pytest
 from bottom_up_corpus.config import (
     SEC_MAX_REQUESTS_PER_SECOND,
     Config,
+    cusip6,
     normalize_cik,
+    normalize_cusip,
 )
 
 
@@ -56,3 +58,27 @@ def test_normalize_cik(raw, expected):
 def test_normalize_cik_rejects_empty():
     with pytest.raises(ValueError):
         normalize_cik("abc")
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("00037BAC6", "00037BAC6"),
+    (" 00037bac6 ", "00037BAC6"),
+    ("00037BAC", "00037BAC"),
+])
+def test_normalize_cusip(raw, expected):
+    assert normalize_cusip(raw) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "123", "00037BAC63", "00037B@C6"])
+def test_normalize_cusip_rejects_bad_length_or_chars(bad):
+    with pytest.raises(ValueError):
+        normalize_cusip(bad)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("00037BAC6", "00037B"),
+    ("00037bac6", "00037B"),
+    ("US00037BAC63", "00037B"),
+])
+def test_cusip6(raw, expected):
+    assert cusip6(raw) == expected
