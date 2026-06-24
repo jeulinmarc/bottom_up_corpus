@@ -339,3 +339,39 @@ def test_name_cache_roundtrip_merges_and_dedups(tmp_path):
     loaded = load_name_cache(path)
     assert loaded["APPLE"] == "0000320193"
     assert loaded["SUNRISE"] == "0000111111"
+
+
+def test_name_collision_resolved_by_date_window(make_fetcher):
+    # "SUNRISE" -> {111111, 222222}. On 2015, only 111111 still bears the name;
+    # 222222 had renamed to NEWCO by 2010, so the date singles out 111111.
+    index = {"SUNRISE": {"0000111111", "0000222222"}}
+    routes = {
+        "CIK0000111111.json": {"name": "SUNRISE CORP", "formerNames": []},
+        "CIK0000222222.json": {"name": "NEWCO INC", "formerNames": [
+            {"name": "Sunrise Corporation",
+             "from": "2000-01-01T00:00:00.000Z", "to": "2010-01-01T00:00:00.000Z"}]},
+    }
+    fetcher = make_fetcher(routes)
+    resolved, collisions, unresolved = resolve_names(
+        ["Sunrise Corp"], index,
+        dates={"Sunrise Corp": "2015-06-01"}, fetcher=fetcher)
+    assert resolved == {"Sunrise Corp": "0000111111"}
+    assert collisions == []
+
+
+def test_name_collision_unbroken_when_date_does_not_separate(make_fetcher):
+    # On 2005 BOTH bore the name -> the collision stands.
+    index = {"SUNRISE": {"0000111111", "0000222222"}}
+    routes = {
+        "CIK0000111111.json": {"name": "SUNRISE CORP", "formerNames": []},
+        "CIK0000222222.json": {"name": "NEWCO INC", "formerNames": [
+            {"name": "Sunrise Corporation",
+             "from": "2000-01-01T00:00:00.000Z", "to": "2010-01-01T00:00:00.000Z"}]},
+    }
+    fetcher = make_fetcher(routes)
+    resolved, collisions, unresolved = resolve_names(
+        ["Sunrise Corp"], index,
+        dates={"Sunrise Corp": "2005-06-01"}, fetcher=fetcher)
+    assert resolved == {}
+    assert collisions == [{"name": "Sunrise Corp",
+                           "candidates": ["0000111111", "0000222222"]}]

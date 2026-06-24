@@ -15,6 +15,7 @@ import json
 import warnings
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 
 from .config import Config, cusip6 as to_cusip6, cusip_full as to_cusip_full, normalize_cik
@@ -405,21 +406,60 @@ def _resolve_one_name(
     return ("collision", sorted(ciks))
 
 
+def _coerce_date(value) -> date | None:
+    """Best-effort ISO date from a string/``date``; ``None`` for ``""``/``"current"``."""
+    if isinstance(value, date):
+        return value
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _tiebreak_collision_by_date(
+    key: str, candidates: list[str], target: date, fetcher: Fetcher
+) -> str:
+    """Return the single candidate CIK whose name-in-effect on ``target``
+    canonicalizes to ``key``; ``""`` if zero or more than one qualify.
+
+    Reads each candidate's dated ``formerNames`` via the submissions API and
+    applies :func:`naming.name_as_of`. One submissions GET per candidate -- only
+    reached for an already-ambiguous name with a known date.
+    """
+    from .sources.edgar_submissions import SUBMISSIONS_URL
+
+    survivors: list[str] = []
+    for cik in candidates:
+        try:
+            data = fetcher.get_json(SUBMISSIONS_URL.format(cik=cik))
+        except Exception:  # noqa: BLE001 - a failed lookup just can't vouch for this CIK
+            continue
+        eff = name_as_of(target, data.get("name", ""),
+                         parse_former_names(data.get("formerNames")))
+        if canonical_name(eff) == key:
+            survivors.append(cik)
+    return survivors[0] if len(survivors) == 1 else ""
+
+
 def resolve_names(
     names: Iterable[str],
     index: dict[str, set[str]],
     *,
     cache: dict[str, str] | None = None,
+    dates: dict[str, object] | None = None,
+    fetcher: Fetcher | None = None,
 ) -> tuple[dict[str, str], list[dict], list[str]]:
     """Resolve names to CIKs via ``index`` (and a pinned ``cache``).
 
-    Returns ``(resolved, collisions, unresolved)``: ``resolved`` maps the input
-    name to its CIK (unique match or cache hit); ``collisions`` lists
-    ``{name, candidates}`` for names mapping to several CIKs; ``unresolved`` is
-    the names with no canonical match. Exact-after-normalization only -- no
-    fuzzy matching (a false positive would attach the wrong issuer's data).
+    Returns ``(resolved, collisions, unresolved)``. A name mapping to several
+    CIKs is a collision unless ``dates[name]`` plus ``fetcher`` let the dated
+    ``formerNames`` tie-breaker single out one CIK (then it is ``resolved``).
+    Exact-after-normalization only -- no fuzzy matching.
     """
     cache = cache or {}
+    dates = dates or {}
     resolved: dict[str, str] = {}
     collisions: list[dict] = []
     unresolved: list[str] = []
@@ -431,7 +471,15 @@ def resolve_names(
         if status == "resolved":
             resolved[name] = val  # type: ignore[assignment]
         elif status == "collision":
-            collisions.append({"name": name, "candidates": val})
+            pick = ""
+            target = _coerce_date(dates.get(name))
+            if target is not None and fetcher is not None:
+                pick = _tiebreak_collision_by_date(
+                    canonical_name(name), val, target, fetcher)  # type: ignore[arg-type]
+            if pick:
+                resolved[name] = pick
+            else:
+                collisions.append({"name": name, "candidates": val})
         else:
             unresolved.append(name)
     return resolved, collisions, unresolved
