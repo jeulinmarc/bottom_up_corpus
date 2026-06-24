@@ -27,6 +27,7 @@ from .pipeline import (
     render_universe,
 )
 from .rag import iter_items
+from .sources.edgar_fts import EdgarFTS
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
 from .taxonomy import FULL_SCOPE, FormType, parse_scope
@@ -225,7 +226,9 @@ def _build_universe_from_file(args: argparse.Namespace, cfg, fetcher) -> int:
               f"and to cross-check tickers).", file=sys.stderr)
 
     ticker_table = load_company_tickers(fetcher) if any(r["ticker"] for r in rows) else {}
-    issuers, collisions, unresolved = reconcile_identifiers(rows, ticker_table, crosswalk)
+    fts = EdgarFTS(fetcher) if args.fts else None
+    issuers, collisions, unresolved = reconcile_identifiers(
+        rows, ticker_table, crosswalk, fts=fts, fts_limit=args.fts_limit)
 
     if not args.drop_collisions:
         for c in collisions:
@@ -234,8 +237,11 @@ def _build_universe_from_file(args: argparse.Namespace, cfg, fetcher) -> int:
                                   cusip6=c["cusip6"], resolution=f"collision:{c['kind']}:{args.prefer}"))
 
     by_kind = Counter(c["kind"] for c in collisions)
+    fts_conf = sum(1 for i in issuers if i.resolution == "fts:confirmed")
+    fts_unv = sum(1 for i in issuers if i.resolution == "fts:unverified")
     print(f"resolved {len(issuers)} issuers; {len(collisions)} collision(s) "
           f"[{by_kind.get('name_mismatch', 0)} name_mismatch, {by_kind.get('name_match', 0)} name_match]; "
+          f"fts {fts_conf} confirmed / {fts_unv} unverified; "
           f"{len(unresolved)} unresolved (of {len(rows)} input names)", file=sys.stderr)
 
     if args.write:
@@ -518,6 +524,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="exclude ticker/CUSIP6 collisions from the universe (default: keep them)")
     bu.add_argument("--prefer", choices=["ticker", "cusip"], default="cusip",
                     help="which CIK to trust for kept collisions (default: cusip, issuer-anchored)")
+    bu.add_argument("--fts", action="store_true",
+                    help="resolve still-unresolved rows via EDGAR full-text search (network, opt-in)")
+    bu.add_argument("--fts-limit", type=int, default=None,
+                    help="cap the number of --fts lookups (for bounded runs)")
     bu.add_argument("--equity-index", choices=["sp500"], dest="equity_index",
                     help="build from an equity index's composition (fetched by name)")
     bu.add_argument("--index", choices=["sp500"], dest="index_legacy",

@@ -17,7 +17,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .config import Config, cusip6 as to_cusip6, normalize_cik
+from .config import Config, cusip6 as to_cusip6, cusip_full as to_cusip_full, normalize_cik
 from .http import Fetcher
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -177,16 +177,20 @@ def read_identifier_csv(
         ticker = (row.get(tcol, "") if tcol else "").strip().upper()
         raw_id = (row.get(ccol, "") if ccol else "").strip()
         c6 = to_cusip6(raw_id) if raw_id else ""
+        full = to_cusip_full(raw_id) if raw_id else ""
         name = (row.get(ncol, "") if ncol else "").strip()
         key = ticker or cik or c6
         if not key:
             continue
         g = groups.setdefault(key, {"ticker": ticker, "cik_votes": Counter(),
-                                    "cusip6_votes": Counter(), "name": ""})
+                                    "cusip6_votes": Counter(), "cusip_votes": Counter(),
+                                    "name": ""})
         if cik:
             g["cik_votes"][cik] += 1
         if c6:
             g["cusip6_votes"][c6] += 1
+        if full:
+            g["cusip_votes"][full] += 1
         if name and not g["name"]:
             g["name"] = name
 
@@ -194,10 +198,12 @@ def read_identifier_csv(
     for g in groups.values():
         cik_votes: Counter = g["cik_votes"]
         c6_votes: Counter = g["cusip6_votes"]
+        full_votes: Counter = g["cusip_votes"]
         out.append({
             "cik": cik_votes.most_common(1)[0][0] if cik_votes else "",
             "ticker": g["ticker"],
             "cusip6": c6_votes.most_common(1)[0][0] if c6_votes else "",
+            "cusip": full_votes.most_common(1)[0][0] if full_votes else "",
             "name": g["name"],
         })
     return out
@@ -207,6 +213,9 @@ def reconcile_identifiers(
     rows: Iterable[dict],
     ticker_table: dict[str, Issuer],
     crosswalk: dict[str, set[str]],
+    *,
+    fts=None,
+    fts_limit: int | None = None,
 ) -> tuple[list[Issuer], list[dict], list[str]]:
     """Resolve each row by authority CIK > CUSIP > ticker, cross-checking ticker vs CUSIP.
 
@@ -228,6 +237,7 @@ def reconcile_identifiers(
     issuers: list[Issuer] = []
     collisions: list[dict] = []
     unresolved: list[str] = []
+    fts_calls = 0
     for row in rows:
         raw_cik = (row.get("cik") or "").strip()
         ticker = (row.get("ticker") or "").strip().upper()
@@ -266,7 +276,18 @@ def reconcile_identifiers(
             issuers.append(Issuer(cik=cik_cusip, ticker=ticker, company=company,
                                   cusip6=c6, resolution="cusip"))
         else:
-            unresolved.append(ticker or c6)
+            full_cusip = (row.get("cusip") or "").strip().upper()
+            hit = None
+            if fts is not None and full_cusip and (fts_limit is None or fts_calls < fts_limit):
+                fts_calls += 1
+                hit = fts.resolve(full_cusip)
+            if hit:
+                hit_cik, hit_name = hit
+                kind = "confirmed" if _names_match(name, hit_name) else "unverified"
+                issuers.append(Issuer(cik=hit_cik, ticker=ticker, company=name,
+                                      cusip6=c6, resolution=f"fts:{kind}"))
+            else:
+                unresolved.append(ticker or c6)
     return issuers, collisions, unresolved
 
 
