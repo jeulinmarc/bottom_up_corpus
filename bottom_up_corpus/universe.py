@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import Config, cusip6 as to_cusip6, cusip_full as to_cusip_full, normalize_cik
 from .http import Fetcher
+from .naming import canonical_name, name_as_of, parse_former_names
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
@@ -380,6 +381,117 @@ def resolve_cusips(
             stacklevel=2,
         )
     return resolved, unresolved
+
+
+def _resolve_one_name(
+    name: str, index: dict[str, set[str]], cache: dict[str, str]
+) -> tuple[str, object]:
+    """Resolve a single name against the cache then the index (no date tier).
+
+    Returns ``("resolved", cik)``, ``("collision", [cik, ...])`` (sorted), or
+    ``("unresolved", None)``. The cache (keyed by canonical name) wins and also
+    short-circuits collision flagging.
+    """
+    key = canonical_name(name)
+    if not key:
+        return ("unresolved", None)
+    if key in cache:
+        return ("resolved", cache[key])
+    ciks = index.get(key)
+    if not ciks:
+        return ("unresolved", None)
+    if len(ciks) == 1:
+        return ("resolved", next(iter(ciks)))
+    return ("collision", sorted(ciks))
+
+
+def resolve_names(
+    names: Iterable[str],
+    index: dict[str, set[str]],
+    *,
+    cache: dict[str, str] | None = None,
+) -> tuple[dict[str, str], list[dict], list[str]]:
+    """Resolve names to CIKs via ``index`` (and a pinned ``cache``).
+
+    Returns ``(resolved, collisions, unresolved)``: ``resolved`` maps the input
+    name to its CIK (unique match or cache hit); ``collisions`` lists
+    ``{name, candidates}`` for names mapping to several CIKs; ``unresolved`` is
+    the names with no canonical match. Exact-after-normalization only -- no
+    fuzzy matching (a false positive would attach the wrong issuer's data).
+    """
+    cache = cache or {}
+    resolved: dict[str, str] = {}
+    collisions: list[dict] = []
+    unresolved: list[str] = []
+    for raw in names:
+        name = str(raw).strip()
+        if not name:
+            continue
+        status, val = _resolve_one_name(name, index, cache)
+        if status == "resolved":
+            resolved[name] = val  # type: ignore[assignment]
+        elif status == "collision":
+            collisions.append({"name": name, "candidates": val})
+        else:
+            unresolved.append(name)
+    return resolved, collisions, unresolved
+
+
+def load_name_cache(path: Path | str) -> dict[str, str]:
+    """Load the ``name,cik`` ledger CSV into ``{canonical_name: cik}``.
+
+    Keys are re-canonicalized on load (idempotent) so a hand-edited file still
+    matches queries. A CIK serialized as a float string (``"320193.0"``) is
+    tolerated, mirroring :func:`load_cusip_crosswalk`.
+    """
+    import csv
+
+    out: dict[str, str] = {}
+    p = Path(path)
+    if not p.exists():
+        return out
+    with p.open(encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            name = (row.get("name") or "").strip()
+            raw_cik = (row.get("cik") or "").split(".")[0]
+            key = canonical_name(name)
+            if not key or not raw_cik.strip():
+                continue
+            try:
+                out[key] = normalize_cik(raw_cik)
+            except ValueError:
+                continue
+    return out
+
+
+def write_name_cache(path: Path | str, pairs: Iterable[tuple[str, str]]) -> int:
+    """Merge ``(name, cik)`` pairs into the ``name,cik`` ledger CSV (dedup).
+
+    Names are canonicalized to the file's key form; the last CIK written for a
+    key wins (a pin updates). Returns the total row count. Transparent
+    optimization artifact -- written independently of ``--write``.
+    """
+    import csv
+
+    p = Path(path)
+    rows: dict[str, str] = {}
+    if p.exists():
+        rows.update(load_name_cache(p))
+    for name, cik in pairs:
+        key = canonical_name(name)
+        if not key:
+            continue
+        try:
+            rows[key] = normalize_cik(cik)
+        except ValueError:
+            continue
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["name", "cik"])
+        for key in sorted(rows):
+            w.writerow([key, rows[key]])
+    return len(rows)
 
 
 def resolve_ciks(ciks: Iterable[str], fetcher: Fetcher) -> list[Issuer]:

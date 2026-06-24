@@ -7,12 +7,15 @@ from bottom_up_corpus.universe import (
     Universe,
     load_company_tickers,
     load_cusip_crosswalk,
+    load_name_cache,
     read_identifier_csv,
     reconcile_identifiers,
     resolve_ciks,
     resolve_cusips,
+    resolve_names,
     resolve_tickers,
     write_cusip_crosswalk,
+    write_name_cache,
 )
 
 
@@ -305,3 +308,34 @@ def test_write_cusip_crosswalk_merges_and_dedups(tmp_path):
     n = write_cusip_crosswalk(path, [("0000320193", "037833"), ("789019", "594918")])
     assert n == 2
     assert load_cusip_crosswalk(path) == {"037833": {"0000320193"}, "594918": {"0000789019"}}
+
+
+def test_resolve_names_unique_collision_unresolved():
+    index = {"WIDGET": {"0000999999"}, "SUNRISE": {"0000111111", "0000222222"}}
+    resolved, collisions, unresolved = resolve_names(
+        ["Widget Inc", "Sunrise Corp", "Nobody LLC"], index)
+    assert resolved == {"Widget Inc": "0000999999"}
+    assert collisions == [{"name": "Sunrise Corp",
+                           "candidates": ["0000111111", "0000222222"]}]
+    assert unresolved == ["Nobody LLC"]
+
+
+def test_resolve_names_cache_short_circuits_index_and_collision():
+    index = {"SUNRISE": {"0000111111", "0000222222"}}
+    cache = {"SUNRISE": "0000111111"}  # pinned decision, keyed by canonical name
+    resolved, collisions, unresolved = resolve_names(
+        ["Sunrise Corp"], index, cache=cache)
+    assert resolved == {"Sunrise Corp": "0000111111"}
+    assert collisions == [] and unresolved == []
+
+
+def test_name_cache_roundtrip_merges_and_dedups(tmp_path):
+    path = tmp_path / "ref" / "name_cik_cache.csv"
+    assert load_name_cache(path) == {}  # absent -> empty
+    n1 = write_name_cache(path, [("Apple Inc.", "320193"), ("Sunrise Corp", "111111")])
+    assert n1 == 2
+    n2 = write_name_cache(path, [("Apple Inc.", "320193")])  # dup, no growth
+    assert n2 == 2
+    loaded = load_name_cache(path)
+    assert loaded["APPLE"] == "0000320193"
+    assert loaded["SUNRISE"] == "0000111111"
