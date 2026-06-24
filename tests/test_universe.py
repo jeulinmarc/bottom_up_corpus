@@ -6,7 +6,9 @@ from bottom_up_corpus.universe import (
     Issuer,
     Universe,
     load_company_tickers,
+    load_cusip_crosswalk,
     resolve_ciks,
+    resolve_cusips,
     resolve_tickers,
 )
 
@@ -93,3 +95,48 @@ def test_universe_roundtrips_cusip6_and_resolution(config):
     loaded = uni.load("withcusip")
     assert loaded[0].cusip6 == "037833"
     assert loaded[0].resolution == "both"
+
+
+SAMPLE_CROSSWALK = """cik,cusip6,cusip8
+320193.0,037833,03783310
+789019.0,594918,59491810
+12345.0,DUPDUP,DUPDUP10
+67890.0,DUPDUP,DUPDUP20
+"""
+
+
+def _write_crosswalk(tmp_path):
+    p = tmp_path / "xw.csv"
+    p.write_text(SAMPLE_CROSSWALK, encoding="utf-8")
+    return p
+
+
+def test_load_cusip_crosswalk_normalizes_cik_despite_float_artifact(tmp_path):
+    xw = load_cusip_crosswalk(_write_crosswalk(tmp_path))
+    assert xw["037833"] == {"0000320193"}
+    assert xw["594918"] == {"0000789019"}
+
+
+def test_load_cusip_crosswalk_collects_multiple_ciks_per_cusip6(tmp_path):
+    xw = load_cusip_crosswalk(_write_crosswalk(tmp_path))
+    assert xw["DUPDUP"] == {"0000012345", "0000067890"}
+
+
+def test_resolve_cusips_single_match(tmp_path):
+    xw = load_cusip_crosswalk(_write_crosswalk(tmp_path))
+    resolved, unresolved = resolve_cusips(["037833", "594918"], xw)
+    assert resolved == {"037833": "0000320193", "594918": "0000789019"}
+    assert unresolved == []
+
+
+def test_resolve_cusips_absent_goes_unresolved(tmp_path):
+    xw = load_cusip_crosswalk(_write_crosswalk(tmp_path))
+    resolved, unresolved = resolve_cusips(["999999"], xw)
+    assert resolved == {} and unresolved == ["999999"]
+
+
+def test_resolve_cusips_ambiguous_multi_cik_is_unresolved(tmp_path):
+    xw = load_cusip_crosswalk(_write_crosswalk(tmp_path))
+    with pytest.warns(UserWarning, match="multiple CIKs"):
+        resolved, unresolved = resolve_cusips(["DUPDUP"], xw)
+    assert resolved == {} and unresolved == ["DUPDUP"]

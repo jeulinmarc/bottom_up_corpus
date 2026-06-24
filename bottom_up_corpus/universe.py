@@ -109,6 +109,62 @@ def resolve_tickers(
     return issuers, unresolved
 
 
+def load_cusip_crosswalk(path: Path | str) -> dict[str, set[str]]:
+    """Load a CUSIP6 -> {CIK} crosswalk CSV into ``{cusip6_upper: {cik, ...}}``.
+
+    Expects a ``cik,cusip6,cusip8`` schema. The common public feed serializes the
+    CIK as a float string (e.g. ``"320193.0"``), so we drop any fractional part
+    before normalizing -- otherwise ``normalize_cik`` would fold the trailing
+    ``.0`` into a spurious digit. Offline: no network.
+    """
+    import csv
+
+    out: dict[str, set[str]] = {}
+    with Path(path).open(encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            raw6 = (row.get("cusip6") or "").strip().upper()
+            raw_cik = (row.get("cik") or "").split(".")[0]
+            if not raw6 or not raw_cik.strip():
+                continue
+            try:
+                cik = normalize_cik(raw_cik)
+            except ValueError:
+                continue
+            out.setdefault(raw6, set()).add(cik)
+    return out
+
+
+def resolve_cusips(
+    cusip6s: Iterable[str], crosswalk: dict[str, set[str]]
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve CUSIP6 prefixes to CIKs via ``crosswalk``. Returns ``(resolved, unresolved)``.
+
+    Only an unambiguous (single-CIK) match resolves; a CUSIP6 absent **or** mapping
+    to several CIKs goes to ``unresolved``. A warning surfaces the ambiguous count.
+    """
+    resolved: dict[str, str] = {}
+    unresolved: list[str] = []
+    ambiguous: list[str] = []
+    for raw in cusip6s:
+        key = str(raw).strip().upper()
+        if not key:
+            continue
+        ciks = crosswalk.get(key)
+        if ciks and len(ciks) == 1:
+            resolved[key] = next(iter(ciks))
+        else:
+            unresolved.append(key)
+            if ciks:
+                ambiguous.append(key)
+    if ambiguous:
+        warnings.warn(
+            f"cusip crosswalk: {len(ambiguous)} CUSIP6(s) map to multiple CIKs; "
+            f"left unresolved ({', '.join(sorted(ambiguous)[:10])})",
+            stacklevel=2,
+        )
+    return resolved, unresolved
+
+
 def resolve_ciks(ciks: Iterable[str], fetcher: Fetcher) -> list[Issuer]:
     """Build issuers directly from CIKs via the submissions API.
 
