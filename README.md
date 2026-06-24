@@ -223,6 +223,24 @@ triage. `--fts-limit N` caps the lookups for a bounded run. Many remaining
 unresolved names are structurally outside SEC financials (144A/Reg-S private
 placements, non-profit/muni issuers) and no lookup recovers them.
 
+Identifier enrichment (triage, not resolution) via the free
+[OpenFIGI](https://www.openfigi.com/api) API — useful to label *why* an unresolved
+issuer is unresolved, and reusable across jurisdictions (it is not SEC-specific):
+
+```bash
+python -m bottom_up_corpus enrich-openfigi --from-file ids.csv --id-type isin --out enriched.csv
+# -> identifier,name,ticker,security_type,exch_code,coverage_hint
+#    US00037BAC63,ABB FINANCE USA INC,...,GLOBAL,TRACE,registry_candidate
+#    US...,SOME 144A NOTE,...,PRIV PLACEMENT,...,private_placement
+```
+
+OpenFIGI maps an ISIN/CUSIP to issuer name / ticker / security type — **not** a
+CIK, so it is a triage aid, not a resolver. `coverage_hint` is jurisdiction-neutral:
+`registry_candidate` (publicly registered — a candidate for its jurisdiction's
+filings registry), `private_placement` (144A/Reg-S — in no public registry), or
+`unknown`. A free API key (`--api-key` or `$OPENFIGI_API_KEY`) raises rate limits;
+it also works without one.
+
 Discovery (metadata into per-issuer manifests; **dry-run by default**, `--write`
 to persist):
 
