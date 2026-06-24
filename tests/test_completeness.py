@@ -51,3 +51,20 @@ def test_summarize(config):
     rows = build_matrix(["320193"], [2024], [FormType.A1, FormType.A2], storage=st)
     tally = summarize(rows)
     assert tally["ok"] == 1 and tally["partial"] == 1
+
+
+def test_matrix_company_uses_current_name_not_oldest(config):
+    # A manifest spans the issuer's history: an old filing under a former name and
+    # a recent one under the current name. The matrix label must be the CURRENT
+    # name, not whichever record happens to be first (the oldest) in the manifest.
+    st = Storage(config)
+    st.save_records([
+        FilingRecord(cik="320193", form_type=FormType.A1, sec_form="10-K", accession="old",
+                     company="APPLE COMPUTER INC", company_current="Apple Inc.",
+                     filing_date=date(1995, 12, 1)),
+        FilingRecord(cik="320193", form_type=FormType.A1, sec_form="10-K", accession="new",
+                     company="Apple Inc.", company_current="Apple Inc.",
+                     filing_date=date(2024, 11, 1)),
+    ], dry_run=False)
+    rows = build_matrix(["320193"], [2024], [FormType.A1], storage=st)
+    assert rows[0]["company"] == "Apple Inc."
