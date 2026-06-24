@@ -191,3 +191,24 @@ def test_build_universe_from_file_warns_without_crosswalk(monkeypatch, tmp_path,
     assert "no --crosswalk" in err.lower() or "without a crosswalk" in err.lower()
     cfg = Config(data_dir=tmp_path / "data")
     assert {i.ticker for i in Universe(cfg).load("u")} == {"AAPL"}
+
+
+def test_equity_index_flag_builds_sp500(monkeypatch, tmp_path):
+    monkeypatch.setattr("bottom_up_corpus.cli.issuers_from_sp500",
+                        lambda fetcher, **kw: ([Issuer(cik="320193", ticker="AAPL")], [], []))
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--equity-index", "sp500", "--current-only", "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    assert [i.ticker for i in Universe(cfg).load("sp500")] == ["AAPL"]
+
+
+def test_legacy_index_alias_still_works_with_deprecation_notice(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("bottom_up_corpus.cli.issuers_from_sp500",
+                        lambda fetcher, **kw: ([Issuer(cik="320193", ticker="AAPL")], [], []))
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--index", "sp500", "--current-only", "--write"])
+    assert rc == 0
+    assert "deprecated" in capsys.readouterr().err.lower()
+    cfg = Config(data_dir=tmp_path / "data")
+    assert [i.ticker for i in Universe(cfg).load("sp500")] == ["AAPL"]

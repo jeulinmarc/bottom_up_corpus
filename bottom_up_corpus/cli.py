@@ -147,9 +147,14 @@ def _cmd_build_universe(args: argparse.Namespace) -> int:
     if getattr(args, "from_file", None):
         return _build_universe_from_file(args, cfg, fetcher)
 
-    if getattr(args, "index", None):
-        if args.index != "sp500":
-            raise SystemExit("error: only --index sp500 is supported (see plan/README)")
+    equity_index = getattr(args, "equity_index", None)
+    if getattr(args, "index_legacy", None):
+        print("NOTE: --index is deprecated; use --equity-index.", file=sys.stderr)
+        equity_index = equity_index or args.index_legacy
+
+    if equity_index:
+        if equity_index != "sp500":
+            raise SystemExit("error: only --equity-index sp500 is supported (see README)")
         name = args.name if args.name != "curated" else "sp500"
         issuers, changes, unresolved = issuers_from_sp500(
             fetcher, start=args.since, current_only=args.current_only)
@@ -513,9 +518,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="exclude ticker/CUSIP6 collisions from the universe (default: keep them)")
     bu.add_argument("--prefer", choices=["ticker", "cusip"], default="cusip",
                     help="which CIK to trust for kept collisions (default: cusip, issuer-anchored)")
-    bu.add_argument("--index", choices=["sp500"], help="build from an index's composition (historical)")
-    bu.add_argument("--since", default=None, help="with --index: window start (YYYY) for the historical union")
-    bu.add_argument("--current-only", action="store_true", help="with --index: today's members only (no history)")
+    bu.add_argument("--equity-index", choices=["sp500"], dest="equity_index",
+                    help="build from an equity index's composition (fetched by name)")
+    bu.add_argument("--index", choices=["sp500"], dest="index_legacy",
+                    help=argparse.SUPPRESS)  # deprecated alias for --equity-index
+    bu.add_argument("--since", default=None, help="with --equity-index: window start (YYYY) for the historical union")
+    bu.add_argument("--current-only", action="store_true", help="with --equity-index: today's members only (no history)")
     bu.add_argument("--name", default="curated", help="universe name (file stem; defaults to index name)")
     bu.add_argument("--write", action="store_true", help="persist to data/universe/<name>.jsonl")
     bu.set_defaults(func=_cmd_build_universe)
