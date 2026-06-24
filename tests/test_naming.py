@@ -40,3 +40,30 @@ def test_name_as_of_unknown_date_is_current():
 
 def test_name_as_of_no_former_names():
     assert name_as_of(date(2015, 1, 1), "Apple Inc.", []) == "Apple Inc."
+
+
+def test_canonical_name_drops_legal_suffixes_and_punctuation():
+    from bottom_up_corpus.naming import canonical_name
+    assert canonical_name("Apple Inc.") == "APPLE"
+    assert canonical_name("MICROSOFT CORP") == "MICROSOFT"
+    assert canonical_name("The Coca-Cola Company") == "COCA COLA"
+    assert canonical_name("Berkshire Hathaway Inc.") == "BERKSHIRE HATHAWAY"
+
+
+def test_canonical_name_is_idempotent():
+    from bottom_up_corpus.naming import canonical_name
+    once = canonical_name("Sunrise Corporation")
+    assert once == "SUNRISE"
+    assert canonical_name(once) == once
+
+
+def test_canonical_name_keeps_meaningful_words():
+    from bottom_up_corpus.naming import canonical_name
+    # GROUP / HOLDINGS distinguish issuers and must NOT be dropped.
+    assert canonical_name("Carlyle Group Inc") == "CARLYLE GROUP"
+    assert canonical_name("Loews Holdings") == "LOEWS HOLDINGS"
+
+
+def test_canonical_name_pure_noise_is_empty():
+    from bottom_up_corpus.naming import canonical_name
+    assert canonical_name("The Co.") == ""

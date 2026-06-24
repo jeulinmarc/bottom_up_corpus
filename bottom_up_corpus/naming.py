@@ -73,3 +73,27 @@ def name_as_of(
         if after_start and before_end:
             return period.name
     return current_name
+
+
+# Legal-form / article tokens dropped when canonicalizing a company name for
+# name->CIK matching. Deliberately conservative: only legal forms and the
+# article "THE" -- meaningful words (GROUP, HOLDINGS, FINANCIAL, ...) are kept
+# because they distinguish issuers.
+_LEGAL_SUFFIXES = {
+    "INC", "INCORPORATED", "CORP", "CORPORATION", "CO", "COMPANY", "COS",
+    "LLC", "LLP", "LP", "PLC", "SA", "NV", "AG", "AB", "LTD", "LIMITED", "THE",
+}
+
+
+def canonical_name(name: str) -> str:
+    """Strict canonical form of a company name for exact name->CIK matching.
+
+    Upper-cases, turns every non-alphanumeric character into a space, drops
+    legal-form suffix tokens (see ``_LEGAL_SUFFIXES``), and collapses
+    whitespace. Idempotent, and applied symmetrically to index keys and query
+    names so a match is exact-after-normalization. Returns ``""`` for a name
+    made only of noise words.
+    """
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in str(name).upper())
+    tokens = [t for t in cleaned.split() if t and t not in _LEGAL_SUFFIXES]
+    return " ".join(tokens)
