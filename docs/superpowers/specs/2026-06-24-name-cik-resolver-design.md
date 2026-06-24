@@ -136,7 +136,7 @@ per-candidate submissions requests, and only for ambiguous names.
 ```
 name to resolve
    │
-   ├─ ledger hit? ───────────────► pinned CIK (resolution="name:cache")     [done]
+   ├─ ledger hit? ───────────────► pinned CIK (resolution="name")           [done]
    │
    ├─ canonical_name → index lookup
    │      0 CIK  ───────────────► unresolved (reported)
@@ -144,12 +144,18 @@ name to resolve
    │      >1 CIK ─┐
    │              └─ date window known?
    │                   yes → submissions formerNames tie-break
-   │                          1 survivor → resolved (resolution="name:dated")
+   │                          1 survivor → resolved (resolution="name")
    │                          else       → collision (candidates listed)
    │                   no  → collision (candidates listed)
    │
    └─ (in reconcile: if still unresolved, the existing --fts tier runs next)
 ```
+
+> **Implementation note (as shipped):** every name-tier resolution — ledger
+> hit, unique index match, or dated tie-break — carries the single
+> `resolution="name"` label. The earlier draft above floated `name:cache` /
+> `name:dated` sub-labels; these were collapsed to one label (YAGNI — the
+> universe row records the resolved CIK; finer provenance has no consumer).
 
 ## Integration
 
