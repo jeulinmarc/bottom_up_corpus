@@ -12,6 +12,7 @@ from bottom_up_corpus.universe import (
     resolve_ciks,
     resolve_cusips,
     resolve_tickers,
+    write_cusip_crosswalk,
 )
 
 
@@ -289,3 +290,18 @@ def test_reconcile_without_fts_is_unchanged():
              "name": "Mystery"}]
     issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {})
     assert issuers == [] and collisions == [] and unresolved == ["NOPE"]
+
+
+def test_write_cusip_crosswalk_roundtrips(tmp_path):
+    path = tmp_path / "cache.csv"
+    n = write_cusip_crosswalk(path, [("320193", "037833"), ("789019", "594918")])
+    assert n == 2
+    assert load_cusip_crosswalk(path) == {"037833": {"0000320193"}, "594918": {"0000789019"}}
+
+
+def test_write_cusip_crosswalk_merges_and_dedups(tmp_path):
+    path = tmp_path / "cache.csv"
+    write_cusip_crosswalk(path, [("320193", "037833")])
+    n = write_cusip_crosswalk(path, [("0000320193", "037833"), ("789019", "594918")])
+    assert n == 2
+    assert load_cusip_crosswalk(path) == {"037833": {"0000320193"}, "594918": {"0000789019"}}
