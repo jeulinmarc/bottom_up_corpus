@@ -200,7 +200,15 @@ def _name_tier(args, cfg, fetcher):
     ledger_path = getattr(args, "name_cache", None) or str(cfg.name_cache_path)
     if getattr(args, "no_name_resolution", False):
         return None, None, ledger_path
-    text = fetch_cik_lookup(fetcher, cfg.cik_lookup_path)
+    try:
+        text = fetch_cik_lookup(fetcher, cfg.cik_lookup_path)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"WARNING: name resolution unavailable (cik-lookup fetch failed: {exc}); "
+            "building from ticker/CUSIP only",
+            file=sys.stderr,
+        )
+        return None, None, ledger_path
     return parse_cik_lookup(text), load_name_cache(ledger_path), ledger_path
 
 

@@ -401,3 +401,31 @@ def test_fts_cache_writes_confirmed_only_without_write_flag(monkeypatch, tmp_pat
     assert xw == {"25156P": {"0000999999"}}
     assert "88888X" not in xw
     assert not (tmp_path / "data" / "universe" / "u.jsonl").exists()
+
+
+def test_name_tier_fetch_failure_degrades_gracefully(monkeypatch, tmp_path, capsys):
+    """A transient SEC fetch failure in _name_tier must not abort build-universe.
+
+    rc must be 0, stderr must carry the WARNING, and the build must complete
+    (even though no name resolution happens). Overrides the autouse
+    _stub_name_fetch with a raising stub set inside the test body.
+    """
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: {})
+    # Override the autouse stub with one that raises.
+    monkeypatch.setattr(
+        "bottom_up_corpus.cli.fetch_cik_lookup",
+        lambda fetcher, path: (_ for _ in ()).throw(
+            RuntimeError("simulated network failure")),
+    )
+
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text("Ticker,Name\nZZZZ,Widget Inc\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    rc = main(["--data-dir", str(data_dir), "build-universe",
+               "--from-file", str(csv_path), "--name", "names"])
+    assert rc == 0, "build-universe must exit 0 even when the name-tier fetch fails"
+    err = capsys.readouterr().err
+    assert "WARNING" in err, f"expected a WARNING on stderr; got: {err!r}"
+    assert "cik-lookup fetch failed" in err, (
+        f"stderr should mention the failure reason; got: {err!r}"
+    )

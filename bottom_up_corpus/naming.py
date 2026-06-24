@@ -93,6 +93,11 @@ def canonical_name(name: str) -> str:
     whitespace. Idempotent, and applied symmetrically to index keys and query
     names so a match is exact-after-normalization. Returns ``""`` for a name
     made only of noise words.
+
+    Note: ``_LEGAL_SUFFIXES`` tokens are dropped wherever they appear in the
+    name (set-membership over all tokens, not trailing-suffix removal only).
+    This is safe because the same canonicalization is applied symmetrically to
+    both the index keys and every query name.
     """
     cleaned = "".join(ch if ch.isalnum() else " " for ch in str(name).upper())
     tokens = [t for t in cleaned.split() if t and t not in _LEGAL_SUFFIXES]

@@ -639,6 +639,11 @@ def issuers_from_sp500(
             if not m.get("cik") and m["ticker"] in table:
                 m["cik"] = table[m["ticker"]].cik
 
+    # Capture members still without a CIK before the name tier runs, so that
+    # ticker-resolved members sharing a company string with a name-resolved
+    # member are not mislabeled "name" (dual-class shares: Fox A/B, etc.).
+    cikless_before_name = {id(m) for m in members if not m.get("cik")}
+
     # ...then the name tier for whatever the ticker map still misses.
     name_resolved: dict[str, str] = {}
     if name_index is not None:
@@ -651,7 +656,8 @@ def issuers_from_sp500(
         cik = m.get("cik") or ""
         if not cik:
             unresolved.append(m["ticker"])
-        res = "name" if (cik and m.get("company") in name_resolved) else ""
+        res = "name" if (cik and id(m) in cikless_before_name
+                         and m.get("company") in name_resolved) else ""
         issuers.append(Issuer(cik=cik, ticker=m["ticker"], company=m.get("company", ""),
                               first_seen=m.get("first_seen", ""),
                               last_seen=m.get("last_seen", ""), resolution=res))

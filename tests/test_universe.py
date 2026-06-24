@@ -5,6 +5,7 @@ import pytest
 from bottom_up_corpus.universe import (
     Issuer,
     Universe,
+    issuers_from_sp500,
     load_company_tickers,
     load_cusip_crosswalk,
     load_name_cache,
@@ -422,3 +423,58 @@ def test_resolve_member_names_fills_missing_cik():
     assert by_ticker["AAPL"]["cik"] == "0000320193"   # already had one, untouched
     assert by_ticker["GHOST"]["cik"] == ""            # not in index
     assert resolved == {"Sunrise Corp": "0000111111"}
+
+
+def test_issuers_from_sp500_dual_class_provenance_label(monkeypatch, make_fetcher):
+    """Dual-class shares sharing a company name must not bleed the 'name' label.
+
+    FOXA (ticker in SEC map -> ticker-resolved) and FOXB (ticker absent from
+    map -> resolved by name tier) both have company='Dual Co'.  Only FOXB must
+    carry resolution='name'; FOXA (already ticker-resolved before the name tier
+    runs) must carry resolution=''.
+    """
+    from bottom_up_corpus.sources.cik_lookup import parse_cik_lookup
+
+    # Two members with the same company string; FOXA is in the ticker map, FOXB is not.
+    fake_members = [
+        {"ticker": "FOXA", "company": "Dual Co", "cik": "",
+         "first_seen": "2010-01-01", "last_seen": "current"},
+        {"ticker": "FOXB", "company": "Dual Co", "cik": "",
+         "first_seen": "2010-01-01", "last_seen": "current"},
+    ]
+
+    # company_tickers.json: only FOXA present (FOXB absent -> won't ticker-resolve).
+    routes = {
+        "company_tickers.json": {
+            "0": {"cik_str": 1234567, "ticker": "FOXA", "title": "Dual Co"},
+        }
+    }
+    fetcher = make_fetcher(routes)
+
+    # Monkeypatch sp500_membership to return our fake members (no Wikipedia fetch).
+    monkeypatch.setattr(
+        "bottom_up_corpus.indices.sp500_membership",
+        lambda fetcher, start=None: (fake_members, []),
+    )
+
+    # cik-lookup text: "Dual Co" canonicalizes to "DUAL" -> CIK 0000007777777.
+    cik_lookup_text = "DUAL CO:7777777:\n"
+    name_index = parse_cik_lookup(cik_lookup_text)
+
+    issuers, _changes, unresolved = issuers_from_sp500(
+        fetcher, name_index=name_index)
+
+    assert unresolved == [], f"expected no unresolved, got {unresolved}"
+    by_ticker = {i.ticker: i for i in issuers}
+
+    # Both should have *a* CIK resolved.
+    assert by_ticker["FOXA"].cik != "", "FOXA must be resolved (ticker map)"
+    assert by_ticker["FOXB"].cik != "", "FOXB must be resolved (name tier)"
+
+    # The key assertion: only FOXB carries resolution='name'.
+    assert by_ticker["FOXB"].resolution == "name", (
+        f"FOXB should be 'name', got {by_ticker['FOXB'].resolution!r}")
+    assert by_ticker["FOXA"].resolution == "", (
+        f"FOXA was ticker-resolved; must not be labeled 'name', "
+        f"got {by_ticker['FOXA'].resolution!r}"
+    )

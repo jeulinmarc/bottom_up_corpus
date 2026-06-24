@@ -166,6 +166,16 @@ Add the name tier in the final `else` branch (ticker and CUSIP both failed),
 On a collision → a `collision` dict (same shape/discipline as existing
 collisions). Only if name resolution yields nothing does fts run.
 
+> **Implementation note (as shipped):** name collisions in
+> `reconcile_identifiers` do **not** emit a collision dict. The reasons are
+> (1) CSV rows carry no date window, so the dated tie-breaker cannot run, and
+> (2) the existing collision consumer in the CLI reads `c["cik_ticker"]` /
+> `c["kind"]`, which would KeyError on a name-collision dict. Instead, a name
+> collision silently falls through to the fts tier, and if fts also fails, the
+> row lands in `unresolved`. The net effect is indistinguishable from an absent
+> name (the row is reported as unresolved), which is the conservative and
+> correct behaviour for a zero-false-positive policy.
+
 ### `issuers_from_sp500`
 After the existing ticker-map pass, members still at `cik=""` that carry a
 `company` name are run through `resolve_names`, using the membership window
