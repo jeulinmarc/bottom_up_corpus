@@ -12,6 +12,7 @@ from bottom_up_corpus.universe import (
     reconcile_identifiers,
     resolve_ciks,
     resolve_cusips,
+    resolve_member_names,
     resolve_names,
     resolve_tickers,
     write_cusip_crosswalk,
@@ -403,3 +404,21 @@ def test_reconcile_name_collision_falls_through_to_unresolved():
         rows, {}, {}, name_index=name_index)
     assert issuers == []
     assert unresolved == ["Sunrise Corp"]
+
+
+def test_resolve_member_names_fills_missing_cik():
+    members = [
+        {"ticker": "AAPL", "company": "Apple Inc.", "cik": "0000320193",
+         "first_seen": "", "last_seen": "current"},
+        {"ticker": "OLDCO", "company": "Sunrise Corp", "cik": "",
+         "first_seen": "1998-01-02", "last_seen": "2012-03-04"},
+        {"ticker": "GHOST", "company": "Phantom Industries", "cik": "",
+         "first_seen": "", "last_seen": ""},
+    ]
+    index = {"SUNRISE": {"0000111111"}}  # unique -> no date lookup needed
+    out, resolved = resolve_member_names(members, index)
+    by_ticker = {m["ticker"]: m for m in out}
+    assert by_ticker["OLDCO"]["cik"] == "0000111111"
+    assert by_ticker["AAPL"]["cik"] == "0000320193"   # already had one, untouched
+    assert by_ticker["GHOST"]["cik"] == ""            # not in index
+    assert resolved == {"Sunrise Corp": "0000111111"}

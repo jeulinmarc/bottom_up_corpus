@@ -580,8 +580,38 @@ def resolve_ciks(ciks: Iterable[str], fetcher: Fetcher) -> list[Issuer]:
     return issuers
 
 
+def resolve_member_names(
+    members: list[dict],
+    name_index: dict[str, set[str]],
+    *,
+    name_cache: dict[str, str] | None = None,
+    fetcher: Fetcher | None = None,
+) -> tuple[list[dict], dict[str, str]]:
+    """Fill ``cik`` on members still missing one via the name tier.
+
+    Only members with an empty ``cik`` and a non-empty ``company`` are
+    considered; their membership window (``first_seen`` preferred, else
+    ``last_seen``) is the date hint for the collision tie-breaker. Mutates the
+    member dicts in place and returns ``(members, resolved{company->cik})``.
+    """
+    pending = [m for m in members if not m.get("cik") and m.get("company")]
+    if not pending:
+        return members, {}
+    names = [m["company"] for m in pending]
+    dates = {m["company"]: (m.get("first_seen") or m.get("last_seen") or "")
+             for m in pending}
+    resolved, _collisions, _unresolved = resolve_names(
+        names, name_index, cache=name_cache, dates=dates, fetcher=fetcher)
+    for m in members:
+        if not m.get("cik") and m.get("company") in resolved:
+            m["cik"] = resolved[m["company"]]
+    return members, resolved
+
+
 def issuers_from_sp500(
-    fetcher: Fetcher, *, start: str | None = None, current_only: bool = False
+    fetcher: Fetcher, *, start: str | None = None, current_only: bool = False,
+    name_index: dict[str, set[str]] | None = None,
+    name_cache: dict[str, str] | None = None,
 ) -> tuple[list[Issuer], list[dict], list[str]]:
     """Build an S&P 500 universe from Wikipedia composition.
 
@@ -601,21 +631,30 @@ def issuers_from_sp500(
     else:
         members, changes = sp500_membership(fetcher, start=start)
 
-    # Resolve missing CIKs (since-removed members) via the SEC map, in one fetch.
+    # Resolve missing CIKs (since-removed members): first the SEC ticker map...
     need = [m["ticker"] for m in members if not m.get("cik")]
-    resolved: dict[str, Issuer] = {}
     if need:
         table = load_company_tickers(fetcher)
-        resolved = {t: table[t] for t in need if t in table}
+        for m in members:
+            if not m.get("cik") and m["ticker"] in table:
+                m["cik"] = table[m["ticker"]].cik
+
+    # ...then the name tier for whatever the ticker map still misses.
+    name_resolved: dict[str, str] = {}
+    if name_index is not None:
+        members, name_resolved = resolve_member_names(
+            members, name_index, name_cache=name_cache, fetcher=fetcher)
 
     issuers: list[Issuer] = []
     unresolved: list[str] = []
     for m in members:
-        cik = m.get("cik") or (resolved[m["ticker"]].cik if m["ticker"] in resolved else "")
+        cik = m.get("cik") or ""
         if not cik:
             unresolved.append(m["ticker"])
+        res = "name" if (cik and m.get("company") in name_resolved) else ""
         issuers.append(Issuer(cik=cik, ticker=m["ticker"], company=m.get("company", ""),
-                              first_seen=m.get("first_seen", ""), last_seen=m.get("last_seen", "")))
+                              first_seen=m.get("first_seen", ""),
+                              last_seen=m.get("last_seen", ""), resolution=res))
     return issuers, changes, unresolved
 
 
