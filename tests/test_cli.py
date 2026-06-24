@@ -4,9 +4,18 @@ import json
 import types
 from datetime import date
 
+import pytest
+
 from bottom_up_corpus.cli import _parse_years, main
 from bottom_up_corpus.config import Config
 from bottom_up_corpus.universe import Issuer, Universe
+
+
+@pytest.fixture(autouse=True)
+def _stub_name_fetch(monkeypatch):
+    """Default-stub the name-tier SEC download so CLI tests stay network-free.
+    Tests that exercise name resolution override this with their own stub."""
+    monkeypatch.setattr("bottom_up_corpus.cli.fetch_cik_lookup", lambda fetcher, path: "")
 
 
 def _stats():

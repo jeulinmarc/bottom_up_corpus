@@ -197,7 +197,7 @@ def _name_tier(args, cfg, fetcher):
     """Return ``(name_index, name_cache, ledger_path)`` for the name->CIK tier,
     or ``(None, None, ledger_path)`` when disabled. Fetches the cached
     cik-lookup file (one GET) and loads the durable ledger."""
-    ledger_path = args.name_cache or str(cfg.name_cache_path)
+    ledger_path = getattr(args, "name_cache", None) or str(cfg.name_cache_path)
     if getattr(args, "no_name_resolution", False):
         return None, None, ledger_path
     text = fetch_cik_lookup(fetcher, cfg.cik_lookup_path)
@@ -220,7 +220,11 @@ def _cmd_build_universe(args: argparse.Namespace) -> int:
         if equity_index != "sp500":
             raise SystemExit("error: only --equity-index sp500 is supported (see README)")
         name = args.name if args.name != "curated" else "sp500"
-        name_index, name_cache, ledger_path = _name_tier(args, cfg, fetcher)
+        if args.current_only:
+            name_index = name_cache = None
+            ledger_path = getattr(args, "name_cache", None) or str(cfg.name_cache_path)
+        else:
+            name_index, name_cache, ledger_path = _name_tier(args, cfg, fetcher)
         issuers, changes, unresolved = issuers_from_sp500(
             fetcher, start=args.since, current_only=args.current_only,
             name_index=name_index, name_cache=name_cache)
