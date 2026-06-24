@@ -214,6 +214,15 @@ are kept by default resolved to the `--prefer` CIK (default `cusip`), or exclude
 with `--drop-collisions`. A CUSIP-bearing file without `--crosswalk` resolves via
 CIK/ticker only (with a warning), not an error.
 
+For names no offline tier resolves, `--fts` adds an opt-in network tier: it queries
+EDGAR full-text search on the bond's full CUSIP, **restricted to issuer offering
+forms** (424B/FWP/S-3) so the top hit is the issuer, not a fund holder. Each hit is
+name-corroborated against the file's issuer name and recorded as `fts:confirmed`
+(names share a token) or `fts:unverified` (they don't) — both kept, so you can
+triage. `--fts-limit N` caps the lookups for a bounded run. Many remaining
+unresolved names are structurally outside SEC financials (144A/Reg-S private
+placements, non-profit/muni issuers) and no lookup recovers them.
+
 Discovery (metadata into per-issuer manifests; **dry-run by default**, `--write`
 to persist):
 
