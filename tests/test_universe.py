@@ -78,3 +78,18 @@ def test_resolve_ciks_uses_submissions(apple_fetcher):
     assert by_cik["0000320193"].ticker == "AAPL"
     assert "0000999999" in by_cik
     assert by_cik["0000999999"].company == ""  # no route -> empty, but CIK retained
+
+
+def test_issuer_defaults_cusip_fields_empty():
+    issuer = Issuer(cik="320193", ticker="AAPL")
+    assert issuer.cusip6 == ""
+    assert issuer.resolution == ""
+
+
+def test_universe_roundtrips_cusip6_and_resolution(config):
+    uni = Universe(config)
+    uni.save("withcusip", [Issuer(cik="320193", ticker="AAPL", company="Apple Inc.",
+                                  cusip6="037833", resolution="both")])
+    loaded = uni.load("withcusip")
+    assert loaded[0].cusip6 == "037833"
+    assert loaded[0].resolution == "both"

@@ -37,6 +37,8 @@ class Issuer:
     company: str = ""
     first_seen: str = ""
     last_seen: str = ""
+    cusip6: str = ""
+    resolution: str = ""  # how the CIK was resolved: "cik", "ticker", "cusip", or "both"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cik", normalize_cik(self.cik) if self.cik else "")
@@ -210,6 +212,7 @@ class Universe:
                 cik=row.get("cik", ""), ticker=row.get("ticker", ""),
                 company=row.get("company", ""),
                 first_seen=row.get("first_seen", ""), last_seen=row.get("last_seen", ""),
+                cusip6=row.get("cusip6", ""), resolution=row.get("resolution", ""),
             ))
         return issuers
 
