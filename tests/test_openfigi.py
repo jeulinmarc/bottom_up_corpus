@@ -65,3 +65,12 @@ def test_coverage_hint_jurisdiction_neutral_buckets():
     assert coverage_hint("") == "unknown"
     # private markers win over GLOBAL in a compound type
     assert coverage_hint("GLOBAL 144A") == "private_placement"
+
+
+def test_map_identifiers_handles_short_response():
+    # If OpenFIGI returns fewer entries than the batch, every input still gets a
+    # key (the missing ones map to None) -- the dict contract holds.
+    poster = _FakePoster([[{"data": [{"name": "A"}]}]])  # 1 entry for 2 inputs
+    out = map_identifiers(["I1", "I2"], post=poster, batch_size=5, pause=0)
+    assert out["I1"].name == "A"
+    assert out["I2"] is None

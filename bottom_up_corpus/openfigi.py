@@ -96,7 +96,10 @@ def map_identifiers(
         batch = vals[start:start + batch_size]
         body = json.dumps([{"idType": figi_id_type, "idValue": v} for v in batch]).encode()
         results = post(OPENFIGI_URL, body, headers)
-        for value, result in zip(batch, results):
+        for i, value in enumerate(batch):
+            # Index by position so every input gets a key even if OpenFIGI returns
+            # a short/truncated result list (missing -> None).
+            result = results[i] if i < len(results) else None
             data = (result or {}).get("data") if isinstance(result, dict) else None
             if data:
                 d = data[0]
