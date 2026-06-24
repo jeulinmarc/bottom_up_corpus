@@ -213,6 +213,9 @@ def reconcile_identifiers(
     rows: Iterable[dict],
     ticker_table: dict[str, Issuer],
     crosswalk: dict[str, set[str]],
+    *,
+    fts=None,
+    fts_limit: int | None = None,
 ) -> tuple[list[Issuer], list[dict], list[str]]:
     """Resolve each row by authority CIK > CUSIP > ticker, cross-checking ticker vs CUSIP.
 
@@ -234,6 +237,7 @@ def reconcile_identifiers(
     issuers: list[Issuer] = []
     collisions: list[dict] = []
     unresolved: list[str] = []
+    fts_calls = 0
     for row in rows:
         raw_cik = (row.get("cik") or "").strip()
         ticker = (row.get("ticker") or "").strip().upper()
@@ -272,7 +276,18 @@ def reconcile_identifiers(
             issuers.append(Issuer(cik=cik_cusip, ticker=ticker, company=company,
                                   cusip6=c6, resolution="cusip"))
         else:
-            unresolved.append(ticker or c6)
+            full_cusip = (row.get("cusip") or "").strip().upper()
+            hit = None
+            if fts is not None and full_cusip and (fts_limit is None or fts_calls < fts_limit):
+                fts_calls += 1
+                hit = fts.resolve(full_cusip)
+            if hit:
+                hit_cik, hit_name = hit
+                kind = "confirmed" if _names_match(name, hit_name) else "unverified"
+                issuers.append(Issuer(cik=hit_cik, ticker=ticker, company=name,
+                                      cusip6=c6, resolution=f"fts:{kind}"))
+            else:
+                unresolved.append(ticker or c6)
     return issuers, collisions, unresolved
 
 

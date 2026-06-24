@@ -236,3 +236,56 @@ def test_read_identifier_csv_keeps_full_cusip(tmp_path):
     rows = read_identifier_csv(csv_path)
     assert rows[0]["cusip"] == "037833AA0"
     assert rows[0]["cusip6"] == "037833"
+
+
+class _FakeFTS:
+    """resolve(cusip) -> (cik, name) from a dict; counts calls."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.calls = 0
+
+    def resolve(self, cusip):
+        self.calls += 1
+        return self.mapping.get(cusip)
+
+
+def test_reconcile_fts_confirmed_when_name_corroborates():
+    rows = [{"cik": "", "ticker": "TKM", "cusip6": "25156P", "cusip": "25156PAA0",
+             "name": "Deutsche Telekom Intl Finance"}]
+    fts = _FakeFTS({"25156PAA0": ("0000999999", "DEUTSCHE TELEKOM INTL FIN BV")})
+    issuers, _, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {}, fts=fts)
+    assert unresolved == []
+    assert issuers[0].cik == "0000999999"
+    assert issuers[0].resolution == "fts:confirmed"
+
+
+def test_reconcile_fts_unverified_when_name_differs():
+    rows = [{"cik": "", "ticker": "TKM", "cusip6": "25156P", "cusip": "25156PAA0",
+             "name": "Deutsche Telekom Intl Finance"}]
+    fts = _FakeFTS({"25156PAA0": ("0000999999", "SOME UNDERWRITER LLC")})
+    issuers, _, _ = reconcile_identifiers(rows, TICKER_TABLE, {}, fts=fts)
+    assert issuers[0].resolution == "fts:unverified"
+
+
+def test_reconcile_fts_no_hit_stays_unresolved():
+    rows = [{"cik": "", "ticker": "NOPE", "cusip6": "ZZZZZZ", "cusip": "ZZZZZZZZ9",
+             "name": "Mystery"}]
+    fts = _FakeFTS({})
+    issuers, _, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {}, fts=fts)
+    assert issuers == [] and unresolved == ["NOPE"]
+
+
+def test_reconcile_fts_limit_caps_calls():
+    rows = [{"cik": "", "ticker": f"T{i}", "cusip6": "ZZZZZZ", "cusip": f"ZZZZZZ{i:02d}9",
+             "name": f"co{i}"} for i in range(5)]
+    fts = _FakeFTS({})
+    reconcile_identifiers(rows, TICKER_TABLE, {}, fts=fts, fts_limit=2)
+    assert fts.calls == 2
+
+
+def test_reconcile_without_fts_is_unchanged():
+    rows = [{"cik": "", "ticker": "NOPE", "cusip6": "ZZZZZZ", "cusip": "ZZZZZZZZ9",
+             "name": "Mystery"}]
+    issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {})
+    assert issuers == [] and collisions == [] and unresolved == ["NOPE"]
