@@ -141,3 +141,17 @@ def cusip6(value: str) -> str:
     if len(s) == 12 and s[:2].isalpha():
         return s[2:8]
     return s[:6]
+
+
+def cusip_full(value: str) -> str:
+    """Return the full CUSIP (8-9 chars) from a CUSIP or US ISIN; ``""`` if neither.
+
+    A US ISIN is ``"US"`` + the 9-char CUSIP + a check digit; its embedded CUSIP is
+    characters 2..11. A bare 8/9-char alphanumeric token is returned as-is.
+    """
+    s = str(value).strip().upper()
+    if len(s) == 12 and s[:2].isalpha():
+        return s[2:11]
+    if len(s) in (8, 9) and s.isalnum():
+        return s
+    return ""

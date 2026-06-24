@@ -17,7 +17,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .config import Config, cusip6 as to_cusip6, normalize_cik
+from .config import Config, cusip6 as to_cusip6, cusip_full as to_cusip_full, normalize_cik
 from .http import Fetcher
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -177,16 +177,20 @@ def read_identifier_csv(
         ticker = (row.get(tcol, "") if tcol else "").strip().upper()
         raw_id = (row.get(ccol, "") if ccol else "").strip()
         c6 = to_cusip6(raw_id) if raw_id else ""
+        full = to_cusip_full(raw_id) if raw_id else ""
         name = (row.get(ncol, "") if ncol else "").strip()
         key = ticker or cik or c6
         if not key:
             continue
         g = groups.setdefault(key, {"ticker": ticker, "cik_votes": Counter(),
-                                    "cusip6_votes": Counter(), "name": ""})
+                                    "cusip6_votes": Counter(), "cusip_votes": Counter(),
+                                    "name": ""})
         if cik:
             g["cik_votes"][cik] += 1
         if c6:
             g["cusip6_votes"][c6] += 1
+        if full:
+            g["cusip_votes"][full] += 1
         if name and not g["name"]:
             g["name"] = name
 
@@ -194,10 +198,12 @@ def read_identifier_csv(
     for g in groups.values():
         cik_votes: Counter = g["cik_votes"]
         c6_votes: Counter = g["cusip6_votes"]
+        full_votes: Counter = g["cusip_votes"]
         out.append({
             "cik": cik_votes.most_common(1)[0][0] if cik_votes else "",
             "ticker": g["ticker"],
             "cusip6": c6_votes.most_common(1)[0][0] if c6_votes else "",
+            "cusip": full_votes.most_common(1)[0][0] if full_votes else "",
             "name": g["name"],
         })
     return out

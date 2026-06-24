@@ -222,3 +222,17 @@ def test_read_identifier_csv_derives_cusip6_from_isin(tmp_path):
     csv_path.write_text("Ticker,ISIN\nABBV,US00287YAD56\n", encoding="utf-8")
     rows = read_identifier_csv(csv_path)
     assert rows[0]["cusip6"] == "00287Y"
+
+
+def test_read_identifier_csv_keeps_full_cusip(tmp_path):
+    csv_path = tmp_path / "u.csv"
+    csv_path.write_text(
+        "Ticker,CUSIP\n"
+        "AAPL,037833AA0\n"
+        "AAPL,037833AA0\n"   # most common full CUSIP for AAPL
+        "AAPL,037833BB1\n",
+        encoding="utf-8",
+    )
+    rows = read_identifier_csv(csv_path)
+    assert rows[0]["cusip"] == "037833AA0"
+    assert rows[0]["cusip6"] == "037833"

@@ -6,6 +6,7 @@ from bottom_up_corpus.config import (
     SEC_MAX_REQUESTS_PER_SECOND,
     Config,
     cusip6,
+    cusip_full,
     normalize_cik,
     normalize_cusip,
 )
@@ -82,3 +83,14 @@ def test_normalize_cusip_rejects_bad_length_or_chars(bad):
 ])
 def test_cusip6(raw, expected):
     assert cusip6(raw) == expected
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("037833AT7", "037833AT7"),     # 9-char CUSIP unchanged
+    ("00037BAC", "00037BAC"),       # 8-char CUSIP unchanged
+    ("US00037BAC63", "00037BAC6"),  # US ISIN -> embedded CUSIP9
+    ("nope", ""),                    # not a CUSIP/ISIN
+    ("", ""),
+])
+def test_cusip_full(raw, expected):
+    assert cusip_full(raw) == expected
