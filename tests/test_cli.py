@@ -290,6 +290,49 @@ def test_enrich_openfigi_uses_env_api_key(monkeypatch, tmp_path):
     assert captured["api_key"] == "envkey"
 
 
+def test_build_universe_from_file_name_tier(tmp_path, monkeypatch, capsys):
+    # A row whose ticker doesn't resolve falls through to the name tier; the
+    # default ledger is written under data/reference/. The ticker column is
+    # required (read_identifier_csv needs a CIK/Ticker/CUSIP column); the ticker
+    # table is stubbed empty so ticker resolution misses and never hits network.
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers",
+                        lambda fetcher: {})
+    monkeypatch.setattr("bottom_up_corpus.cli.fetch_cik_lookup",
+                        lambda fetcher, path: "WIDGET INC:0000999999:\n")
+
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text("Ticker,Name\nZZZZ,Widget Inc\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    rc = main(["--data-dir", str(data_dir), "build-universe",
+               "--from-file", str(csv_path), "--name", "names", "--write"])
+    assert rc == 0
+    ledger = data_dir / "reference" / "name_cik_cache.csv"
+    assert ledger.exists()
+    assert "WIDGET" in ledger.read_text(encoding="utf-8")
+    out = (data_dir / "universe" / "names.jsonl").read_text(encoding="utf-8")
+    assert "0000999999" in out
+
+
+def test_build_universe_from_file_no_name_resolution(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers",
+                        lambda fetcher: {})
+    called = {"n": 0}
+    def _boom(fetcher, path):
+        called["n"] += 1
+        return ""
+    monkeypatch.setattr("bottom_up_corpus.cli.fetch_cik_lookup", _boom)
+
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text("Ticker,Name\nZZZZ,Widget Inc\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    rc = main(["--data-dir", str(data_dir), "build-universe",
+               "--from-file", str(csv_path), "--name", "names",
+               "--no-name-resolution"])
+    assert rc == 0
+    assert called["n"] == 0  # tier disabled -> the lookup file is never fetched
+    assert not (data_dir / "reference" / "name_cik_cache.csv").exists()
+
+
 class _BoomFTS:
     """An EdgarFTS stand-in whose resolve() must never be called."""
 

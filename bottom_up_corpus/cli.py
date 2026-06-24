@@ -30,6 +30,7 @@ from .pipeline import (
 )
 from .openfigi import coverage_hint, map_identifiers
 from .rag import iter_items
+from .sources.cik_lookup import fetch_cik_lookup, parse_cik_lookup
 from .sources.edgar_fts import EdgarFTS
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
@@ -40,11 +41,13 @@ from .universe import (
     issuers_from_sp500,
     load_company_tickers,
     load_cusip_crosswalk,
+    load_name_cache,
     read_identifier_csv,
     reconcile_identifiers,
     resolve_ciks,
     resolve_tickers,
     write_cusip_crosswalk,
+    write_name_cache,
 )
 
 
@@ -190,6 +193,17 @@ def _cmd_enrich_openfigi(args: argparse.Namespace) -> int:
     return 0
 
 
+def _name_tier(args, cfg, fetcher):
+    """Return ``(name_index, name_cache, ledger_path)`` for the name->CIK tier,
+    or ``(None, None, ledger_path)`` when disabled. Fetches the cached
+    cik-lookup file (one GET) and loads the durable ledger."""
+    ledger_path = args.name_cache or str(cfg.name_cache_path)
+    if getattr(args, "no_name_resolution", False):
+        return None, None, ledger_path
+    text = fetch_cik_lookup(fetcher, cfg.cik_lookup_path)
+    return parse_cik_lookup(text), load_name_cache(ledger_path), ledger_path
+
+
 def _cmd_build_universe(args: argparse.Namespace) -> int:
     cfg = _config(args)
     fetcher = Fetcher(cfg)
@@ -206,8 +220,17 @@ def _cmd_build_universe(args: argparse.Namespace) -> int:
         if equity_index != "sp500":
             raise SystemExit("error: only --equity-index sp500 is supported (see README)")
         name = args.name if args.name != "curated" else "sp500"
+        name_index, name_cache, ledger_path = _name_tier(args, cfg, fetcher)
         issuers, changes, unresolved = issuers_from_sp500(
-            fetcher, start=args.since, current_only=args.current_only)
+            fetcher, start=args.since, current_only=args.current_only,
+            name_index=name_index, name_cache=name_cache)
+        if name_index is not None:
+            pairs = [(it.company, it.cik) for it in issuers
+                     if it.resolution == "name" and it.cik and it.company]
+            if pairs:
+                total = write_name_cache(ledger_path, pairs)
+                print(f"name-cache: merged {len(pairs)} name->CIK pin(s) -> "
+                      f"{ledger_path} ({total} total)", file=sys.stderr)
         mode = "historical union" if not args.current_only else "current snapshot"
         if unresolved:
             print(f"NOTE: {len(unresolved)} member(s) without a resolvable CIK "
@@ -279,8 +302,21 @@ def _build_universe_from_file(args: argparse.Namespace, cfg, fetcher) -> int:
 
     ticker_table = load_company_tickers(fetcher) if any(r["ticker"] for r in rows) else {}
     fts = EdgarFTS(fetcher) if args.fts else None
+    has_name = any(r["name"] for r in rows)
+    name_index = name_cache = None
+    ledger_path = args.name_cache or str(cfg.name_cache_path)
+    if has_name and not args.no_name_resolution:
+        name_index, name_cache, ledger_path = _name_tier(args, cfg, fetcher)
     issuers, collisions, unresolved = reconcile_identifiers(
-        rows, ticker_table, crosswalk, fts=fts, fts_limit=args.fts_limit)
+        rows, ticker_table, crosswalk, fts=fts, fts_limit=args.fts_limit,
+        name_index=name_index, name_cache=name_cache)
+    if name_index is not None:
+        pairs = [(i.company, i.cik) for i in issuers
+                 if i.resolution == "name" and i.cik and i.company]
+        if pairs:
+            total = write_name_cache(ledger_path, pairs)
+            print(f"name-cache: merged {len(pairs)} name->CIK pin(s) -> "
+                  f"{ledger_path} ({total} total)", file=sys.stderr)
 
     if not args.drop_collisions:
         for c in collisions:
@@ -591,6 +627,11 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--fts-cache", default=None,
                     help="CSV cache of CUSIP6->CIK (read to skip EFTS; fts:confirmed hits appended). "
                          "Written whenever given, independent of --write.")
+    bu.add_argument("--no-name-resolution", action="store_true",
+                    help="disable the name->CIK tier (default: on for name-bearing universes)")
+    bu.add_argument("--name-cache", default=None,
+                    help="name->CIK ledger CSV (default: data/reference/name_cik_cache.csv); "
+                         "written whenever the name tier runs, independent of --write")
     bu.add_argument("--equity-index", choices=["sp500"], dest="equity_index",
                     help="build from an equity index's composition (fetched by name)")
     bu.add_argument("--index", choices=["sp500"], dest="index_legacy",
