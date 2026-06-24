@@ -11,6 +11,8 @@ Network unit: one GET per CUSIP, fair-access throttled via the shared Fetcher.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from ..config import normalize_cik
 from .base import Source
 
@@ -30,7 +32,9 @@ class EdgarFTS(Source):
     def resolve(self, cusip: str) -> tuple[str, str] | None:
         """Return ``(cik, display_name)`` for the top offering-form filing that
         mentions ``cusip``, or ``None`` (no hit / no cik / fetch error)."""
-        url = f'{EFTS_URL}?q=%22{cusip}%22&forms={OFFERING_FORMS}'
+        # quote the CUSIP defensively (callers pass alnum CUSIPs, but resolve() is
+        # public); OFFERING_FORMS is already all-URL-safe (no slash tokens).
+        url = f'{EFTS_URL}?q=%22{quote(cusip, safe="")}%22&forms={OFFERING_FORMS}'
         try:
             data = self.fetcher.get_json(url)
         except Exception as exc:  # noqa: BLE001 - record and skip a bad lookup
