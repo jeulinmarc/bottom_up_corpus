@@ -218,6 +218,16 @@ are kept by default resolved to the `--prefer` CIK (default `cusip`), or exclude
 with `--drop-collisions`. A CUSIP-bearing file without `--crosswalk` resolves via
 CIK/ticker only (with a warning), not an error.
 
+**Name→CIK resolution (on by default).** When ticker and CUSIP both miss a
+name-bearing row, `build-universe` resolves it by *name* against the SEC
+`cik-lookup-data.txt` file (a single cached download covering all filers,
+former names included) — this recovers delisted/renamed members such as the
+~139 historical S&P 500 names the current ticker map drops. Matching is exact
+after strict normalization; a name borne by two companies is a collision,
+broken by their dated `formerNames` when a membership date is known. Resolved
+decisions accumulate in `data/reference/name_cik_cache.csv` (override with
+`--name-cache`). Disable the tier with `--no-name-resolution`.
+
 For names no offline tier resolves, `--fts` adds an opt-in network tier: it queries
 EDGAR full-text search on the bond's full CUSIP, **restricted to issuer offering
 forms** (424B/FWP/S-3) so the top hit is the issuer, not a fund holder. Each hit is

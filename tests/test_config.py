@@ -43,6 +43,14 @@ def test_manifest_file_path_is_zero_padded():
     assert cfg.manifest_file("320193").name == "0000320193.jsonl"
 
 
+def test_reference_paths():
+    from pathlib import Path
+    cfg = Config(data_dir=Path("/tmp/x/data"))
+    assert cfg.reference_dir == Path("/tmp/x/data/reference")
+    assert cfg.cik_lookup_path == Path("/tmp/x/data/reference/cik-lookup-data.txt")
+    assert cfg.name_cache_path == Path("/tmp/x/data/reference/name_cik_cache.csv")
+
+
 @pytest.mark.parametrize(
     "raw, expected",
     [

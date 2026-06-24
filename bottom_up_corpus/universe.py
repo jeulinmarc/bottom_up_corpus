@@ -15,10 +15,12 @@ import json
 import warnings
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 
 from .config import Config, cusip6 as to_cusip6, cusip_full as to_cusip_full, normalize_cik
 from .http import Fetcher
+from .naming import canonical_name, name_as_of, parse_former_names
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
@@ -216,6 +218,8 @@ def reconcile_identifiers(
     *,
     fts=None,
     fts_limit: int | None = None,
+    name_index: dict[str, set[str]] | None = None,
+    name_cache: dict[str, str] | None = None,
 ) -> tuple[list[Issuer], list[dict], list[str]]:
     """Resolve each row by authority CIK > CUSIP > ticker, cross-checking ticker vs CUSIP.
 
@@ -276,6 +280,16 @@ def reconcile_identifiers(
             issuers.append(Issuer(cik=cik_cusip, ticker=ticker, company=company,
                                   cusip6=c6, resolution="cusip"))
         else:
+            # Name tier (local/cached) before fts (per-row network).
+            name_cik = ""
+            if name_index is not None and name:
+                status, val = _resolve_one_name(name, name_index, name_cache or {})
+                if status == "resolved":
+                    name_cik = val  # type: ignore[assignment]
+            if name_cik:
+                issuers.append(Issuer(cik=name_cik, ticker=ticker, company=company,
+                                      cusip6=c6, resolution="name"))
+                continue
             full_cusip = (row.get("cusip") or "").strip().upper()
             hit = None
             if fts is not None and full_cusip and (fts_limit is None or fts_calls < fts_limit):
@@ -287,7 +301,7 @@ def reconcile_identifiers(
                 issuers.append(Issuer(cik=hit_cik, ticker=ticker, company=name,
                                       cusip6=c6, resolution=f"fts:{kind}"))
             else:
-                unresolved.append(ticker or c6)
+                unresolved.append(name or ticker or c6)
     return issuers, collisions, unresolved
 
 
@@ -382,6 +396,164 @@ def resolve_cusips(
     return resolved, unresolved
 
 
+def _resolve_one_name(
+    name: str, index: dict[str, set[str]], cache: dict[str, str]
+) -> tuple[str, object]:
+    """Resolve a single name against the cache then the index (no date tier).
+
+    Returns ``("resolved", cik)``, ``("collision", [cik, ...])`` (sorted), or
+    ``("unresolved", None)``. The cache (keyed by canonical name) wins and also
+    short-circuits collision flagging.
+    """
+    key = canonical_name(name)
+    if not key:
+        return ("unresolved", None)
+    if key in cache:
+        return ("resolved", cache[key])
+    ciks = index.get(key)
+    if not ciks:
+        return ("unresolved", None)
+    if len(ciks) == 1:
+        return ("resolved", next(iter(ciks)))
+    return ("collision", sorted(ciks))
+
+
+def _coerce_date(value) -> date | None:
+    """Best-effort ISO date from a string/``date``; ``None`` for ``""``/``"current"``."""
+    if isinstance(value, date):
+        return value
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _tiebreak_collision_by_date(
+    key: str, candidates: list[str], target: date, fetcher: Fetcher
+) -> str:
+    """Return the single candidate CIK whose name-in-effect on ``target``
+    canonicalizes to ``key``; ``""`` if zero or more than one qualify.
+
+    Reads each candidate's dated ``formerNames`` via the submissions API and
+    applies :func:`naming.name_as_of`. One submissions GET per candidate -- only
+    reached for an already-ambiguous name with a known date.
+    """
+    from .sources.edgar_submissions import SUBMISSIONS_URL
+
+    survivors: list[str] = []
+    for cik in candidates:
+        try:
+            data = fetcher.get_json(SUBMISSIONS_URL.format(cik=cik))
+        except Exception:  # noqa: BLE001 - a failed lookup just can't vouch for this CIK
+            continue
+        eff = name_as_of(target, data.get("name", ""),
+                         parse_former_names(data.get("formerNames")))
+        if canonical_name(eff) == key:
+            survivors.append(cik)
+    return survivors[0] if len(survivors) == 1 else ""
+
+
+def resolve_names(
+    names: Iterable[str],
+    index: dict[str, set[str]],
+    *,
+    cache: dict[str, str] | None = None,
+    dates: dict[str, object] | None = None,
+    fetcher: Fetcher | None = None,
+) -> tuple[dict[str, str], list[dict], list[str]]:
+    """Resolve names to CIKs via ``index`` (and a pinned ``cache``).
+
+    Returns ``(resolved, collisions, unresolved)``. A name mapping to several
+    CIKs is a collision unless ``dates[name]`` plus ``fetcher`` let the dated
+    ``formerNames`` tie-breaker single out one CIK (then it is ``resolved``).
+    Exact-after-normalization only -- no fuzzy matching.
+    """
+    cache = cache or {}
+    dates = dates or {}
+    resolved: dict[str, str] = {}
+    collisions: list[dict] = []
+    unresolved: list[str] = []
+    for raw in names:
+        name = str(raw).strip()
+        if not name:
+            continue
+        status, val = _resolve_one_name(name, index, cache)
+        if status == "resolved":
+            resolved[name] = val  # type: ignore[assignment]
+        elif status == "collision":
+            pick = ""
+            target = _coerce_date(dates.get(name))
+            if target is not None and fetcher is not None:
+                pick = _tiebreak_collision_by_date(
+                    canonical_name(name), val, target, fetcher)  # type: ignore[arg-type]
+            if pick:
+                resolved[name] = pick
+            else:
+                collisions.append({"name": name, "candidates": val})
+        else:
+            unresolved.append(name)
+    return resolved, collisions, unresolved
+
+
+def load_name_cache(path: Path | str) -> dict[str, str]:
+    """Load the ``name,cik`` ledger CSV into ``{canonical_name: cik}``.
+
+    Keys are re-canonicalized on load (idempotent) so a hand-edited file still
+    matches queries. A CIK serialized as a float string (``"320193.0"``) is
+    tolerated, mirroring :func:`load_cusip_crosswalk`.
+    """
+    import csv
+
+    out: dict[str, str] = {}
+    p = Path(path)
+    if not p.exists():
+        return out
+    with p.open(encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            name = (row.get("name") or "").strip()
+            raw_cik = (row.get("cik") or "").split(".")[0]
+            key = canonical_name(name)
+            if not key or not raw_cik.strip():
+                continue
+            try:
+                out[key] = normalize_cik(raw_cik)
+            except ValueError:
+                continue
+    return out
+
+
+def write_name_cache(path: Path | str, pairs: Iterable[tuple[str, str]]) -> int:
+    """Merge ``(name, cik)`` pairs into the ``name,cik`` ledger CSV (dedup).
+
+    Names are canonicalized to the file's key form; the last CIK written for a
+    key wins (a pin updates). Returns the total row count. Transparent
+    optimization artifact -- written independently of ``--write``.
+    """
+    import csv
+
+    p = Path(path)
+    rows: dict[str, str] = {}
+    if p.exists():
+        rows.update(load_name_cache(p))
+    for name, cik in pairs:
+        key = canonical_name(name)
+        if not key:
+            continue
+        try:
+            rows[key] = normalize_cik(cik)
+        except ValueError:
+            continue
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["name", "cik"])
+        for key in sorted(rows):
+            w.writerow([key, rows[key]])
+    return len(rows)
+
+
 def resolve_ciks(ciks: Iterable[str], fetcher: Fetcher) -> list[Issuer]:
     """Build issuers directly from CIKs via the submissions API.
 
@@ -408,8 +580,38 @@ def resolve_ciks(ciks: Iterable[str], fetcher: Fetcher) -> list[Issuer]:
     return issuers
 
 
+def resolve_member_names(
+    members: list[dict],
+    name_index: dict[str, set[str]],
+    *,
+    name_cache: dict[str, str] | None = None,
+    fetcher: Fetcher | None = None,
+) -> tuple[list[dict], dict[str, str]]:
+    """Fill ``cik`` on members still missing one via the name tier.
+
+    Only members with an empty ``cik`` and a non-empty ``company`` are
+    considered; their membership window (``first_seen`` preferred, else
+    ``last_seen``) is the date hint for the collision tie-breaker. Mutates the
+    member dicts in place and returns ``(members, resolved{company->cik})``.
+    """
+    pending = [m for m in members if not m.get("cik") and m.get("company")]
+    if not pending:
+        return members, {}
+    names = [m["company"] for m in pending]
+    dates = {m["company"]: (m.get("first_seen") or m.get("last_seen") or "")
+             for m in pending}
+    resolved, _collisions, _unresolved = resolve_names(
+        names, name_index, cache=name_cache, dates=dates, fetcher=fetcher)
+    for m in members:
+        if not m.get("cik") and m.get("company") in resolved:
+            m["cik"] = resolved[m["company"]]
+    return members, resolved
+
+
 def issuers_from_sp500(
-    fetcher: Fetcher, *, start: str | None = None, current_only: bool = False
+    fetcher: Fetcher, *, start: str | None = None, current_only: bool = False,
+    name_index: dict[str, set[str]] | None = None,
+    name_cache: dict[str, str] | None = None,
 ) -> tuple[list[Issuer], list[dict], list[str]]:
     """Build an S&P 500 universe from Wikipedia composition.
 
@@ -429,21 +631,36 @@ def issuers_from_sp500(
     else:
         members, changes = sp500_membership(fetcher, start=start)
 
-    # Resolve missing CIKs (since-removed members) via the SEC map, in one fetch.
+    # Resolve missing CIKs (since-removed members): first the SEC ticker map...
     need = [m["ticker"] for m in members if not m.get("cik")]
-    resolved: dict[str, Issuer] = {}
     if need:
         table = load_company_tickers(fetcher)
-        resolved = {t: table[t] for t in need if t in table}
+        for m in members:
+            if not m.get("cik") and m["ticker"] in table:
+                m["cik"] = table[m["ticker"]].cik
+
+    # Capture members still without a CIK before the name tier runs, so that
+    # ticker-resolved members sharing a company string with a name-resolved
+    # member are not mislabeled "name" (dual-class shares: Fox A/B, etc.).
+    cikless_before_name = {id(m) for m in members if not m.get("cik")}
+
+    # ...then the name tier for whatever the ticker map still misses.
+    name_resolved: dict[str, str] = {}
+    if name_index is not None:
+        members, name_resolved = resolve_member_names(
+            members, name_index, name_cache=name_cache, fetcher=fetcher)
 
     issuers: list[Issuer] = []
     unresolved: list[str] = []
     for m in members:
-        cik = m.get("cik") or (resolved[m["ticker"]].cik if m["ticker"] in resolved else "")
+        cik = m.get("cik") or ""
         if not cik:
             unresolved.append(m["ticker"])
+        res = "name" if (cik and id(m) in cikless_before_name
+                         and m.get("company") in name_resolved) else ""
         issuers.append(Issuer(cik=cik, ticker=m["ticker"], company=m.get("company", ""),
-                              first_seen=m.get("first_seen", ""), last_seen=m.get("last_seen", "")))
+                              first_seen=m.get("first_seen", ""),
+                              last_seen=m.get("last_seen", ""), resolution=res))
     return issuers, changes, unresolved
 
 

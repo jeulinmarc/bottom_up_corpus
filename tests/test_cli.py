@@ -4,9 +4,18 @@ import json
 import types
 from datetime import date
 
+import pytest
+
 from bottom_up_corpus.cli import _parse_years, main
 from bottom_up_corpus.config import Config
 from bottom_up_corpus.universe import Issuer, Universe
+
+
+@pytest.fixture(autouse=True)
+def _stub_name_fetch(monkeypatch):
+    """Default-stub the name-tier SEC download so CLI tests stay network-free.
+    Tests that exercise name resolution override this with their own stub."""
+    monkeypatch.setattr("bottom_up_corpus.cli.fetch_cik_lookup", lambda fetcher, path: "")
 
 
 def _stats():
@@ -290,6 +299,49 @@ def test_enrich_openfigi_uses_env_api_key(monkeypatch, tmp_path):
     assert captured["api_key"] == "envkey"
 
 
+def test_build_universe_from_file_name_tier(tmp_path, monkeypatch, capsys):
+    # A row whose ticker doesn't resolve falls through to the name tier; the
+    # default ledger is written under data/reference/. The ticker column is
+    # required (read_identifier_csv needs a CIK/Ticker/CUSIP column); the ticker
+    # table is stubbed empty so ticker resolution misses and never hits network.
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers",
+                        lambda fetcher: {})
+    monkeypatch.setattr("bottom_up_corpus.cli.fetch_cik_lookup",
+                        lambda fetcher, path: "WIDGET INC:0000999999:\n")
+
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text("Ticker,Name\nZZZZ,Widget Inc\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    rc = main(["--data-dir", str(data_dir), "build-universe",
+               "--from-file", str(csv_path), "--name", "names", "--write"])
+    assert rc == 0
+    ledger = data_dir / "reference" / "name_cik_cache.csv"
+    assert ledger.exists()
+    assert "WIDGET" in ledger.read_text(encoding="utf-8")
+    out = (data_dir / "universe" / "names.jsonl").read_text(encoding="utf-8")
+    assert "0000999999" in out
+
+
+def test_build_universe_from_file_no_name_resolution(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers",
+                        lambda fetcher: {})
+    called = {"n": 0}
+    def _boom(fetcher, path):
+        called["n"] += 1
+        return ""
+    monkeypatch.setattr("bottom_up_corpus.cli.fetch_cik_lookup", _boom)
+
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text("Ticker,Name\nZZZZ,Widget Inc\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    rc = main(["--data-dir", str(data_dir), "build-universe",
+               "--from-file", str(csv_path), "--name", "names",
+               "--no-name-resolution"])
+    assert rc == 0
+    assert called["n"] == 0  # tier disabled -> the lookup file is never fetched
+    assert not (data_dir / "reference" / "name_cik_cache.csv").exists()
+
+
 class _BoomFTS:
     """An EdgarFTS stand-in whose resolve() must never be called."""
 
@@ -349,3 +401,31 @@ def test_fts_cache_writes_confirmed_only_without_write_flag(monkeypatch, tmp_pat
     assert xw == {"25156P": {"0000999999"}}
     assert "88888X" not in xw
     assert not (tmp_path / "data" / "universe" / "u.jsonl").exists()
+
+
+def test_name_tier_fetch_failure_degrades_gracefully(monkeypatch, tmp_path, capsys):
+    """A transient SEC fetch failure in _name_tier must not abort build-universe.
+
+    rc must be 0, stderr must carry the WARNING, and the build must complete
+    (even though no name resolution happens). Overrides the autouse
+    _stub_name_fetch with a raising stub set inside the test body.
+    """
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: {})
+    # Override the autouse stub with one that raises.
+    monkeypatch.setattr(
+        "bottom_up_corpus.cli.fetch_cik_lookup",
+        lambda fetcher, path: (_ for _ in ()).throw(
+            RuntimeError("simulated network failure")),
+    )
+
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text("Ticker,Name\nZZZZ,Widget Inc\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    rc = main(["--data-dir", str(data_dir), "build-universe",
+               "--from-file", str(csv_path), "--name", "names"])
+    assert rc == 0, "build-universe must exit 0 even when the name-tier fetch fails"
+    err = capsys.readouterr().err
+    assert "WARNING" in err, f"expected a WARNING on stderr; got: {err!r}"
+    assert "cik-lookup fetch failed" in err, (
+        f"stderr should mention the failure reason; got: {err!r}"
+    )

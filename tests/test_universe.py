@@ -5,14 +5,19 @@ import pytest
 from bottom_up_corpus.universe import (
     Issuer,
     Universe,
+    issuers_from_sp500,
     load_company_tickers,
     load_cusip_crosswalk,
+    load_name_cache,
     read_identifier_csv,
     reconcile_identifiers,
     resolve_ciks,
     resolve_cusips,
+    resolve_member_names,
+    resolve_names,
     resolve_tickers,
     write_cusip_crosswalk,
+    write_name_cache,
 )
 
 
@@ -198,7 +203,7 @@ def test_reconcile_ticker_only_and_cusip_only_and_unresolved():
     issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
     assert {i.resolution for i in issuers} == {"ticker", "cusip"}
     assert {i.cik for i in issuers} == {"0000320193", "0000999999"}
-    assert unresolved == ["NOPE"]
+    assert unresolved == ["Mystery"]
 
 
 def test_read_identifier_csv_autodetects_cik_ticker_cusip(tmp_path):
@@ -274,7 +279,7 @@ def test_reconcile_fts_no_hit_stays_unresolved():
              "name": "Mystery"}]
     fts = _FakeFTS({})
     issuers, _, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {}, fts=fts)
-    assert issuers == [] and unresolved == ["NOPE"]
+    assert issuers == [] and unresolved == ["Mystery"]
 
 
 def test_reconcile_fts_limit_caps_calls():
@@ -289,7 +294,7 @@ def test_reconcile_without_fts_is_unchanged():
     rows = [{"cik": "", "ticker": "NOPE", "cusip6": "ZZZZZZ", "cusip": "ZZZZZZZZ9",
              "name": "Mystery"}]
     issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {})
-    assert issuers == [] and collisions == [] and unresolved == ["NOPE"]
+    assert issuers == [] and collisions == [] and unresolved == ["Mystery"]
 
 
 def test_write_cusip_crosswalk_roundtrips(tmp_path):
@@ -305,3 +310,171 @@ def test_write_cusip_crosswalk_merges_and_dedups(tmp_path):
     n = write_cusip_crosswalk(path, [("0000320193", "037833"), ("789019", "594918")])
     assert n == 2
     assert load_cusip_crosswalk(path) == {"037833": {"0000320193"}, "594918": {"0000789019"}}
+
+
+def test_resolve_names_unique_collision_unresolved():
+    index = {"WIDGET": {"0000999999"}, "SUNRISE": {"0000111111", "0000222222"}}
+    resolved, collisions, unresolved = resolve_names(
+        ["Widget Inc", "Sunrise Corp", "Nobody LLC"], index)
+    assert resolved == {"Widget Inc": "0000999999"}
+    assert collisions == [{"name": "Sunrise Corp",
+                           "candidates": ["0000111111", "0000222222"]}]
+    assert unresolved == ["Nobody LLC"]
+
+
+def test_resolve_names_cache_short_circuits_index_and_collision():
+    index = {"SUNRISE": {"0000111111", "0000222222"}}
+    cache = {"SUNRISE": "0000111111"}  # pinned decision, keyed by canonical name
+    resolved, collisions, unresolved = resolve_names(
+        ["Sunrise Corp"], index, cache=cache)
+    assert resolved == {"Sunrise Corp": "0000111111"}
+    assert collisions == [] and unresolved == []
+
+
+def test_name_cache_roundtrip_merges_and_dedups(tmp_path):
+    path = tmp_path / "ref" / "name_cik_cache.csv"
+    assert load_name_cache(path) == {}  # absent -> empty
+    n1 = write_name_cache(path, [("Apple Inc.", "320193"), ("Sunrise Corp", "111111")])
+    assert n1 == 2
+    n2 = write_name_cache(path, [("Apple Inc.", "320193")])  # dup, no growth
+    assert n2 == 2
+    loaded = load_name_cache(path)
+    assert loaded["APPLE"] == "0000320193"
+    assert loaded["SUNRISE"] == "0000111111"
+
+
+def test_name_collision_resolved_by_date_window(make_fetcher):
+    # "SUNRISE" -> {111111, 222222}. On 2015, only 111111 still bears the name;
+    # 222222 had renamed to NEWCO by 2010, so the date singles out 111111.
+    index = {"SUNRISE": {"0000111111", "0000222222"}}
+    routes = {
+        "CIK0000111111.json": {"name": "SUNRISE CORP", "formerNames": []},
+        "CIK0000222222.json": {"name": "NEWCO INC", "formerNames": [
+            {"name": "Sunrise Corporation",
+             "from": "2000-01-01T00:00:00.000Z", "to": "2010-01-01T00:00:00.000Z"}]},
+    }
+    fetcher = make_fetcher(routes)
+    resolved, collisions, unresolved = resolve_names(
+        ["Sunrise Corp"], index,
+        dates={"Sunrise Corp": "2015-06-01"}, fetcher=fetcher)
+    assert resolved == {"Sunrise Corp": "0000111111"}
+    assert collisions == []
+
+
+def test_name_collision_unbroken_when_date_does_not_separate(make_fetcher):
+    # On 2005 BOTH bore the name -> the collision stands.
+    index = {"SUNRISE": {"0000111111", "0000222222"}}
+    routes = {
+        "CIK0000111111.json": {"name": "SUNRISE CORP", "formerNames": []},
+        "CIK0000222222.json": {"name": "NEWCO INC", "formerNames": [
+            {"name": "Sunrise Corporation",
+             "from": "2000-01-01T00:00:00.000Z", "to": "2010-01-01T00:00:00.000Z"}]},
+    }
+    fetcher = make_fetcher(routes)
+    resolved, collisions, unresolved = resolve_names(
+        ["Sunrise Corp"], index,
+        dates={"Sunrise Corp": "2005-06-01"}, fetcher=fetcher)
+    assert resolved == {}
+    assert collisions == [{"name": "Sunrise Corp",
+                           "candidates": ["0000111111", "0000222222"]}]
+
+
+class _NoFTS:
+    """An fts stub that must never be called when the name tier resolves first."""
+    def resolve(self, cusip):
+        raise AssertionError("fts must not run when the name tier resolves the row")
+
+
+def test_reconcile_name_tier_resolves_before_fts():
+    rows = [{"cik": "", "ticker": "", "cusip6": "", "cusip": "12345678",
+             "name": "Widget Inc"}]
+    name_index = {"WIDGET": {"0000999999"}}
+    issuers, collisions, unresolved = reconcile_identifiers(
+        rows, {}, {}, fts=_NoFTS(), name_index=name_index)
+    assert len(issuers) == 1
+    assert issuers[0].cik == "0000999999"
+    assert issuers[0].resolution == "name"
+    assert collisions == [] and unresolved == []
+
+
+def test_reconcile_name_collision_falls_through_to_unresolved():
+    rows = [{"cik": "", "ticker": "", "cusip6": "", "cusip": "",
+             "name": "Sunrise Corp"}]
+    name_index = {"SUNRISE": {"0000111111", "0000222222"}}
+    issuers, collisions, unresolved = reconcile_identifiers(
+        rows, {}, {}, name_index=name_index)
+    assert issuers == []
+    assert unresolved == ["Sunrise Corp"]
+
+
+def test_resolve_member_names_fills_missing_cik():
+    members = [
+        {"ticker": "AAPL", "company": "Apple Inc.", "cik": "0000320193",
+         "first_seen": "", "last_seen": "current"},
+        {"ticker": "OLDCO", "company": "Sunrise Corp", "cik": "",
+         "first_seen": "1998-01-02", "last_seen": "2012-03-04"},
+        {"ticker": "GHOST", "company": "Phantom Industries", "cik": "",
+         "first_seen": "", "last_seen": ""},
+    ]
+    index = {"SUNRISE": {"0000111111"}}  # unique -> no date lookup needed
+    out, resolved = resolve_member_names(members, index)
+    by_ticker = {m["ticker"]: m for m in out}
+    assert by_ticker["OLDCO"]["cik"] == "0000111111"
+    assert by_ticker["AAPL"]["cik"] == "0000320193"   # already had one, untouched
+    assert by_ticker["GHOST"]["cik"] == ""            # not in index
+    assert resolved == {"Sunrise Corp": "0000111111"}
+
+
+def test_issuers_from_sp500_dual_class_provenance_label(monkeypatch, make_fetcher):
+    """Dual-class shares sharing a company name must not bleed the 'name' label.
+
+    FOXA (ticker in SEC map -> ticker-resolved) and FOXB (ticker absent from
+    map -> resolved by name tier) both have company='Dual Co'.  Only FOXB must
+    carry resolution='name'; FOXA (already ticker-resolved before the name tier
+    runs) must carry resolution=''.
+    """
+    from bottom_up_corpus.sources.cik_lookup import parse_cik_lookup
+
+    # Two members with the same company string; FOXA is in the ticker map, FOXB is not.
+    fake_members = [
+        {"ticker": "FOXA", "company": "Dual Co", "cik": "",
+         "first_seen": "2010-01-01", "last_seen": "current"},
+        {"ticker": "FOXB", "company": "Dual Co", "cik": "",
+         "first_seen": "2010-01-01", "last_seen": "current"},
+    ]
+
+    # company_tickers.json: only FOXA present (FOXB absent -> won't ticker-resolve).
+    routes = {
+        "company_tickers.json": {
+            "0": {"cik_str": 1234567, "ticker": "FOXA", "title": "Dual Co"},
+        }
+    }
+    fetcher = make_fetcher(routes)
+
+    # Monkeypatch sp500_membership to return our fake members (no Wikipedia fetch).
+    monkeypatch.setattr(
+        "bottom_up_corpus.indices.sp500_membership",
+        lambda fetcher, start=None: (fake_members, []),
+    )
+
+    # cik-lookup text: "Dual Co" canonicalizes to "DUAL" -> CIK 0000007777777.
+    cik_lookup_text = "DUAL CO:7777777:\n"
+    name_index = parse_cik_lookup(cik_lookup_text)
+
+    issuers, _changes, unresolved = issuers_from_sp500(
+        fetcher, name_index=name_index)
+
+    assert unresolved == [], f"expected no unresolved, got {unresolved}"
+    by_ticker = {i.ticker: i for i in issuers}
+
+    # Both should have *a* CIK resolved.
+    assert by_ticker["FOXA"].cik != "", "FOXA must be resolved (ticker map)"
+    assert by_ticker["FOXB"].cik != "", "FOXB must be resolved (name tier)"
+
+    # The key assertion: only FOXB carries resolution='name'.
+    assert by_ticker["FOXB"].resolution == "name", (
+        f"FOXB should be 'name', got {by_ticker['FOXB'].resolution!r}")
+    assert by_ticker["FOXA"].resolution == "", (
+        f"FOXA was ticker-resolved; must not be labeled 'name', "
+        f"got {by_ticker['FOXA'].resolution!r}"
+    )

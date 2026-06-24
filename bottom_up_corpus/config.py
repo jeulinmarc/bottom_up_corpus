@@ -99,6 +99,18 @@ class Config:
         return self.data_dir / "ownership"
 
     @property
+    def reference_dir(self) -> Path:
+        return self.data_dir / "reference"
+
+    @property
+    def cik_lookup_path(self) -> Path:
+        return self.reference_dir / "cik-lookup-data.txt"
+
+    @property
+    def name_cache_path(self) -> Path:
+        return self.reference_dir / "name_cik_cache.csv"
+
+    @property
     def discovery_errors_path(self) -> Path:
         return self.data_dir / "discovery_errors.jsonl"
 
