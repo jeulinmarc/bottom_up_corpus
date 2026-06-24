@@ -15,8 +15,11 @@ from ..config import normalize_cik
 from .base import Source
 
 EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
-# Issuer offering forms only (no 13F/N-PORT holdings reports).
-OFFERING_FORMS = "424B1,424B2,424B3,424B4,424B5,424B6,424B7,424B8,FWP,S-3,S-3/A,S-3ASR"
+# Issuer offering forms only (no 13F/N-PORT holdings reports). NOTE: EFTS rejects
+# amendment tokens with a slash (e.g. "S-3/A") -- including one makes the query
+# return zero hits -- so only base form codes appear here. All chars are
+# URL-safe (alphanumerics, hyphens, commas), so no encoding is needed.
+OFFERING_FORMS = "424B1,424B2,424B3,424B4,424B5,424B6,424B7,424B8,FWP,S-3,S-3ASR"
 
 
 class EdgarFTS(Source):

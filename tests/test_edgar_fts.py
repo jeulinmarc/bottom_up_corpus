@@ -17,6 +17,12 @@ def test_resolve_returns_cik_and_name_from_top_offering_hit(config):
     assert "424B2" in fetcher.calls[0] and "FWP" in fetcher.calls[0]
 
 
+def test_offering_forms_has_no_slash_amendment_tokens():
+    # EFTS returns zero hits if the forms filter contains a slash token like
+    # "S-3/A" (it rejects amendment codes), so only base codes are allowed.
+    assert "/" not in OFFERING_FORMS
+
+
 def test_resolve_no_hit_returns_none(config):
     fts = EdgarFTS(fetcher=FakeFetcher({"999999999": EFTS_EMPTY}, config=config))
     assert fts.resolve("999999999") is None
