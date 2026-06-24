@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import sys
+from collections import Counter
 from datetime import date
 
 from . import __version__
@@ -29,7 +30,17 @@ from .rag import iter_items
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
 from .taxonomy import FULL_SCOPE, FormType, parse_scope
-from .universe import Universe, issuers_from_sp500, resolve_ciks, resolve_tickers
+from .universe import (
+    Issuer,
+    Universe,
+    issuers_from_sp500,
+    load_company_tickers,
+    load_cusip_crosswalk,
+    read_identifier_csv,
+    reconcile_identifiers,
+    resolve_ciks,
+    resolve_tickers,
+)
 
 
 def _parse_years(spec: str | None) -> list[int]:
@@ -133,6 +144,9 @@ def _cmd_build_universe(args: argparse.Namespace) -> int:
     cfg = _config(args)
     fetcher = Fetcher(cfg)
 
+    if getattr(args, "from_file", None):
+        return _build_universe_from_file(args, cfg, fetcher)
+
     if getattr(args, "index", None):
         if args.index != "sp500":
             raise SystemExit("error: only --index sp500 is supported (see plan/README)")
@@ -184,6 +198,55 @@ def _cmd_build_universe(args: argparse.Namespace) -> int:
         for it in issuers:
             print(f"  {it.cik}  {it.ticker:<8} {it.company}")
         print("re-run with --write to persist")
+    return 0
+
+
+def _build_universe_from_file(args: argparse.Namespace, cfg, fetcher) -> int:
+    """Build a universe from a CSV of identifiers (CIK and/or ticker and/or CUSIP).
+
+    Authority CIK > CUSIP > ticker. When ticker->CIK and CUSIP6->CIK disagree it's
+    a collision (kept by default with --prefer cusip; --drop-collisions excludes).
+    """
+    rows = read_identifier_csv(args.from_file, ticker_col=args.ticker_col,
+                               cusip_col=args.cusip_col, cik_col=args.cik_col)
+    has_cusip = any(r["cusip6"] for r in rows)
+    crosswalk: dict[str, set[str]] = {}
+    if args.crosswalk:
+        crosswalk = load_cusip_crosswalk(args.crosswalk)
+    elif has_cusip:
+        n = sum(1 for r in rows if r["cusip6"] and not r["cik"])
+        print(f"WARNING: {n} row(s) carry a CUSIP but no --crosswalk was given; "
+              f"resolving via CIK/ticker only (pass --crosswalk to use CUSIP6->CIK "
+              f"and to cross-check tickers).", file=sys.stderr)
+
+    ticker_table = load_company_tickers(fetcher) if any(r["ticker"] for r in rows) else {}
+    issuers, collisions, unresolved = reconcile_identifiers(rows, ticker_table, crosswalk)
+
+    if not args.drop_collisions:
+        for c in collisions:
+            cik = c["cik_ticker"] if args.prefer == "ticker" else c["cik_cusip"]
+            issuers.append(Issuer(cik=cik, ticker=c["ticker"], company=c["name"],
+                                  cusip6=c["cusip6"], resolution=f"collision:{c['kind']}:{args.prefer}"))
+
+    by_kind = Counter(c["kind"] for c in collisions)
+    print(f"resolved {len(issuers)} issuers; {len(collisions)} collision(s) "
+          f"[{by_kind.get('name_mismatch', 0)} name_mismatch, {by_kind.get('name_match', 0)} name_match]; "
+          f"{len(unresolved)} unresolved (of {len(rows)} input names)", file=sys.stderr)
+
+    if args.write:
+        uni = Universe(cfg)
+        path = uni.save(args.name, issuers)
+        msg = f"wrote {len(issuers)} issuers -> {path}"
+        if collisions:
+            cpath = uni.path(args.name).with_name(f"{args.name}_collisions.jsonl")
+            with cpath.open("w", encoding="utf-8") as fh:
+                for c in collisions:
+                    fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+            msg += f"; {len(collisions)} collisions -> {cpath}"
+        print(msg)
+    else:
+        print(f"[dry-run] {len(issuers)} issuers for universe '{args.name}' "
+              f"({len(collisions)} collisions held out). Re-run with --write to persist.")
     return 0
 
 
@@ -439,6 +502,17 @@ def build_parser() -> argparse.ArgumentParser:
     bu = sub.add_parser("build-universe", help="resolve tickers/CIKs/index -> a curated list")
     bu.add_argument("--tickers", default="", help="comma-separated tickers, e.g. AAPL,MSFT")
     bu.add_argument("--ciks", default="", help="comma-separated CIKs (for delisted/historical issuers)")
+    bu.add_argument("--from-file", default=None,
+                    help="CSV of identifiers (auto-detects CIK/Ticker/CUSIP/ISIN columns)")
+    bu.add_argument("--cik-col", default=None, help="override the CIK column name in --from-file")
+    bu.add_argument("--ticker-col", default=None, help="override the ticker column name in --from-file")
+    bu.add_argument("--cusip-col", default=None, help="override the CUSIP/ISIN column name in --from-file")
+    bu.add_argument("--crosswalk", default=None,
+                    help="CUSIP6->CIK crosswalk CSV (cik,cusip6,cusip8) for --from-file resolution")
+    bu.add_argument("--drop-collisions", action="store_true",
+                    help="exclude ticker/CUSIP6 collisions from the universe (default: keep them)")
+    bu.add_argument("--prefer", choices=["ticker", "cusip"], default="cusip",
+                    help="which CIK to trust for kept collisions (default: cusip, issuer-anchored)")
     bu.add_argument("--index", choices=["sp500"], help="build from an index's composition (historical)")
     bu.add_argument("--since", default=None, help="with --index: window start (YYYY) for the historical union")
     bu.add_argument("--current-only", action="store_true", help="with --index: today's members only (no history)")
