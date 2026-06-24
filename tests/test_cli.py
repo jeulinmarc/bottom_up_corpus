@@ -212,3 +212,44 @@ def test_legacy_index_alias_still_works_with_deprecation_notice(monkeypatch, tmp
     assert "deprecated" in capsys.readouterr().err.lower()
     cfg = Config(data_dir=tmp_path / "data")
     assert [i.ticker for i in Universe(cfg).load("sp500")] == ["AAPL"]
+
+
+class _FakeFTS:
+    instantiated = 0
+
+    def __init__(self, *a, **k):
+        type(self).instantiated += 1
+
+    def resolve(self, cusip):
+        return ("0000999999", "DEUTSCHE TELEKOM INTL FIN") if cusip == "25156PAA0" else None
+
+
+def test_from_file_fts_resolves_unresolved(monkeypatch, tmp_path):
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: {})
+    monkeypatch.setattr("bottom_up_corpus.cli.EdgarFTS", _FakeFTS)
+    bonds = tmp_path / "u.csv"
+    bonds.write_text("Ticker,CUSIP,Issuer\nDT,25156PAA0,Deutsche Telekom Intl Finance\n",
+                     encoding="utf-8")
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--from-file", str(bonds), "--name", "u", "--fts", "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    by_ticker = {i.ticker: i for i in Universe(cfg).load("u")}
+    assert by_ticker["DT"].cik == "0000999999"
+    assert by_ticker["DT"].resolution == "fts:confirmed"
+
+
+def test_from_file_without_fts_never_constructs_edgarfts(monkeypatch, tmp_path):
+    monkeypatch.setattr("bottom_up_corpus.cli.load_company_tickers", lambda fetcher: {})
+
+    def _boom(*a, **k):
+        raise AssertionError("EdgarFTS must not be constructed without --fts")
+
+    monkeypatch.setattr("bottom_up_corpus.cli.EdgarFTS", _boom)
+    bonds = tmp_path / "u.csv"
+    bonds.write_text("Ticker,CUSIP\nDT,25156PAA0\n", encoding="utf-8")
+    rc = main(["--data-dir", str(tmp_path / "data"), "build-universe",
+               "--from-file", str(bonds), "--name", "u", "--write"])
+    assert rc == 0
+    cfg = Config(data_dir=tmp_path / "data")
+    assert "DT" not in {i.ticker for i in Universe(cfg).load("u")}
