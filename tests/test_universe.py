@@ -201,7 +201,7 @@ def test_reconcile_ticker_only_and_cusip_only_and_unresolved():
     issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, CROSSWALK)
     assert {i.resolution for i in issuers} == {"ticker", "cusip"}
     assert {i.cik for i in issuers} == {"0000320193", "0000999999"}
-    assert unresolved == ["NOPE"]
+    assert unresolved == ["Mystery"]
 
 
 def test_read_identifier_csv_autodetects_cik_ticker_cusip(tmp_path):
@@ -277,7 +277,7 @@ def test_reconcile_fts_no_hit_stays_unresolved():
              "name": "Mystery"}]
     fts = _FakeFTS({})
     issuers, _, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {}, fts=fts)
-    assert issuers == [] and unresolved == ["NOPE"]
+    assert issuers == [] and unresolved == ["Mystery"]
 
 
 def test_reconcile_fts_limit_caps_calls():
@@ -292,7 +292,7 @@ def test_reconcile_without_fts_is_unchanged():
     rows = [{"cik": "", "ticker": "NOPE", "cusip6": "ZZZZZZ", "cusip": "ZZZZZZZZ9",
              "name": "Mystery"}]
     issuers, collisions, unresolved = reconcile_identifiers(rows, TICKER_TABLE, {})
-    assert issuers == [] and collisions == [] and unresolved == ["NOPE"]
+    assert issuers == [] and collisions == [] and unresolved == ["Mystery"]
 
 
 def test_write_cusip_crosswalk_roundtrips(tmp_path):
@@ -375,3 +375,31 @@ def test_name_collision_unbroken_when_date_does_not_separate(make_fetcher):
     assert resolved == {}
     assert collisions == [{"name": "Sunrise Corp",
                            "candidates": ["0000111111", "0000222222"]}]
+
+
+class _NoFTS:
+    """An fts stub that must never be called when the name tier resolves first."""
+    def resolve(self, cusip):
+        raise AssertionError("fts must not run when the name tier resolves the row")
+
+
+def test_reconcile_name_tier_resolves_before_fts():
+    rows = [{"cik": "", "ticker": "", "cusip6": "", "cusip": "12345678",
+             "name": "Widget Inc"}]
+    name_index = {"WIDGET": {"0000999999"}}
+    issuers, collisions, unresolved = reconcile_identifiers(
+        rows, {}, {}, fts=_NoFTS(), name_index=name_index)
+    assert len(issuers) == 1
+    assert issuers[0].cik == "0000999999"
+    assert issuers[0].resolution == "name"
+    assert collisions == [] and unresolved == []
+
+
+def test_reconcile_name_collision_falls_through_to_unresolved():
+    rows = [{"cik": "", "ticker": "", "cusip6": "", "cusip": "",
+             "name": "Sunrise Corp"}]
+    name_index = {"SUNRISE": {"0000111111", "0000222222"}}
+    issuers, collisions, unresolved = reconcile_identifiers(
+        rows, {}, {}, name_index=name_index)
+    assert issuers == []
+    assert unresolved == ["Sunrise Corp"]

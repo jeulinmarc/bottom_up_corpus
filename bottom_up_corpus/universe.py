@@ -218,6 +218,8 @@ def reconcile_identifiers(
     *,
     fts=None,
     fts_limit: int | None = None,
+    name_index: dict[str, set[str]] | None = None,
+    name_cache: dict[str, str] | None = None,
 ) -> tuple[list[Issuer], list[dict], list[str]]:
     """Resolve each row by authority CIK > CUSIP > ticker, cross-checking ticker vs CUSIP.
 
@@ -278,6 +280,16 @@ def reconcile_identifiers(
             issuers.append(Issuer(cik=cik_cusip, ticker=ticker, company=company,
                                   cusip6=c6, resolution="cusip"))
         else:
+            # Name tier (local/cached) before fts (per-row network).
+            name_cik = ""
+            if name_index is not None and name:
+                status, val = _resolve_one_name(name, name_index, name_cache or {})
+                if status == "resolved":
+                    name_cik = val  # type: ignore[assignment]
+            if name_cik:
+                issuers.append(Issuer(cik=name_cik, ticker=ticker, company=company,
+                                      cusip6=c6, resolution="name"))
+                continue
             full_cusip = (row.get("cusip") or "").strip().upper()
             hit = None
             if fts is not None and full_cusip and (fts_limit is None or fts_calls < fts_limit):
@@ -289,7 +301,7 @@ def reconcile_identifiers(
                 issuers.append(Issuer(cik=hit_cik, ticker=ticker, company=name,
                                       cusip6=c6, resolution=f"fts:{kind}"))
             else:
-                unresolved.append(ticker or c6)
+                unresolved.append(name or ticker or c6)
     return issuers, collisions, unresolved
 
 
