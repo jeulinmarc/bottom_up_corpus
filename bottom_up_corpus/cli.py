@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from collections import Counter
 from datetime import date
+from pathlib import Path
 
 from . import __version__
 from .completeness import build_matrix, summarize
@@ -26,6 +28,7 @@ from .pipeline import (
     process_ownership,
     render_universe,
 )
+from .openfigi import coverage_hint, map_identifiers
 from .rag import iter_items
 from .sources.edgar_fts import EdgarFTS
 from .sources.edgar_index import EdgarFullIndex
@@ -138,6 +141,51 @@ def _cmd_config(args: argparse.Namespace) -> int:
             "Set BOTTOM_UP_CORPUS_CONTACT before any live crawl "
             "(e.g. export BOTTOM_UP_CORPUS_CONTACT=you@example.com)."
         )
+    return 0
+
+
+def _cmd_enrich_openfigi(args: argparse.Namespace) -> int:
+    path = Path(args.from_file)
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        headers = reader.fieldnames or []
+        col = args.id_col or next(
+            (h for h in headers if h.lower().strip() == args.id_type), None)
+        if not col:
+            raise SystemExit(f"error: no '{args.id_type}' column in {headers}; use --id-col")
+        ids = []
+        seen: set[str] = set()
+        for row in reader:
+            v = (row.get(col) or "").strip()
+            if v and v not in seen:
+                seen.add(v)
+                ids.append(v)
+
+    api_key = args.api_key or os.environ.get("OPENFIGI_API_KEY")
+    records = map_identifiers(ids, id_type=args.id_type, api_key=api_key)
+    hits = sum(1 for r in records.values() if r)
+    hint_tally: dict[str, int] = {}
+    for r in records.values():
+        h = coverage_hint(r.security_type) if r else "no_match"
+        hint_tally[h] = hint_tally.get(h, 0) + 1
+    print(f"OpenFIGI: {hits}/{len(ids)} matched; triage {hint_tally}", file=sys.stderr)
+
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["identifier", "name", "ticker", "security_type", "exch_code", "coverage_hint"])
+            for ident in ids:
+                r = records.get(ident)
+                if r:
+                    w.writerow([ident, r.name, r.ticker, r.security_type, r.exch_code,
+                                coverage_hint(r.security_type)])
+                else:
+                    w.writerow([ident, "", "", "", "", "no_match"])
+        print(f"wrote {len(ids)} enriched rows -> {out}")
+    else:
+        print("[no --out] re-run with --out PATH to write the enriched CSV")
     return 0
 
 
@@ -601,6 +649,16 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--overwrite", action="store_true", help="re-render already-rendered filings")
     rd.add_argument("--limit", type=int, default=None, help="cap number of new renders")
     rd.set_defaults(func=_cmd_render_pdf)
+
+    ef = sub.add_parser("enrich-openfigi",
+                        help="enrich identifiers (ISIN/CUSIP) via OpenFIGI: name/type/exchange + triage")
+    ef.add_argument("--from-file", required=True, help="CSV carrying an ISIN or CUSIP column")
+    ef.add_argument("--id-col", default=None, help="identifier column name (default: the --id-type column)")
+    ef.add_argument("--id-type", choices=["isin", "cusip"], default="isin")
+    ef.add_argument("--api-key", default=None,
+                    help="OpenFIGI API key (optional; else $OPENFIGI_API_KEY; raises rate limits)")
+    ef.add_argument("--out", default=None, help="output CSV path")
+    ef.set_defaults(func=_cmd_enrich_openfigi)
 
     xb = sub.add_parser("xbrl", help="build per-period XBRL financial summaries (family F1)")
     xbsrc = xb.add_mutually_exclusive_group(required=True)

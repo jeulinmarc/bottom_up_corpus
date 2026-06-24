@@ -253,3 +253,38 @@ def test_from_file_without_fts_never_constructs_edgarfts(monkeypatch, tmp_path):
     assert rc == 0
     cfg = Config(data_dir=tmp_path / "data")
     assert "DT" not in {i.ticker for i in Universe(cfg).load("u")}
+
+
+def test_enrich_openfigi_writes_csv(monkeypatch, tmp_path):
+    from bottom_up_corpus.openfigi import FigiRecord
+    src = tmp_path / "ids.csv"
+    src.write_text("Ticker,ISIN\nABBNVX,US00037BAC63\nXYZ,USNOPE0000000\n", encoding="utf-8")
+    fake = {
+        "US00037BAC63": FigiRecord(name="ABB FINANCE USA INC", ticker="ABBNVX 4.375",
+                                   security_type="GLOBAL", exch_code="TRACE"),
+        "USNOPE0000000": None,
+    }
+    monkeypatch.setattr("bottom_up_corpus.cli.map_identifiers", lambda values, **kw: fake)
+    out = tmp_path / "enriched.csv"
+    rc = main(["enrich-openfigi", "--from-file", str(src), "--out", str(out)])
+    assert rc == 0
+    text = out.read_text()
+    assert text.splitlines()[0] == "identifier,name,ticker,security_type,exch_code,coverage_hint"
+    assert "US00037BAC63,ABB FINANCE USA INC,ABBNVX 4.375,GLOBAL,TRACE,registry_candidate" in text
+    assert "USNOPE0000000,,,,,no_match" in text
+
+
+def test_enrich_openfigi_uses_env_api_key(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_map(values, **kw):
+        captured.update(kw)
+        return {v: None for v in values}
+
+    monkeypatch.setenv("OPENFIGI_API_KEY", "envkey")
+    monkeypatch.setattr("bottom_up_corpus.cli.map_identifiers", fake_map)
+    src = tmp_path / "ids.csv"
+    src.write_text("ISIN\nUS00037BAC63\n", encoding="utf-8")
+    rc = main(["enrich-openfigi", "--from-file", str(src)])
+    assert rc == 0
+    assert captured["api_key"] == "envkey"
