@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
+from datetime import date
 
 from .config import Config, normalize_cik
 from .storage import Storage
@@ -68,12 +69,17 @@ def build_matrix(
         manifest = storage.load_manifest(cik)
         # Count discovered docs per (form, year).
         counts: dict[tuple[FormType, int], int] = defaultdict(int)
-        company = ""
+        # Label the issuer with its CURRENT name, taken from the most recent filing
+        # — not whichever record is first in the manifest (the oldest, which would
+        # carry a stale former name, e.g. "APPLE COMPUTER INC" on 2024 rows).
+        latest = None
         for rec in manifest.values():
-            company = company or rec.company
+            if latest is None or (rec.filing_date or date.min) >= (latest.filing_date or date.min):
+                latest = rec
             if rec.year is None:
                 continue
             counts[(rec.form_type, rec.year)] += 1
+        company = (latest.company_current or latest.company) if latest else ""
 
         for form in scope:
             for year in sorted(year_set):
