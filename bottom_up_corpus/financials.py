@@ -243,7 +243,12 @@ def compute_ttm_derived(
     avg_equity: float | None, pit_net_debt: float | None,
     is_financial: bool = False,
 ) -> dict[str, dict]:
-    """Bloomberg-style TTM ratios from trailing-12m flows and average balances."""
+    """Bloomberg-style TTM ratios from trailing-12m flows and average balances.
+
+    Leverage / coverage multiples (net_debt_to_ebitda_ttm, interest_coverage_ttm)
+    are emitted as-is even when EBITDA is negative — this is intentional; callers
+    that want to suppress negative-denominator multiples should filter downstream.
+    """
     out: dict[str, dict] = {}
 
     def put(key: str, val: float | None) -> None:
@@ -626,9 +631,14 @@ def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> Flo
     buckets = {"quarterly": quarterly, "annual": annual, "ytd9": ytd9}
     for key in _TTM_FLOW_KEYS:
         concept = CONCEPTS_BY_KEY[key]
+        # Union points across ALL fallback tags (not just the first present one):
+        # a filer may tag a concept differently across taxonomy vintages
+        # (e.g. SalesRevenueNet in older 10-Qs, Revenues in the 10-K), and TTM
+        # reconstruction needs every period regardless of which tag carried it.
+        points = [p for tag in concept.tags for p in flat.get(tag, [])]
         # group candidate points by (bucket, end) and keep the latest-filed
         grouped: dict[tuple[str, date], list[dict]] = {}
-        for p in _currency_filtered(_points_for(concept, flat), concept, currency):
+        for p in _currency_filtered(points, concept, currency):
             end = _to_date(p.get("end"))
             start = _to_date(p.get("start"))
             if not end or not start:

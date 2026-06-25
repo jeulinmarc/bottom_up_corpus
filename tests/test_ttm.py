@@ -148,3 +148,26 @@ def test_normalized_rows_include_ttm_rows():
     roa = next(r for r in rows if r["concept"] == "roa_ttm")
     assert roa["kind"] == "derived_ttm"
     assert roa["value"] == pytest.approx(32.5629, abs=1e-3)
+
+
+def test_flow_series_unions_fallback_tags():
+    # Revenue split across vintages: 3-month + 9M YTD under the modern tag, but the
+    # FISCAL-YEAR value under the older `Revenues` tag. The single-tag lookup would
+    # miss the annual value, so the FY-end quarter (FY - 9M) could not be derived.
+    facts = {"facts": {"us-gaap": {
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"label": "Rev", "units": {"USD": [
+            _dur("2024-09-29", "2024-12-28", 100, "2025-01-30", "Q1", "10-Q"),
+            _dur("2024-12-29", "2025-03-29", 110, "2025-05-01", "Q2", "10-Q"),
+            _dur("2025-03-30", "2025-06-28", 120, "2025-08-01", "Q3", "10-Q"),
+            _dur("2024-09-29", "2025-06-28", 330, "2025-08-01", "Q3", "10-Q"),  # 9M YTD
+        ]}},
+        "Revenues": {"label": "Rev", "units": {"USD": [
+            _dur("2024-09-29", "2025-09-27", 450, "2025-11-01", "FY", "10-K"),   # FY only on the old tag
+        ]}},
+    }}}
+    s = _build_flow_series(flatten_points(facts), "USD")
+    # The FY value is picked up from the fallback `Revenues` tag despite the
+    # higher-priority tag carrying the quarters.
+    assert s.annual["revenue"][date(2025, 9, 27)] == 450
+    # The FY-end quarter is now derivable: 450 (FY) - 330 (9M YTD) = 120.
+    assert _standalone_quarter(s, "revenue", date(2025, 9, 27)) == 120
