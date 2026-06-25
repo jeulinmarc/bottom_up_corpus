@@ -91,3 +91,60 @@ def test_compute_ttm_derived_omits_metrics_with_missing_inputs():
                             avg_assets=None, avg_equity=None, pit_net_debt=None)
     assert "net_margin_ttm" not in d   # revenue missing
     assert "roa_ttm" not in d          # avg_assets missing
+
+
+def _instant(end, val, filed):
+    return {"end": end, "val": val, "accn": "a", "fy": 2025, "fp": "Q",
+            "form": "10-Q", "filed": filed}
+
+
+AAPL_TTM_FACTS = {"facts": {"us-gaap": {
+    "NetIncomeLoss": {"label": "NI", "units": {"USD": [
+        _dur("2023-10-01", "2023-12-30", 33916000000, "2024-02-02", "Q1", "10-Q"),
+        _dur("2024-09-29", "2024-12-28", 36330000000, "2025-01-30", "Q1", "10-Q"),
+        _dur("2024-12-29", "2025-03-29", 24780000000, "2025-05-01", "Q2", "10-Q"),
+        _dur("2025-03-30", "2025-06-28", 23434000000, "2025-08-01", "Q3", "10-Q"),
+        _dur("2024-09-29", "2025-06-28", 84544000000, "2025-08-01", "Q3", "10-Q"),
+        _dur("2024-09-29", "2025-09-27", 112010000000, "2025-11-01", "FY", "10-K"),
+        _dur("2025-09-28", "2025-12-27", 42097000000, "2026-01-29", "Q1", "10-Q"),
+        _dur("2025-12-28", "2026-03-28", 29578000000, "2026-05-01", "Q2", "10-Q"),
+    ]}},
+    "Assets": {"label": "Assets", "units": {"USD": [
+        _instant("2024-12-28", 344085000000, "2025-01-30"),
+        _instant("2025-03-29", 331233000000, "2025-05-01"),
+        _instant("2025-06-28", 331495000000, "2025-08-01"),
+        _instant("2025-09-27", 359241000000, "2025-11-01"),
+        _instant("2025-12-27", 379297000000, "2026-01-29"),
+        _instant("2026-03-28", 371082000000, "2026-05-01"),
+    ]}},
+}}}
+
+
+def _aapl_summary(end):
+    from bottom_up_corpus.financials import attach_ttm_metrics, build_period_summaries
+    summaries = build_period_summaries(AAPL_TTM_FACTS, company="Apple", company_current="Apple")
+    attach_ttm_metrics(AAPL_TTM_FACTS, summaries)
+    return next(s for s in summaries if s.period_end == end)
+
+
+def test_attach_ttm_reproduces_bloomberg_aapl_roa():
+    # Bloomberg-published quarterly ROA, reproduced to 4 dp by TTM NI / avg assets.
+    dec = _aapl_summary(date(2025, 12, 27))
+    assert dec.ttm["roa_ttm"]["value"] == pytest.approx(32.5629, abs=1e-3)
+    mar = _aapl_summary(date(2026, 3, 28))
+    assert mar.ttm["roa_ttm"]["value"] == pytest.approx(34.9060, abs=1e-3)
+
+
+def test_attach_ttm_suppressed_when_year_ago_balance_missing():
+    # The earliest quarter has no year-ago assets -> averaged metric omitted.
+    early = _aapl_summary(date(2025, 3, 29))
+    assert "roa_ttm" not in early.ttm
+
+
+def test_normalized_rows_include_ttm_rows():
+    from bottom_up_corpus.financials import normalized_rows
+    dec = _aapl_summary(date(2025, 12, 27))
+    rows = normalized_rows("0000320193", dec)
+    roa = next(r for r in rows if r["concept"] == "roa_ttm")
+    assert roa["kind"] == "derived_ttm"
+    assert roa["value"] == pytest.approx(32.5629, abs=1e-3)

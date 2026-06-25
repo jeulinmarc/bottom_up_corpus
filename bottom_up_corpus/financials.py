@@ -499,6 +499,7 @@ class PeriodSummary:
     values: dict[str, dict] = field(default_factory=dict)
     currency: str = "USD"          # issuer's monetary reporting currency
     sic: str | None = None         # SEC SIC code (industry classification)
+    ttm: dict[str, dict] = field(default_factory=dict)
 
     @property
     def is_financial(self) -> bool:
@@ -787,6 +788,48 @@ def build_period_summaries(
     return summaries
 
 
+def _prior_year(by_end: dict[tuple[str, date], "PeriodSummary"], freq: str,
+                end: date) -> "PeriodSummary | None":
+    """The same-frequency summary ending ~one year before ``end`` (345-385 days)."""
+    for (f, e), s in by_end.items():
+        if f == freq and 345 <= (end - e).days <= 385:
+            return s
+    return None
+
+
+def attach_ttm_metrics(facts: dict, summaries: list[PeriodSummary]) -> None:
+    """Compute and attach Bloomberg-style TTM ratios to each summary in place.
+
+    TTM flows come from a trailing-4-quarter reconstruction; ROA/ROE/asset-turnover
+    denominators use the average of the current and year-ago period-end balance.
+    Issuers flagged financial carry sector_relevant=False on sensitive metrics.
+    """
+    flat = flatten_points(facts)
+    currency = reporting_currency(flat)
+    series = _build_flow_series(flat, currency)
+    by_end = {(s.frequency, s.period_end): s for s in summaries if s.period_end}
+
+    for s in summaries:
+        if not s.period_end:
+            continue
+        t12 = {k: _ttm_flow(series, k, s.period_end, s.frequency) for k in _TTM_FLOW_KEYS}
+        prior = _prior_year(by_end, s.frequency, s.period_end)
+
+        def avg(key: str, _s=s, _prior=prior) -> float | None:
+            cur = _num(_s.values, key)
+            old = _num(_prior.values, key) if _prior else None
+            return (cur + old) / 2 if (cur is not None and old is not None) else None
+
+        pit_net_debt = compute_derived(
+            s.values, s.frequency, s.currency, s.is_financial
+        ).get("net_debt", {}).get("value")
+
+        s.ttm = compute_ttm_derived(
+            t12=t12, avg_assets=avg("assets"), avg_equity=avg("equity"),
+            pit_net_debt=pit_net_debt, is_financial=s.is_financial,
+        )
+
+
 def _fmt(value, unit: str) -> str:
     if not isinstance(value, (int, float)):
         return html.escape(str(value))
@@ -834,6 +877,13 @@ def render_summary_html(summary: PeriodSummary) -> str:
         )
         if derived else ""
     )
+    ttm_tbl = (
+        _metric_table(
+            (summary.ttm[k] for k in DERIVED_TTM_BY_KEY if k in summary.ttm),
+            "Trailing-twelve-month metrics (Bloomberg-style)",
+        )
+        if summary.ttm else ""
+    )
     return (
         f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title></head>"
         f"<body><h1>{html.escape(title)}</h1>"
@@ -843,7 +893,7 @@ def render_summary_html(summary: PeriodSummary) -> str:
         f"<b>Publication date (filed): {pub}</b><br>"
         f"Source form: {html.escape(summary.sec_form)} — accession {html.escape(summary.accession)}<br>"
         f"Data: SEC XBRL company facts (us-gaap)</p>"
-        f"{reported}{derived_tbl}</body></html>"
+        f"{reported}{derived_tbl}{ttm_tbl}</body></html>"
     )
 
 
@@ -873,5 +923,11 @@ def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
          "label": v["label"], "value": v["value"], "unit": v["unit"],
          "sector_relevant": v.get("sector_relevant", True)}
         for key, v in summary.derived.items()
+    ]
+    rows += [
+        {**base, "kind": "derived_ttm", "concept": key,
+         "label": v["label"], "value": v["value"], "unit": v["unit"],
+         "sector_relevant": v.get("sector_relevant", True)}
+        for key, v in summary.ttm.items()
     ]
     return rows
