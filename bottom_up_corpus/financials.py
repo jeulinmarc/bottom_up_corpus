@@ -136,6 +136,26 @@ CONCEPTS: tuple[Concept, ...] = (
 
 CONCEPTS_BY_KEY = {c.key: c for c in CONCEPTS}
 
+# Flow concepts summed over a trailing-twelve-month window for the TTM block.
+_TTM_FLOW_KEYS: tuple[str, ...] = (
+    "revenue", "net_income", "operating_income", "gross_profit",
+    "dep_amort", "cfo", "capex", "interest_expense",
+)
+
+
+@dataclass
+class FlowSeries:
+    """Per-concept flow values bucketed by duration, for TTM reconstruction.
+
+    ``quarterly``/``annual``/``ytd9`` map concept key -> {period_end: value} for,
+    respectively, ~3-month standalone quarters, ~full fiscal years, and ~9-month
+    year-to-date cumulatives (used to derive the unreported Q4 = FY - 9M).
+    """
+
+    quarterly: dict[str, dict[date, float]]
+    annual: dict[str, dict[date, float]]
+    ytd9: dict[str, dict[date, float]]
+
 
 @dataclass(frozen=True)
 class Derived:
@@ -517,6 +537,93 @@ def _classify_frequency(days: int) -> str | None:
 
 def _latest_filed(points: list[dict]) -> dict:
     return max(points, key=lambda p: p.get("filed", ""))
+
+
+def _classify_duration_days(days: int) -> str | None:
+    """Bucket a duration length into 'quarterly' (~3m), 'ytd9' (~9m) or 'annual'."""
+    if 80 <= days <= 100:
+        return "quarterly"
+    if 250 <= days <= 290:
+        return "ytd9"
+    if 330 <= days <= 400:
+        return "annual"
+    return None
+
+
+def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> FlowSeries:
+    quarterly: dict[str, dict[date, float]] = {}
+    annual: dict[str, dict[date, float]] = {}
+    ytd9: dict[str, dict[date, float]] = {}
+    buckets = {"quarterly": quarterly, "annual": annual, "ytd9": ytd9}
+    for key in _TTM_FLOW_KEYS:
+        concept = CONCEPTS_BY_KEY[key]
+        # group candidate points by (bucket, end) and keep the latest-filed
+        grouped: dict[tuple[str, date], list[dict]] = {}
+        for p in _currency_filtered(_points_for(concept, flat), concept, currency):
+            end = _to_date(p.get("end"))
+            start = _to_date(p.get("start"))
+            if not end or not start:
+                continue
+            bucket = _classify_duration_days((end - start).days)
+            if not bucket:
+                continue
+            grouped.setdefault((bucket, end), []).append(p)
+        for (bucket, end), cands in grouped.items():
+            buckets[bucket].setdefault(key, {})[end] = _latest_filed(cands)["val"]
+    return FlowSeries(quarterly=quarterly, annual=annual, ytd9=ytd9)
+
+
+def _standalone_quarter(series: FlowSeries, key: str, end: date) -> float | None:
+    """The ~3-month flow ending at ``end``; derive an unreported FY-end quarter."""
+    direct = series.quarterly.get(key, {}).get(end)
+    if direct is not None:
+        return direct
+    fy = series.annual.get(key, {}).get(end)
+    if fy is None:
+        return None
+    # The FY-end quarter (Q4) = FY total - 9-month YTD ending ~one quarter earlier.
+    for q3_end, ytd in series.ytd9.get(key, {}).items():
+        if 80 <= (end - q3_end).days <= 100:
+            return fy - ytd
+    return None
+
+
+def _quarter_ends(series: FlowSeries) -> list[date]:
+    """All quarter-boundary end dates (standalone quarters + FY ends), sorted."""
+    ends: set[date] = set()
+    for key in _TTM_FLOW_KEYS:
+        ends.update(series.quarterly.get(key, {}))
+        ends.update(series.annual.get(key, {}))
+    return sorted(ends)
+
+
+def _ttm_flow(series: FlowSeries, key: str, end: date, frequency: str) -> float | None:
+    """Trailing-twelve-month sum of ``key`` ending at ``end``.
+
+    Annual periods use the fiscal-year value directly; quarterly periods sum the
+    four trailing standalone quarters (deriving the FY-end quarter when needed).
+    Returns None if any of the four quarters cannot be resolved.
+    """
+    if frequency == "annual":
+        return series.annual.get(key, {}).get(end)
+    ends = _quarter_ends(series)
+    if end not in ends:
+        return None
+    idx = ends.index(end)
+    if idx < 3:
+        return None
+    window = ends[idx - 3:idx + 1]
+    # Reject windows with a gap (a missing quarter) > ~one quarter between steps.
+    for earlier, later in zip(window, window[1:]):
+        if not (80 <= (later - earlier).days <= 100):
+            return None
+    total = 0.0
+    for q_end in window:
+        v = _standalone_quarter(series, key, q_end)
+        if v is None:
+            return None
+        total += v
+    return total
 
 
 def build_period_summaries(
