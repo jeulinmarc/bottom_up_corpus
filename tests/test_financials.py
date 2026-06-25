@@ -317,3 +317,56 @@ def test_roe_roa_are_annual_only():
 def test_dep_amort_no_bare_depreciation_fallback():
     from bottom_up_corpus.financials import CONCEPTS_BY_KEY
     assert "Depreciation" not in CONCEPTS_BY_KEY["dep_amort"].tags
+
+
+def test_is_financial_classifies_sic_ranges():
+    from bottom_up_corpus.financials import _is_financial
+    assert _is_financial("6311") is True   # insurer
+    assert _is_financial("6022") is True    # state bank
+    assert _is_financial("3571") is False   # electronic computers (Apple)
+    assert _is_financial(None) is False
+    assert _is_financial("6500") is False   # real estate left non-financial
+
+
+def _sector_vals():
+    return {
+        "revenue": {"value": 100.0, "unit": "USD"},
+        "operating_income": {"value": 20.0, "unit": "USD"},
+        "net_income": {"value": 10.0, "unit": "USD"},
+        "equity": {"value": 200.0, "unit": "USD"},
+        "assets": {"value": 400.0, "unit": "USD"},
+        "dep_amort": {"value": 5.0, "unit": "USD"},
+        "assets_current": {"value": 150.0, "unit": "USD"},
+        "liabilities_current": {"value": 80.0, "unit": "USD"},
+        "long_term_debt": {"value": 50.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "gross_profit": {"value": 40.0, "unit": "USD"},
+        "cash": {"value": 30.0, "unit": "USD", "tag": "CashAndCashEquivalentsAtCarryingValue"},
+        "interest_expense": {"value": 5.0, "unit": "USD"},
+    }
+
+
+def test_financial_metrics_flagged_not_dropped():
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_sector_vals(), frequency="annual", is_financial=True)
+    # Nothing is dropped -- sector-sensitive metrics are still present...
+    for k in ("ebitda", "ebitda_margin", "current_ratio", "quick_ratio",
+              "working_capital", "asset_turnover", "gross_margin",
+              "interest_coverage", "net_debt"):
+        assert k in d, k
+        assert d[k]["sector_relevant"] is False, k
+    # ...sector-neutral metrics are flagged relevant.
+    assert d["net_margin"]["sector_relevant"] is True
+    assert d["roe"]["sector_relevant"] is True
+    assert d["total_debt"]["sector_relevant"] is True
+
+
+def test_non_financial_everything_sector_relevant():
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_sector_vals(), frequency="annual", is_financial=False)
+    assert all(v["sector_relevant"] is True for v in d.values())
+
+
+def test_period_summary_is_financial_from_sic():
+    s = build_period_summaries(SAMPLE_FACTS, company="X", company_current="X", sic="6311")
+    assert all(x.is_financial for x in s)
+    assert all(x.sic == "6311" for x in s)

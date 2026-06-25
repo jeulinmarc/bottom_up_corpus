@@ -185,6 +185,35 @@ DERIVED: tuple[Derived, ...] = (
 
 DERIVED_BY_KEY = {d.key: d for d in DERIVED}
 
+# Metrics that are low-information for financial-sector issuers (banks / insurers
+# have no classified balance sheet, no COGS, and treat interest and cash as
+# operating items). These are NOT dropped -- each derived metric carries a
+# `sector_relevant` flag, False for these keys when the issuer's SIC is financial,
+# so the corpus stays complete and consistent regardless of SIC availability.
+SECTOR_SENSITIVE: frozenset[str] = frozenset({
+    "ebitda", "ebitda_margin", "net_debt", "net_debt_to_ebitda", "interest_coverage",
+    "current_ratio", "quick_ratio", "cash_ratio", "working_capital",
+    "asset_turnover", "gross_margin", "total_debt_incl_leases",
+    # TTM variants (Phase B)
+    "ebitda_margin_ttm", "net_debt_to_ebitda_ttm", "interest_coverage_ttm",
+    "asset_turnover_ttm", "gross_margin_ttm",
+})
+
+
+def _is_financial(sic: str | None) -> bool:
+    """True for SIC 6000-6499 (depository, credit, securities, insurance).
+
+    Real estate (6500+) is intentionally excluded -- REITs report FFO-style
+    metrics and are handled as ordinary issuers here.
+    """
+    if not sic:
+        return False
+    try:
+        code = int(sic)
+    except (TypeError, ValueError):
+        return False
+    return 6000 <= code <= 6499
+
 
 def _num(values: dict, key: str) -> float | int | None:
     """Numeric reported value for ``key``, or None if absent/non-numeric.
@@ -216,7 +245,8 @@ def _src(values: dict, key: str) -> str | None:
 
 
 def compute_derived(
-    values: dict[str, dict], frequency: str = "annual", currency: str = "USD"
+    values: dict[str, dict], frequency: str = "annual", currency: str = "USD",
+    is_financial: bool = False,
 ) -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
@@ -251,7 +281,8 @@ def compute_derived(
             unit = f"{currency}/shares"
         else:
             unit = d.unit
-        out[key] = {"value": val, "unit": unit, "label": d.label}
+        out[key] = {"value": val, "unit": unit, "label": d.label,
+                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
 
     def div(a: float | None, b: float | None) -> float | None:
         if a is None or b is None or b == 0:
@@ -379,6 +410,11 @@ class PeriodSummary:
     # key -> {"value", "unit", "label"}
     values: dict[str, dict] = field(default_factory=dict)
     currency: str = "USD"          # issuer's monetary reporting currency
+    sic: str | None = None         # SEC SIC code (industry classification)
+
+    @property
+    def is_financial(self) -> bool:
+        return _is_financial(self.sic)
 
     @property
     def fy(self) -> int | None:
@@ -396,7 +432,8 @@ class PeriodSummary:
     @property
     def derived(self) -> dict[str, dict]:
         """Computed ratios/aggregates (total debt, EBITDA, leverage, ...)."""
-        return compute_derived(self.values, self.frequency, self.currency)
+        return compute_derived(self.values, self.frequency, self.currency,
+                               self.is_financial)
 
 
 def _to_date(value: str | None) -> date | None:
@@ -490,6 +527,7 @@ def build_period_summaries(
     name_for_date=None,
     since_year: int | None = None,
     until_year: int | None = None,
+    sic: str | None = None,
 ) -> list[PeriodSummary]:
     """Group curated concepts into one summary per actual reporting period.
 
@@ -567,7 +605,7 @@ def build_period_summaries(
             sec_form=first.get("form") or "XBRL",
             accession=first.get("accn") or f"XBRL-{end.isoformat()}-{freq}",
             company=pit or company, company_current=company_current, values=values,
-            currency=currency or "USD",
+            currency=currency or "USD", sic=sic,
         ))
 
     summaries.sort(key=lambda s: (s.period_end or date.min, s.frequency), reverse=True)
