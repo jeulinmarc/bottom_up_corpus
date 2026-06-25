@@ -241,3 +241,41 @@ def test_normalized_reported_rows_carry_tag():
     rows = normalized_rows("0000320193", fy)
     rev = next(r for r in rows if r["concept"] == "revenue" and r["kind"] == "reported")
     assert rev["tag"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
+
+
+def test_total_debt_no_double_count_for_longtermdebt_rollup():
+    from bottom_up_corpus.financials import compute_derived
+    # LongTermDebt is the FASB roll-up (incl. current portion); adding the
+    # current portion again would double-count -> must not happen.
+    vals = {
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebt"},
+        "lt_debt_current": {"value": 30.0, "unit": "USD", "tag": "LongTermDebtCurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 100  # not 130
+
+
+def test_total_debt_no_double_count_for_debtcurrent():
+    from bottom_up_corpus.financials import compute_derived
+    # DebtCurrent already includes current maturities of LTD (= lt_debt_current).
+    vals = {
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "lt_debt_current": {"value": 30.0, "unit": "USD", "tag": "LongTermDebtCurrent"},
+        "short_term_debt": {"value": 40.0, "unit": "USD", "tag": "DebtCurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 140  # 100 + 40 (DebtCurrent), current portion not re-added
+
+
+def test_net_debt_no_double_count_for_combined_cash_tag():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "cash": {"value": 60.0, "unit": "USD", "tag": "CashCashEquivalentsAndShortTermInvestments"},
+        "short_term_investments": {"value": 25.0, "unit": "USD", "tag": "ShortTermInvestments"},
+    }
+    d = compute_derived(vals)
+    # cash already includes STI -> do NOT subtract STI again: 100 - 60 = 40
+    assert d["net_debt"]["value"] == 40
+    # cash_ratio numerator also must not re-add STI (here lc absent -> ratio omitted)
+    assert "cash_ratio" not in d

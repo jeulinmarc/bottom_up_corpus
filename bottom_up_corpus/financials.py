@@ -277,7 +277,15 @@ def compute_derived(
     ltd = _num(values, "long_term_debt")
     total_debt = None
     if ltd is not None:
-        total_debt = ltd + opt("lt_debt_current") + opt("short_term_debt")
+        ltd_tag = _src(values, "long_term_debt")
+        short_tag = _src(values, "short_term_debt")
+        cur = opt("lt_debt_current")
+        # LongTermDebt is the FASB roll-up (current + noncurrent); DebtCurrent
+        # already includes current maturities of LTD. Either case already counts
+        # the current portion, so do not add lt_debt_current again.
+        if ltd_tag == "LongTermDebt" or short_tag == "DebtCurrent":
+            cur = 0
+        total_debt = ltd + cur + opt("short_term_debt")
     put("total_debt", total_debt)
 
     leases = (opt("finance_lease_current") + opt("finance_lease_noncurrent")
@@ -287,7 +295,10 @@ def compute_derived(
 
     net_debt = None
     if total_debt is not None and cash is not None:
-        net_debt = total_debt - cash - opt("short_term_investments")
+        sti = opt("short_term_investments")
+        if _src(values, "cash") == "CashCashEquivalentsAndShortTermInvestments":
+            sti = 0  # cash tag already includes short-term investments
+        net_debt = total_debt - cash - sti
     put("net_debt", net_debt)
 
     da = _num(values, "dep_amort")
@@ -326,7 +337,10 @@ def compute_derived(
     if ac is not None:
         put("quick_ratio", div(ac - opt("inventory"), lc))
     if cash is not None:
-        put("cash_ratio", div(cash + opt("short_term_investments"), lc))
+        sti = opt("short_term_investments")
+        if _src(values, "cash") == "CashCashEquivalentsAndShortTermInvestments":
+            sti = 0
+        put("cash_ratio", div(cash + sti, lc))
 
     # Efficiency / per share
     put("asset_turnover", div(rev, assets))
