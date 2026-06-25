@@ -391,3 +391,15 @@ def test_edgar_xbrl_threads_sic(xbrl_fetcher, config):
     src = EdgarXBRL(fetcher=xbrl_fetcher, config=config)
     _facts, summaries = src.period_summaries("0000320193")
     assert summaries and all(s.sic == "3571" for s in summaries)
+
+
+def test_edgar_xbrl_attaches_ttm_block(xbrl_fetcher, config):
+    from bottom_up_corpus.sources.edgar_xbrl import EdgarXBRL
+    src = EdgarXBRL(fetcher=xbrl_fetcher, config=config)
+    _facts, summaries = src.period_summaries("0000320193")
+    fy = next(s for s in summaries if s.frequency == "annual")
+    # TTM container is always populated (dict), even if metrics needing a prior
+    # year are absent in this single-year fixture.
+    assert isinstance(fy.ttm, dict)
+    # Margin-style TTM metrics need only the FY flow window -> present.
+    assert "net_margin_ttm" in fy.ttm
