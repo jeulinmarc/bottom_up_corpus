@@ -57,3 +57,37 @@ def test_ttm_flow_sums_trailing_four_quarters():
 def test_ttm_flow_annual_uses_fy_value():
     s = _build_flow_series(flatten_points(NI_FACTS), "USD")
     assert _ttm_flow(s, "net_income", date(2025, 9, 27), "annual") == 112010000000
+
+
+def test_compute_ttm_derived_roa_uses_average_assets():
+    from bottom_up_corpus.financials import compute_ttm_derived
+    # AAPL @ 2025-12-27: TTM NI 117,777M; avg assets (379,297 + 344,085)/2.
+    d = compute_ttm_derived(
+        t12={"net_income": 117777e6, "revenue": 400000e6},
+        avg_assets=(379297e6 + 344085e6) / 2,
+        avg_equity=None, pit_net_debt=None,
+    )
+    assert d["roa_ttm"]["value"] == pytest.approx(32.5629, abs=1e-3)
+    assert d["roa_ttm"]["unit"] == "%"
+
+
+def test_compute_ttm_derived_flags_financials_not_dropped():
+    from bottom_up_corpus.financials import compute_ttm_derived
+    d = compute_ttm_derived(
+        t12={"revenue": 100e6, "operating_income": 20e6, "dep_amort": 5e6,
+             "interest_expense": 2e6, "gross_profit": 40e6},
+        avg_assets=400e6, avg_equity=200e6, pit_net_debt=10e6, is_financial=True,
+    )
+    for k in ("ebitda_margin_ttm", "interest_coverage_ttm", "asset_turnover_ttm",
+              "gross_margin_ttm", "net_debt_to_ebitda_ttm"):
+        assert k in d and d[k]["sector_relevant"] is False
+    assert d["operating_margin_ttm"]["value"] == pytest.approx(20.0)
+    assert d["operating_margin_ttm"]["sector_relevant"] is True
+
+
+def test_compute_ttm_derived_omits_metrics_with_missing_inputs():
+    from bottom_up_corpus.financials import compute_ttm_derived
+    d = compute_ttm_derived(t12={"revenue": None, "net_income": 10e6},
+                            avg_assets=None, avg_equity=None, pit_net_debt=None)
+    assert "net_margin_ttm" not in d   # revenue missing
+    assert "roa_ttm" not in d          # avg_assets missing

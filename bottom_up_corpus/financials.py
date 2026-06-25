@@ -220,6 +220,74 @@ SECTOR_SENSITIVE: frozenset[str] = frozenset({
 })
 
 
+# Bloomberg-aligned trailing-twelve-month ratios. Numerators are TTM flows; ROA /
+# ROE / asset-turnover denominators are a 2-point average (current + year-ago
+# period-end); leverage uses point-in-time net debt over TTM EBITDA. All %/x.
+DERIVED_TTM: tuple[Derived, ...] = (
+    Derived("roa_ttm", "Return on assets (TTM)", "%"),
+    Derived("roe_ttm", "Return on equity (TTM)", "%"),
+    Derived("net_margin_ttm", "Net margin (TTM)", "%"),
+    Derived("operating_margin_ttm", "Operating margin (TTM)", "%"),
+    Derived("gross_margin_ttm", "Gross margin (TTM)", "%"),
+    Derived("ebitda_margin_ttm", "EBITDA margin (TTM)", "%"),
+    Derived("fcf_margin_ttm", "FCF margin (TTM)", "%"),
+    Derived("asset_turnover_ttm", "Asset turnover (TTM)", "x"),
+    Derived("net_debt_to_ebitda_ttm", "Net debt / EBITDA (TTM)", "x"),
+    Derived("interest_coverage_ttm", "Interest coverage (TTM, EBITDA/interest)", "x"),
+)
+DERIVED_TTM_BY_KEY = {d.key: d for d in DERIVED_TTM}
+
+
+def compute_ttm_derived(
+    *, t12: dict[str, float | None], avg_assets: float | None,
+    avg_equity: float | None, pit_net_debt: float | None,
+    is_financial: bool = False,
+) -> dict[str, dict]:
+    """Bloomberg-style TTM ratios from trailing-12m flows and average balances."""
+    out: dict[str, dict] = {}
+
+    def put(key: str, val: float | None) -> None:
+        if val is None or (isinstance(val, float) and val != val):
+            return
+        d = DERIVED_TTM_BY_KEY[key]
+        out[key] = {"value": val, "unit": d.unit, "label": d.label,
+                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
+
+    def div(a, b):
+        return a / b if (a is not None and b not in (None, 0)) else None
+
+    def div_pos(a, b):
+        return a / b if (a is not None and b is not None and b > 0) else None
+
+    def pct(a, b):
+        r = div(a, b)
+        return r * 100 if r is not None else None
+
+    def pct_pos(a, b):
+        r = div_pos(a, b)
+        return r * 100 if r is not None else None
+
+    rev = t12.get("revenue")
+    ni = t12.get("net_income")
+    oi = t12.get("operating_income")
+    da = t12.get("dep_amort")
+    ebitda = oi + da if (oi is not None and da is not None) else None
+    cfo, capex = t12.get("cfo"), t12.get("capex")
+    fcf = cfo - capex if (cfo is not None and capex is not None) else None
+
+    put("roa_ttm", pct(ni, avg_assets))
+    put("roe_ttm", pct_pos(ni, avg_equity))
+    put("net_margin_ttm", pct(ni, rev))
+    put("operating_margin_ttm", pct(oi, rev))
+    put("gross_margin_ttm", pct(t12.get("gross_profit"), rev))
+    put("ebitda_margin_ttm", pct(ebitda, rev))
+    put("fcf_margin_ttm", pct(fcf, rev))
+    put("asset_turnover_ttm", div(rev, avg_assets))
+    put("net_debt_to_ebitda_ttm", div(pit_net_debt, ebitda))
+    put("interest_coverage_ttm", div(ebitda, t12.get("interest_expense")))
+    return out
+
+
 def _is_financial(sic: str | None) -> bool:
     """True for SIC 6000-6499 (depository, credit, securities, insurance).
 
