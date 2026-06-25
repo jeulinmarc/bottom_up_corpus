@@ -226,10 +226,13 @@ DERIVED: tuple[Derived, ...] = (
     Derived("total_debt", "Total debt", "USD"),
     Derived("total_debt_incl_leases", "Total debt incl. leases", "USD"),
     Derived("net_debt", "Net debt", "USD"),
+    Derived("net_cash", "Net cash position (incl. ST+LT investments)", "USD"),
     Derived("ebitda", "EBITDA", "USD"),
     Derived("free_cash_flow", "Free cash flow", "USD"),
     Derived("working_capital", "Working capital", "USD"),
     Derived("tangible_book_value", "Tangible book value", "USD"),
+    Derived("nopat", "NOPAT (op. income after tax)", "USD", annual_only=True),
+    Derived("invested_capital", "Invested capital", "USD"),
     # Margins (%)
     Derived("gross_margin", "Gross margin", "%"),
     Derived("operating_margin", "Operating margin", "%"),
@@ -237,21 +240,36 @@ DERIVED: tuple[Derived, ...] = (
     Derived("ebitda_margin", "EBITDA margin", "%"),
     Derived("fcf_margin", "FCF margin", "%"),
     # Returns (%) — stock/flow ratio -> annual only (same rationale as asset_turnover)
-    Derived("roe", "Return on equity", "%", annual_only=True),
+    Derived("roe", "Return on common equity", "%", annual_only=True),
     Derived("roa", "Return on assets", "%", annual_only=True),
+    Derived("roic", "Return on invested capital", "%", annual_only=True),
     Derived("effective_tax_rate", "Effective tax rate", "%"),
+    # Expense intensities & payout / quality (%) — flow/flow, meaningful at any frequency
+    Derived("capex_intensity", "Capex intensity (capex / revenue)", "%"),
+    Derived("rnd_intensity", "R&D intensity", "%"),
+    Derived("sga_ratio", "SG&A / revenue", "%"),
+    Derived("dividend_payout", "Dividend payout (dividends / net income)", "%"),
+    Derived("total_payout", "Total payout (div + buybacks / FCF)", "%"),
+    Derived("cash_conversion", "Cash conversion (FCF / net income)", "%"),
     # Leverage / coverage (multiples)
     Derived("debt_to_equity", "Debt / equity", "x"),
     Derived("debt_to_assets", "Debt / assets", "x"),
     Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x", annual_only=True),
     Derived("interest_coverage", "Interest coverage (op. income / interest)", "x"),
+    Derived("cfo_to_debt", "CFO / total debt", "x", annual_only=True),
+    Derived("fcf_to_debt", "FCF / total debt", "x", annual_only=True),
     # Liquidity (multiples)
     Derived("current_ratio", "Current ratio", "x"),
     Derived("quick_ratio", "Quick ratio", "x"),
     Derived("cash_ratio", "Cash ratio", "x"),
     # Efficiency / per share
     Derived("asset_turnover", "Asset turnover", "x", annual_only=True),
-    Derived("book_value_per_share", "Book value per share", "USD/shares"),
+    Derived("dso", "Days sales outstanding", "days", annual_only=True),
+    Derived("dio", "Days inventory outstanding", "days", annual_only=True),
+    Derived("dpo", "Days payable outstanding", "days", annual_only=True),
+    Derived("ccc", "Cash conversion cycle", "days", annual_only=True),
+    Derived("book_value_per_share", "Book value per common share", "USD/shares"),
+    Derived("tangible_book_value_per_share", "Tangible book value per share", "USD/shares"),
 )
 
 DERIVED_BY_KEY = {d.key: d for d in DERIVED}
@@ -262,9 +280,13 @@ DERIVED_BY_KEY = {d.key: d for d in DERIVED}
 # `sector_relevant` flag, False for these keys when the issuer's SIC is financial,
 # so the corpus stays complete and consistent regardless of SIC availability.
 SECTOR_SENSITIVE: frozenset[str] = frozenset({
-    "ebitda", "ebitda_margin", "net_debt", "net_debt_to_ebitda", "interest_coverage",
-    "current_ratio", "quick_ratio", "cash_ratio", "working_capital",
+    "ebitda", "ebitda_margin", "net_debt", "net_cash", "net_debt_to_ebitda",
+    "interest_coverage", "current_ratio", "quick_ratio", "cash_ratio", "working_capital",
     "asset_turnover", "gross_margin", "total_debt_incl_leases",
+    # Tier 2 metrics that are non-meaningful for banks/insurers (no COGS/inventory,
+    # capex/cash treated as operating, ROIC not the standard capital metric).
+    "roic", "nopat", "invested_capital", "cfo_to_debt", "fcf_to_debt",
+    "capex_intensity", "dso", "dio", "dpo", "ccc",
     # TTM variants (Phase B)
     "ebitda_margin_ttm", "net_debt_to_ebitda_ttm", "interest_coverage_ttm",
     "asset_turnover_ttm", "gross_margin_ttm",
@@ -483,8 +505,12 @@ def compute_derived(
         sti = opt("short_term_investments")
         if _src(values, "cash") == "CashCashEquivalentsAndShortTermInvestments":
             sti = 0  # cash tag already includes short-term investments
-        net_debt = total_debt - cash - sti
+        # Long-term marketable securities are a liquid offset to debt (Apple,
+        # Microsoft, ...): excluding them overstates net debt / hides net cash.
+        net_debt = total_debt - cash - sti - opt("long_term_investments")
     put("net_debt", net_debt)
+    # Friendly mirror: positive = net cash, negative = net debt.
+    put("net_cash", -net_debt if net_debt is not None else None)
 
     da = _num(values, "dep_amort")
     ebitda = oi + da if (oi is not None and da is not None) else None
@@ -496,26 +522,55 @@ def compute_derived(
 
     if ac is not None and lc is not None:
         put("working_capital", ac - lc)
-    if eq is not None:
-        put("tangible_book_value", eq - opt("goodwill") - opt("intangibles"))
+    # Common-equity book value nets out preferred stock and intangibles.
+    common_eq = (eq - opt("preferred_stock")) if eq is not None else None
+    tbv = (common_eq - opt("goodwill") - opt("intangibles")) if common_eq is not None else None
+    put("tangible_book_value", tbv)
+
+    # Returns on capital: NOPAT / invested capital. Invested capital = total debt +
+    # equity (parent + NCI) - cash & equivalents. Tax rate clamped to [0,1] for NOPAT.
+    pretax = _num(values, "pretax_income")
+    inc_tax = _num(values, "income_tax")
+    tax_rate = (inc_tax / pretax) if (inc_tax is not None and pretax is not None and pretax > 0) else None
+    if tax_rate is not None:
+        tax_rate = min(max(tax_rate, 0.0), 1.0)
+    nopat = oi * (1 - tax_rate) if (oi is not None and tax_rate is not None) else None
+    put("nopat", nopat)
+    invested = None
+    if total_debt is not None and eq is not None:
+        invested = total_debt + eq + opt("noncontrolling_interest") - opt("cash")
+    put("invested_capital", invested)
+    put("roic", pct_pos(nopat, invested))
 
     # Margins (%)
     put("gross_margin", pct(_num(values, "gross_profit"), rev))
     put("operating_margin", pct(oi, rev))
     put("net_margin", pct(ni, rev))
     put("ebitda_margin", pct(ebitda, rev))
-    put("fcf_margin", pct(fcf, rev))
+    put("fcf_margin", pct_pos(fcf, rev))  # guard negative revenue, allow negative FCF
 
-    # Returns / tax (%)
-    put("roe", pct_pos(ni, eq))
+    # Returns / tax (%). ROE is on COMMON equity: (net income - preferred dividends).
+    ni_common = (ni - opt("preferred_dividends")) if ni is not None else None
+    put("roe", pct_pos(ni_common, eq))
     put("roa", pct(ni, assets))
-    put("effective_tax_rate", pct_pos(_num(values, "income_tax"), _num(values, "pretax_income")))
+    put("effective_tax_rate", pct_pos(inc_tax, pretax))
+
+    # Expense intensity & payout / quality (%)
+    put("capex_intensity", pct(capex, rev))
+    put("rnd_intensity", pct(_num(values, "rnd_expense"), rev))
+    put("sga_ratio", pct(_num(values, "sga_expense"), rev))
+    put("dividend_payout", pct(_num(values, "dividends_paid"), ni))
+    if fcf is not None:
+        put("total_payout", pct(opt("dividends_paid") + opt("buybacks"), fcf))
+    put("cash_conversion", pct(fcf, ni))
 
     # Leverage / coverage (x)
     put("debt_to_equity", div_pos(total_debt, eq))
     put("debt_to_assets", div(total_debt, assets))
     put("net_debt_to_ebitda", div(net_debt, ebitda))
     put("interest_coverage", div(oi, _num(values, "interest_expense")))
+    put("cfo_to_debt", div(cfo, total_debt))
+    put("fcf_to_debt", div(fcf, total_debt))
 
     # Liquidity (x)
     put("current_ratio", div(ac, lc))
@@ -529,7 +584,20 @@ def compute_derived(
 
     # Efficiency / per share
     put("asset_turnover", div(rev, assets))
-    put("book_value_per_share", div(eq, _num(values, "shares_outstanding")))
+    # Working-capital cycle (days). Annual-only: the /365 annualisation assumes a
+    # full-year flow in the numerator's denominator.
+    cogs = _num(values, "cost_of_revenue")
+    dso = div(_num(values, "receivables"), rev / 365) if rev else None
+    dio = div(_num(values, "inventory"), cogs / 365) if cogs else None
+    dpo = div(_num(values, "payables"), cogs / 365) if cogs else None
+    put("dso", dso)
+    put("dio", dio)
+    put("dpo", dpo)
+    if dso is not None and dio is not None and dpo is not None:
+        put("ccc", dso + dio - dpo)
+    shares = _num(values, "shares_outstanding")
+    put("book_value_per_share", div(common_eq, shares))
+    put("tangible_book_value_per_share", div(tbv, shares))
 
     return out
 
@@ -902,6 +970,8 @@ def _fmt(value, unit: str) -> str:
         return f"{value:,.1f}%"
     if unit == "x":
         return f"{value:,.2f}x"
+    if unit == "days":
+        return f"{value:,.1f} days"
     return f"{value:,.0f}"  # monetary (whole units of the reporting currency)
 
 
