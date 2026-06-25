@@ -19,8 +19,10 @@ from .financials import (
     CONCEPTS,
     DERIVED,
     PeriodSummary,
+    attach_ttm_metrics,
     build_period_summaries,
     compute_derived,
+    compute_ttm_derived,
 )
 from .naming import name_as_of, parse_former_names
 from .ownership import parse_13f, parse_form345
@@ -77,8 +79,10 @@ __all__ = [
     "process_ownership",
     "parse_form345",
     "parse_13f",
+    "attach_ttm_metrics",
     "build_period_summaries",
     "compute_derived",
+    "compute_ttm_derived",
     "PeriodSummary",
     "CONCEPTS",
     "DERIVED",

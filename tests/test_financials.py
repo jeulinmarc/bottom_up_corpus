@@ -136,6 +136,8 @@ def test_annual_only_ratios_suppressed_for_sub_annual_periods():
     assert d["ebitda_margin"]["value"] == pytest.approx(25 / 100 * 100)
     # Same gate applies to semi-annual periods.
     assert "net_debt_to_ebitda" not in compute_derived(_full_inputs(), frequency="semi-annual")
+    # ROE/ROA are stock/flow too -> also annual-only now.
+    assert "roe" not in d and "roa" not in d
 
 
 def test_annual_only_ratios_present_for_annual_periods():
@@ -227,3 +229,177 @@ def test_derived_rendered_in_html():
     assert "Derived metrics" in html
     assert "EBITDA" in html and "Net debt / EBITDA" in html
     assert "Total debt" in html
+
+
+def test_values_carry_source_tag():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    # The resolved XBRL element backing each curated value is recorded.
+    assert fy.values["revenue"]["tag"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
+    assert fy.values["long_term_debt"]["tag"] == "LongTermDebtNoncurrent"
+
+
+def test_normalized_reported_rows_carry_tag():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    rows = normalized_rows("0000320193", fy)
+    rev = next(r for r in rows if r["concept"] == "revenue" and r["kind"] == "reported")
+    assert rev["tag"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
+
+
+def test_total_debt_no_double_count_for_longtermdebt_rollup():
+    from bottom_up_corpus.financials import compute_derived
+    # LongTermDebt is the FASB roll-up (incl. current portion); adding the
+    # current portion again would double-count -> must not happen.
+    vals = {
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebt"},
+        "lt_debt_current": {"value": 30.0, "unit": "USD", "tag": "LongTermDebtCurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 100  # not 130
+
+
+def test_total_debt_no_double_count_for_debtcurrent():
+    from bottom_up_corpus.financials import compute_derived
+    # DebtCurrent already includes current maturities of LTD (= lt_debt_current).
+    vals = {
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "lt_debt_current": {"value": 30.0, "unit": "USD", "tag": "LongTermDebtCurrent"},
+        "short_term_debt": {"value": 40.0, "unit": "USD", "tag": "DebtCurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 140  # 100 + 40 (DebtCurrent), current portion not re-added
+
+
+def test_net_debt_no_double_count_for_combined_cash_tag():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "cash": {"value": 60.0, "unit": "USD", "tag": "CashCashEquivalentsAndShortTermInvestments"},
+        "short_term_investments": {"value": 25.0, "unit": "USD", "tag": "ShortTermInvestments"},
+    }
+    d = compute_derived(vals)
+    # cash already includes STI -> do NOT subtract STI again: 100 - 60 = 40
+    assert d["net_debt"]["value"] == 40
+    # cash_ratio numerator also must not re-add STI (here lc absent -> ratio omitted)
+    assert "cash_ratio" not in d
+
+
+def test_negative_equity_suppresses_roe_and_dte():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {
+        "net_income": {"value": 10.0, "unit": "USD"},
+        "equity": {"value": -50.0, "unit": "USD"},
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "assets": {"value": 400.0, "unit": "USD"},
+    }
+    d = compute_derived(vals)  # annual
+    assert "roe" not in d and "debt_to_equity" not in d
+    assert d["roa"]["value"] == pytest.approx(10 / 400 * 100)  # roa fine (assets > 0)
+
+
+def test_nonpositive_pretax_suppresses_effective_tax_rate():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {"income_tax": {"value": 5.0, "unit": "USD"},
+            "pretax_income": {"value": -20.0, "unit": "USD"}}
+    assert "effective_tax_rate" not in compute_derived(vals)
+
+
+def test_roe_roa_are_annual_only():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {"net_income": {"value": 10.0, "unit": "USD"},
+            "equity": {"value": 200.0, "unit": "USD"},
+            "assets": {"value": 400.0, "unit": "USD"}}
+    q = compute_derived(vals, frequency="quarterly")
+    assert "roe" not in q and "roa" not in q
+    a = compute_derived(vals, frequency="annual")
+    assert a["roe"]["value"] == pytest.approx(5.0) and a["roa"]["value"] == pytest.approx(2.5)
+
+
+def test_dep_amort_no_bare_depreciation_fallback():
+    from bottom_up_corpus.financials import CONCEPTS_BY_KEY
+    assert "Depreciation" not in CONCEPTS_BY_KEY["dep_amort"].tags
+
+
+def test_is_financial_classifies_sic_ranges():
+    from bottom_up_corpus.financials import _is_financial
+    assert _is_financial("6311") is True   # insurer
+    assert _is_financial("6022") is True    # state bank
+    assert _is_financial("3571") is False   # electronic computers (Apple)
+    assert _is_financial(None) is False
+    assert _is_financial("6500") is False   # real estate left non-financial
+
+
+def _sector_vals():
+    return {
+        "revenue": {"value": 100.0, "unit": "USD"},
+        "operating_income": {"value": 20.0, "unit": "USD"},
+        "net_income": {"value": 10.0, "unit": "USD"},
+        "equity": {"value": 200.0, "unit": "USD"},
+        "assets": {"value": 400.0, "unit": "USD"},
+        "dep_amort": {"value": 5.0, "unit": "USD"},
+        "assets_current": {"value": 150.0, "unit": "USD"},
+        "liabilities_current": {"value": 80.0, "unit": "USD"},
+        "long_term_debt": {"value": 50.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "gross_profit": {"value": 40.0, "unit": "USD"},
+        "cash": {"value": 30.0, "unit": "USD", "tag": "CashAndCashEquivalentsAtCarryingValue"},
+        "interest_expense": {"value": 5.0, "unit": "USD"},
+    }
+
+
+def test_financial_metrics_flagged_not_dropped():
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_sector_vals(), frequency="annual", is_financial=True)
+    # Nothing is dropped -- sector-sensitive metrics are still present...
+    for k in ("ebitda", "ebitda_margin", "current_ratio", "quick_ratio",
+              "working_capital", "asset_turnover", "gross_margin",
+              "interest_coverage", "net_debt"):
+        assert k in d, k
+        assert d[k]["sector_relevant"] is False, k
+    # ...sector-neutral metrics are flagged relevant.
+    assert d["net_margin"]["sector_relevant"] is True
+    assert d["roe"]["sector_relevant"] is True
+    assert d["total_debt"]["sector_relevant"] is True
+
+
+def test_non_financial_everything_sector_relevant():
+    from bottom_up_corpus.financials import compute_derived
+    d = compute_derived(_sector_vals(), frequency="annual", is_financial=False)
+    assert all(v["sector_relevant"] is True for v in d.values())
+
+
+def test_period_summary_is_financial_from_sic():
+    s = build_period_summaries(SAMPLE_FACTS, company="X", company_current="X", sic="6311")
+    assert all(x.is_financial for x in s)
+    assert all(x.sic == "6311" for x in s)
+
+
+def test_normalized_rows_carry_sic_and_sector_flags():
+    # Insurer SIC -> is_financial True on every row; sector-sensitive derived rows
+    # flagged, sector-neutral ones relevant. Nothing is dropped.
+    s = build_period_summaries(SAMPLE_FACTS, company="X", company_current="X", sic="6311")
+    fy = next(x for x in s if x.frequency == "annual")
+    rows = normalized_rows("0000320193", fy)
+    assert all(r["sic"] == "6311" for r in rows)
+    assert all(r["is_financial"] is True for r in rows)
+    ebitda = next(r for r in rows if r["concept"] == "ebitda" and r["kind"] == "derived")
+    assert ebitda["sector_relevant"] is False
+    net_margin = next(r for r in rows if r["concept"] == "net_margin")
+    assert net_margin["sector_relevant"] is True
+
+
+def test_edgar_xbrl_threads_sic(xbrl_fetcher, config):
+    from bottom_up_corpus.sources.edgar_xbrl import EdgarXBRL
+    src = EdgarXBRL(fetcher=xbrl_fetcher, config=config)
+    _facts, summaries = src.period_summaries("0000320193")
+    assert summaries and all(s.sic == "3571" for s in summaries)
+
+
+def test_edgar_xbrl_attaches_ttm_block(xbrl_fetcher, config):
+    from bottom_up_corpus.sources.edgar_xbrl import EdgarXBRL
+    src = EdgarXBRL(fetcher=xbrl_fetcher, config=config)
+    _facts, summaries = src.period_summaries("0000320193")
+    fy = next(s for s in summaries if s.frequency == "annual")
+    # TTM container is always populated (dict), even if metrics needing a prior
+    # year are absent in this single-year fixture.
+    assert isinstance(fy.ttm, dict)
+    # Margin-style TTM metrics need only the FY flow window -> present.
+    assert "net_margin_ttm" in fy.ttm

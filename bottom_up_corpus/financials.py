@@ -67,7 +67,7 @@ CONCEPTS: tuple[Concept, ...] = (
     # Depreciation & amortization (cash-flow statement; needed for EBITDA)
     Concept("dep_amort", "Depreciation & amortization",
             ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet",
-             "DepreciationAndAmortization", "Depreciation"), False),
+             "DepreciationAndAmortization"), False),
     # --- Per share (duration, USD/shares) ---
     Concept("eps_basic", "EPS (basic)", ("EarningsPerShareBasic",), False, "USD/shares"),
     Concept("eps_diluted", "EPS (diluted)", ("EarningsPerShareDiluted",), False, "USD/shares"),
@@ -136,6 +136,26 @@ CONCEPTS: tuple[Concept, ...] = (
 
 CONCEPTS_BY_KEY = {c.key: c for c in CONCEPTS}
 
+# Flow concepts summed over a trailing-twelve-month window for the TTM block.
+_TTM_FLOW_KEYS: tuple[str, ...] = (
+    "revenue", "net_income", "operating_income", "gross_profit",
+    "dep_amort", "cfo", "capex", "interest_expense",
+)
+
+
+@dataclass
+class FlowSeries:
+    """Per-concept flow values bucketed by duration, for TTM reconstruction.
+
+    ``quarterly``/``annual``/``ytd9`` map concept key -> {period_end: value} for,
+    respectively, ~3-month standalone quarters, ~full fiscal years, and ~9-month
+    year-to-date cumulatives (used to derive the unreported Q4 = FY - 9M).
+    """
+
+    quarterly: dict[str, dict[date, float]]
+    annual: dict[str, dict[date, float]]
+    ytd9: dict[str, dict[date, float]]
+
 
 @dataclass(frozen=True)
 class Derived:
@@ -165,9 +185,9 @@ DERIVED: tuple[Derived, ...] = (
     Derived("net_margin", "Net margin", "%"),
     Derived("ebitda_margin", "EBITDA margin", "%"),
     Derived("fcf_margin", "FCF margin", "%"),
-    # Returns (%) — period-scoped (not annualised for quarters)
-    Derived("roe", "Return on equity", "%"),
-    Derived("roa", "Return on assets", "%"),
+    # Returns (%) — stock/flow ratio -> annual only (same rationale as asset_turnover)
+    Derived("roe", "Return on equity", "%", annual_only=True),
+    Derived("roa", "Return on assets", "%", annual_only=True),
     Derived("effective_tax_rate", "Effective tax rate", "%"),
     # Leverage / coverage (multiples)
     Derived("debt_to_equity", "Debt / equity", "x"),
@@ -184,6 +204,108 @@ DERIVED: tuple[Derived, ...] = (
 )
 
 DERIVED_BY_KEY = {d.key: d for d in DERIVED}
+
+# Metrics that are low-information for financial-sector issuers (banks / insurers
+# have no classified balance sheet, no COGS, and treat interest and cash as
+# operating items). These are NOT dropped -- each derived metric carries a
+# `sector_relevant` flag, False for these keys when the issuer's SIC is financial,
+# so the corpus stays complete and consistent regardless of SIC availability.
+SECTOR_SENSITIVE: frozenset[str] = frozenset({
+    "ebitda", "ebitda_margin", "net_debt", "net_debt_to_ebitda", "interest_coverage",
+    "current_ratio", "quick_ratio", "cash_ratio", "working_capital",
+    "asset_turnover", "gross_margin", "total_debt_incl_leases",
+    # TTM variants (Phase B)
+    "ebitda_margin_ttm", "net_debt_to_ebitda_ttm", "interest_coverage_ttm",
+    "asset_turnover_ttm", "gross_margin_ttm",
+})
+
+
+# Bloomberg-aligned trailing-twelve-month ratios. Numerators are TTM flows; ROA /
+# ROE / asset-turnover denominators are a 2-point average (current + year-ago
+# period-end); leverage uses point-in-time net debt over TTM EBITDA. All %/x.
+DERIVED_TTM: tuple[Derived, ...] = (
+    Derived("roa_ttm", "Return on assets (TTM)", "%"),
+    Derived("roe_ttm", "Return on equity (TTM)", "%"),
+    Derived("net_margin_ttm", "Net margin (TTM)", "%"),
+    Derived("operating_margin_ttm", "Operating margin (TTM)", "%"),
+    Derived("gross_margin_ttm", "Gross margin (TTM)", "%"),
+    Derived("ebitda_margin_ttm", "EBITDA margin (TTM)", "%"),
+    Derived("fcf_margin_ttm", "FCF margin (TTM)", "%"),
+    Derived("asset_turnover_ttm", "Asset turnover (TTM)", "x"),
+    Derived("net_debt_to_ebitda_ttm", "Net debt / EBITDA (TTM)", "x"),
+    Derived("interest_coverage_ttm", "Interest coverage (TTM, EBITDA/interest)", "x"),
+)
+DERIVED_TTM_BY_KEY = {d.key: d for d in DERIVED_TTM}
+
+
+def compute_ttm_derived(
+    *, t12: dict[str, float | None], avg_assets: float | None,
+    avg_equity: float | None, pit_net_debt: float | None,
+    is_financial: bool = False,
+) -> dict[str, dict]:
+    """Bloomberg-style TTM ratios from trailing-12m flows and average balances.
+
+    Leverage / coverage multiples (net_debt_to_ebitda_ttm, interest_coverage_ttm)
+    are emitted as-is even when EBITDA is negative — this is intentional; callers
+    that want to suppress negative-denominator multiples should filter downstream.
+    """
+    out: dict[str, dict] = {}
+
+    def put(key: str, val: float | None) -> None:
+        if val is None or (isinstance(val, float) and val != val):
+            return
+        d = DERIVED_TTM_BY_KEY[key]
+        out[key] = {"value": val, "unit": d.unit, "label": d.label,
+                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
+
+    def div(a, b):
+        return a / b if (a is not None and b not in (None, 0)) else None
+
+    def div_pos(a, b):
+        return a / b if (a is not None and b is not None and b > 0) else None
+
+    def pct(a, b):
+        r = div(a, b)
+        return r * 100 if r is not None else None
+
+    def pct_pos(a, b):
+        r = div_pos(a, b)
+        return r * 100 if r is not None else None
+
+    rev = t12.get("revenue")
+    ni = t12.get("net_income")
+    oi = t12.get("operating_income")
+    da = t12.get("dep_amort")
+    ebitda = oi + da if (oi is not None and da is not None) else None
+    cfo, capex = t12.get("cfo"), t12.get("capex")
+    fcf = cfo - capex if (cfo is not None and capex is not None) else None
+
+    put("roa_ttm", pct(ni, avg_assets))
+    put("roe_ttm", pct_pos(ni, avg_equity))
+    put("net_margin_ttm", pct(ni, rev))
+    put("operating_margin_ttm", pct(oi, rev))
+    put("gross_margin_ttm", pct(t12.get("gross_profit"), rev))
+    put("ebitda_margin_ttm", pct(ebitda, rev))
+    put("fcf_margin_ttm", pct(fcf, rev))
+    put("asset_turnover_ttm", div(rev, avg_assets))
+    put("net_debt_to_ebitda_ttm", div(pit_net_debt, ebitda))
+    put("interest_coverage_ttm", div(ebitda, t12.get("interest_expense")))
+    return out
+
+
+def _is_financial(sic: str | None) -> bool:
+    """True for SIC 6000-6499 (depository, credit, securities, insurance).
+
+    Real estate (6500+) is intentionally excluded -- REITs report FFO-style
+    metrics and are handled as ordinary issuers here.
+    """
+    if not sic:
+        return False
+    try:
+        code = int(sic)
+    except (TypeError, ValueError):
+        return False
+    return 6000 <= code <= 6499
 
 
 def _num(values: dict, key: str) -> float | int | None:
@@ -209,8 +331,15 @@ def _num(values: dict, key: str) -> float | int | None:
     return None
 
 
+def _src(values: dict, key: str) -> str | None:
+    """The source XBRL tag that backed a curated value, if recorded."""
+    v = values.get(key)
+    return v.get("tag") if v else None
+
+
 def compute_derived(
-    values: dict[str, dict], frequency: str = "annual", currency: str = "USD"
+    values: dict[str, dict], frequency: str = "annual", currency: str = "USD",
+    is_financial: bool = False,
 ) -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
@@ -245,7 +374,8 @@ def compute_derived(
             unit = f"{currency}/shares"
         else:
             unit = d.unit
-        out[key] = {"value": val, "unit": unit, "label": d.label}
+        out[key] = {"value": val, "unit": unit, "label": d.label,
+                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
 
     def div(a: float | None, b: float | None) -> float | None:
         if a is None or b is None or b == 0:
@@ -254,6 +384,16 @@ def compute_derived(
 
     def pct(a: float | None, b: float | None) -> float | None:
         r = div(a, b)
+        return r * 100 if r is not None else None
+
+    def div_pos(a: float | None, b: float | None) -> float | None:
+        # Like div, but a non-positive denominator is "not meaningful" -> None.
+        if a is None or b is None or b <= 0:
+            return None
+        return a / b
+
+    def pct_pos(a: float | None, b: float | None) -> float | None:
+        r = div_pos(a, b)
         return r * 100 if r is not None else None
 
     def opt(key: str) -> float | int:  # additive component: missing -> 0
@@ -271,7 +411,15 @@ def compute_derived(
     ltd = _num(values, "long_term_debt")
     total_debt = None
     if ltd is not None:
-        total_debt = ltd + opt("lt_debt_current") + opt("short_term_debt")
+        ltd_tag = _src(values, "long_term_debt")
+        short_tag = _src(values, "short_term_debt")
+        cur = opt("lt_debt_current")
+        # LongTermDebt is the FASB roll-up (current + noncurrent); DebtCurrent
+        # already includes current maturities of LTD. Either case already counts
+        # the current portion, so do not add lt_debt_current again.
+        if ltd_tag == "LongTermDebt" or short_tag == "DebtCurrent":
+            cur = 0
+        total_debt = ltd + cur + opt("short_term_debt")
     put("total_debt", total_debt)
 
     leases = (opt("finance_lease_current") + opt("finance_lease_noncurrent")
@@ -281,7 +429,10 @@ def compute_derived(
 
     net_debt = None
     if total_debt is not None and cash is not None:
-        net_debt = total_debt - cash - opt("short_term_investments")
+        sti = opt("short_term_investments")
+        if _src(values, "cash") == "CashCashEquivalentsAndShortTermInvestments":
+            sti = 0  # cash tag already includes short-term investments
+        net_debt = total_debt - cash - sti
     put("net_debt", net_debt)
 
     da = _num(values, "dep_amort")
@@ -305,12 +456,12 @@ def compute_derived(
     put("fcf_margin", pct(fcf, rev))
 
     # Returns / tax (%)
-    put("roe", pct(ni, eq))
+    put("roe", pct_pos(ni, eq))
     put("roa", pct(ni, assets))
-    put("effective_tax_rate", pct(_num(values, "income_tax"), _num(values, "pretax_income")))
+    put("effective_tax_rate", pct_pos(_num(values, "income_tax"), _num(values, "pretax_income")))
 
     # Leverage / coverage (x)
-    put("debt_to_equity", div(total_debt, eq))
+    put("debt_to_equity", div_pos(total_debt, eq))
     put("debt_to_assets", div(total_debt, assets))
     put("net_debt_to_ebitda", div(net_debt, ebitda))
     put("interest_coverage", div(oi, _num(values, "interest_expense")))
@@ -320,7 +471,10 @@ def compute_derived(
     if ac is not None:
         put("quick_ratio", div(ac - opt("inventory"), lc))
     if cash is not None:
-        put("cash_ratio", div(cash + opt("short_term_investments"), lc))
+        sti = opt("short_term_investments")
+        if _src(values, "cash") == "CashCashEquivalentsAndShortTermInvestments":
+            sti = 0
+        put("cash_ratio", div(cash + sti, lc))
 
     # Efficiency / per share
     put("asset_turnover", div(rev, assets))
@@ -349,6 +503,12 @@ class PeriodSummary:
     # key -> {"value", "unit", "label"}
     values: dict[str, dict] = field(default_factory=dict)
     currency: str = "USD"          # issuer's monetary reporting currency
+    sic: str | None = None         # SEC SIC code (industry classification)
+    ttm: dict[str, dict] = field(default_factory=dict)
+
+    @property
+    def is_financial(self) -> bool:
+        return _is_financial(self.sic)
 
     @property
     def fy(self) -> int | None:
@@ -366,7 +526,8 @@ class PeriodSummary:
     @property
     def derived(self) -> dict[str, dict]:
         """Computed ratios/aggregates (total debt, EBITDA, leverage, ...)."""
-        return compute_derived(self.values, self.frequency, self.currency)
+        return compute_derived(self.values, self.frequency, self.currency,
+                               self.is_financial)
 
 
 def _to_date(value: str | None) -> date | None:
@@ -452,6 +613,98 @@ def _latest_filed(points: list[dict]) -> dict:
     return max(points, key=lambda p: p.get("filed", ""))
 
 
+def _classify_duration_days(days: int) -> str | None:
+    """Bucket a duration length into 'quarterly' (~3m), 'ytd9' (~9m) or 'annual'."""
+    if 80 <= days <= 100:
+        return "quarterly"
+    if 250 <= days <= 290:
+        return "ytd9"
+    if 330 <= days <= 400:
+        return "annual"
+    return None
+
+
+def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> FlowSeries:
+    quarterly: dict[str, dict[date, float]] = {}
+    annual: dict[str, dict[date, float]] = {}
+    ytd9: dict[str, dict[date, float]] = {}
+    buckets = {"quarterly": quarterly, "annual": annual, "ytd9": ytd9}
+    for key in _TTM_FLOW_KEYS:
+        concept = CONCEPTS_BY_KEY[key]
+        # Union points across ALL fallback tags (not just the first present one):
+        # a filer may tag a concept differently across taxonomy vintages
+        # (e.g. SalesRevenueNet in older 10-Qs, Revenues in the 10-K), and TTM
+        # reconstruction needs every period regardless of which tag carried it.
+        points = [p for tag in concept.tags for p in flat.get(tag, [])]
+        # group candidate points by (bucket, end) and keep the latest-filed
+        grouped: dict[tuple[str, date], list[dict]] = {}
+        for p in _currency_filtered(points, concept, currency):
+            end = _to_date(p.get("end"))
+            start = _to_date(p.get("start"))
+            if not end or not start:
+                continue
+            bucket = _classify_duration_days((end - start).days)
+            if not bucket:
+                continue
+            grouped.setdefault((bucket, end), []).append(p)
+        for (bucket, end), cands in grouped.items():
+            buckets[bucket].setdefault(key, {})[end] = _latest_filed(cands)["val"]
+    return FlowSeries(quarterly=quarterly, annual=annual, ytd9=ytd9)
+
+
+def _standalone_quarter(series: FlowSeries, key: str, end: date) -> float | None:
+    """The ~3-month flow ending at ``end``; derive an unreported FY-end quarter."""
+    direct = series.quarterly.get(key, {}).get(end)
+    if direct is not None:
+        return direct
+    fy = series.annual.get(key, {}).get(end)
+    if fy is None:
+        return None
+    # The FY-end quarter (Q4) = FY total - 9-month YTD ending ~one quarter earlier.
+    for q3_end, ytd in series.ytd9.get(key, {}).items():
+        if 80 <= (end - q3_end).days <= 100:
+            return fy - ytd
+    return None
+
+
+def _quarter_ends(series: FlowSeries) -> list[date]:
+    """All quarter-boundary end dates (standalone quarters + FY ends), sorted."""
+    ends: set[date] = set()
+    for key in _TTM_FLOW_KEYS:
+        ends.update(series.quarterly.get(key, {}))
+        ends.update(series.annual.get(key, {}))
+    return sorted(ends)
+
+
+def _ttm_flow(series: FlowSeries, key: str, end: date, frequency: str) -> float | None:
+    """Trailing-twelve-month sum of ``key`` ending at ``end``.
+
+    Annual periods use the fiscal-year value directly; quarterly periods sum the
+    four trailing standalone quarters (deriving the FY-end quarter when needed).
+    Returns None if any of the four quarters cannot be resolved.
+    """
+    if frequency == "annual":
+        return series.annual.get(key, {}).get(end)
+    ends = _quarter_ends(series)
+    if end not in ends:
+        return None
+    idx = ends.index(end)
+    if idx < 3:
+        return None
+    window = ends[idx - 3:idx + 1]
+    # Reject windows with a gap (a missing quarter) > ~one quarter between steps.
+    for earlier, later in zip(window, window[1:]):
+        if not (80 <= (later - earlier).days <= 100):
+            return None
+    total = 0.0
+    for q_end in window:
+        v = _standalone_quarter(series, key, q_end)
+        if v is None:
+            return None
+        total += v
+    return total
+
+
 def build_period_summaries(
     facts: dict,
     *,
@@ -460,6 +713,7 @@ def build_period_summaries(
     name_for_date=None,
     since_year: int | None = None,
     until_year: int | None = None,
+    sic: str | None = None,
 ) -> list[PeriodSummary]:
     """Group curated concepts into one summary per actual reporting period.
 
@@ -516,12 +770,14 @@ def build_period_summaries(
         for key, cands in per_concept.items():
             chosen = _latest_filed(cands)  # restatements win
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
-                           "label": CONCEPTS_BY_KEY[key].label}
+                           "label": CONCEPTS_BY_KEY[key].label,
+                           "tag": chosen.get("tag")}
             all_points.extend(cands)
         for key, cands in instant.get(end, {}).items():
             chosen = _latest_filed(cands)
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
-                           "label": CONCEPTS_BY_KEY[key].label}
+                           "label": CONCEPTS_BY_KEY[key].label,
+                           "tag": chosen.get("tag")}
             all_points.extend(cands)
         if not values:
             continue
@@ -535,11 +791,53 @@ def build_period_summaries(
             sec_form=first.get("form") or "XBRL",
             accession=first.get("accn") or f"XBRL-{end.isoformat()}-{freq}",
             company=pit or company, company_current=company_current, values=values,
-            currency=currency or "USD",
+            currency=currency or "USD", sic=sic,
         ))
 
     summaries.sort(key=lambda s: (s.period_end or date.min, s.frequency), reverse=True)
     return summaries
+
+
+def _prior_year(by_end: dict[tuple[str, date], "PeriodSummary"], freq: str,
+                end: date) -> "PeriodSummary | None":
+    """The same-frequency summary ending ~one year before ``end`` (345-385 days)."""
+    for (f, e), s in by_end.items():
+        if f == freq and 345 <= (end - e).days <= 385:
+            return s
+    return None
+
+
+def attach_ttm_metrics(facts: dict, summaries: list[PeriodSummary]) -> None:
+    """Compute and attach Bloomberg-style TTM ratios to each summary in place.
+
+    TTM flows come from a trailing-4-quarter reconstruction; ROA/ROE/asset-turnover
+    denominators use the average of the current and year-ago period-end balance.
+    Issuers flagged financial carry sector_relevant=False on sensitive metrics.
+    """
+    flat = flatten_points(facts)
+    currency = reporting_currency(flat)
+    series = _build_flow_series(flat, currency)
+    by_end = {(s.frequency, s.period_end): s for s in summaries if s.period_end}
+
+    for s in summaries:
+        if not s.period_end:
+            continue
+        t12 = {k: _ttm_flow(series, k, s.period_end, s.frequency) for k in _TTM_FLOW_KEYS}
+        prior = _prior_year(by_end, s.frequency, s.period_end)
+
+        def avg(key: str, _s=s, _prior=prior) -> float | None:
+            cur = _num(_s.values, key)
+            old = _num(_prior.values, key) if _prior else None
+            return (cur + old) / 2 if (cur is not None and old is not None) else None
+
+        pit_net_debt = compute_derived(
+            s.values, s.frequency, s.currency, s.is_financial
+        ).get("net_debt", {}).get("value")
+
+        s.ttm = compute_ttm_derived(
+            t12=t12, avg_assets=avg("assets"), avg_equity=avg("equity"),
+            pit_net_debt=pit_net_debt, is_financial=s.is_financial,
+        )
 
 
 def _fmt(value, unit: str) -> str:
@@ -589,6 +887,13 @@ def render_summary_html(summary: PeriodSummary) -> str:
         )
         if derived else ""
     )
+    ttm_tbl = (
+        _metric_table(
+            (summary.ttm[k] for k in DERIVED_TTM_BY_KEY if k in summary.ttm),
+            "Trailing-twelve-month metrics (Bloomberg-style)",
+        )
+        if summary.ttm else ""
+    )
     return (
         f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title></head>"
         f"<body><h1>{html.escape(title)}</h1>"
@@ -598,7 +903,7 @@ def render_summary_html(summary: PeriodSummary) -> str:
         f"<b>Publication date (filed): {pub}</b><br>"
         f"Source form: {html.escape(summary.sec_form)} — accession {html.escape(summary.accession)}<br>"
         f"Data: SEC XBRL company facts (us-gaap)</p>"
-        f"{reported}{derived_tbl}</body></html>"
+        f"{reported}{derived_tbl}{ttm_tbl}</body></html>"
     )
 
 
@@ -611,19 +916,28 @@ def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
     """
     base = {
         "cik": cik, "fy": summary.fy, "frequency": summary.frequency,
-        "currency": summary.currency,
+        "currency": summary.currency, "sic": summary.sic,
+        "is_financial": summary.is_financial,
         "period_end": summary.period_end.isoformat() if summary.period_end else None,
         "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
         "sec_form": summary.sec_form, "accession": summary.accession,
     }
     rows = [
         {**base, "kind": "reported", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"]}
+         "label": v["label"], "value": v["value"], "unit": v["unit"],
+         "tag": v.get("tag")}
         for key, v in summary.values.items()
     ]
     rows += [
         {**base, "kind": "derived", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"]}
+         "label": v["label"], "value": v["value"], "unit": v["unit"],
+         "sector_relevant": v.get("sector_relevant", True)}
         for key, v in summary.derived.items()
+    ]
+    rows += [
+        {**base, "kind": "derived_ttm", "concept": key,
+         "label": v["label"], "value": v["value"], "unit": v["unit"],
+         "sector_relevant": v.get("sector_relevant", True)}
+        for key, v in summary.ttm.items()
     ]
     return rows

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ..config import normalize_cik
-from ..financials import PeriodSummary, build_period_summaries
+from ..financials import PeriodSummary, attach_ttm_metrics, build_period_summaries
 from ..naming import name_as_of, parse_former_names
 from .base import Source
 from .edgar_submissions import SUBMISSIONS_URL
@@ -52,6 +52,7 @@ class EdgarXBRL(Source):
         current = facts.get("entityName", "")
         subs = self._former_names(cik)
         former = parse_former_names(subs.get("formerNames")) if isinstance(subs, dict) else []
+        sic = subs.get("sic") if isinstance(subs, dict) else None
 
         def name_for_date(d):
             return name_as_of(d, current, former)
@@ -59,7 +60,9 @@ class EdgarXBRL(Source):
         summaries = build_period_summaries(
             facts, company=current, company_current=current,
             name_for_date=name_for_date, since_year=since_year, until_year=until_year,
+            sic=sic,
         )
+        attach_ttm_metrics(facts, summaries)
         return facts, summaries
 
     # Uniform Source surface (kept for symmetry with other sources).
