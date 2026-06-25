@@ -136,6 +136,8 @@ def test_annual_only_ratios_suppressed_for_sub_annual_periods():
     assert d["ebitda_margin"]["value"] == pytest.approx(25 / 100 * 100)
     # Same gate applies to semi-annual periods.
     assert "net_debt_to_ebitda" not in compute_derived(_full_inputs(), frequency="semi-annual")
+    # ROE/ROA are stock/flow too -> also annual-only now.
+    assert "roe" not in d and "roa" not in d
 
 
 def test_annual_only_ratios_present_for_annual_periods():
@@ -279,3 +281,39 @@ def test_net_debt_no_double_count_for_combined_cash_tag():
     assert d["net_debt"]["value"] == 40
     # cash_ratio numerator also must not re-add STI (here lc absent -> ratio omitted)
     assert "cash_ratio" not in d
+
+
+def test_negative_equity_suppresses_roe_and_dte():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {
+        "net_income": {"value": 10.0, "unit": "USD"},
+        "equity": {"value": -50.0, "unit": "USD"},
+        "long_term_debt": {"value": 100.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "assets": {"value": 400.0, "unit": "USD"},
+    }
+    d = compute_derived(vals)  # annual
+    assert "roe" not in d and "debt_to_equity" not in d
+    assert d["roa"]["value"] == pytest.approx(10 / 400 * 100)  # roa fine (assets > 0)
+
+
+def test_nonpositive_pretax_suppresses_effective_tax_rate():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {"income_tax": {"value": 5.0, "unit": "USD"},
+            "pretax_income": {"value": -20.0, "unit": "USD"}}
+    assert "effective_tax_rate" not in compute_derived(vals)
+
+
+def test_roe_roa_are_annual_only():
+    from bottom_up_corpus.financials import compute_derived
+    vals = {"net_income": {"value": 10.0, "unit": "USD"},
+            "equity": {"value": 200.0, "unit": "USD"},
+            "assets": {"value": 400.0, "unit": "USD"}}
+    q = compute_derived(vals, frequency="quarterly")
+    assert "roe" not in q and "roa" not in q
+    a = compute_derived(vals, frequency="annual")
+    assert a["roe"]["value"] == pytest.approx(5.0) and a["roa"]["value"] == pytest.approx(2.5)
+
+
+def test_dep_amort_no_bare_depreciation_fallback():
+    from bottom_up_corpus.financials import CONCEPTS_BY_KEY
+    assert "Depreciation" not in CONCEPTS_BY_KEY["dep_amort"].tags

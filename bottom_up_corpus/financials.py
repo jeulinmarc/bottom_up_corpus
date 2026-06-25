@@ -67,7 +67,7 @@ CONCEPTS: tuple[Concept, ...] = (
     # Depreciation & amortization (cash-flow statement; needed for EBITDA)
     Concept("dep_amort", "Depreciation & amortization",
             ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet",
-             "DepreciationAndAmortization", "Depreciation"), False),
+             "DepreciationAndAmortization"), False),
     # --- Per share (duration, USD/shares) ---
     Concept("eps_basic", "EPS (basic)", ("EarningsPerShareBasic",), False, "USD/shares"),
     Concept("eps_diluted", "EPS (diluted)", ("EarningsPerShareDiluted",), False, "USD/shares"),
@@ -165,9 +165,9 @@ DERIVED: tuple[Derived, ...] = (
     Derived("net_margin", "Net margin", "%"),
     Derived("ebitda_margin", "EBITDA margin", "%"),
     Derived("fcf_margin", "FCF margin", "%"),
-    # Returns (%) — period-scoped (not annualised for quarters)
-    Derived("roe", "Return on equity", "%"),
-    Derived("roa", "Return on assets", "%"),
+    # Returns (%) — stock/flow ratio -> annual only (same rationale as asset_turnover)
+    Derived("roe", "Return on equity", "%", annual_only=True),
+    Derived("roa", "Return on assets", "%", annual_only=True),
     Derived("effective_tax_rate", "Effective tax rate", "%"),
     # Leverage / coverage (multiples)
     Derived("debt_to_equity", "Debt / equity", "x"),
@@ -262,6 +262,16 @@ def compute_derived(
         r = div(a, b)
         return r * 100 if r is not None else None
 
+    def div_pos(a: float | None, b: float | None) -> float | None:
+        # Like div, but a non-positive denominator is "not meaningful" -> None.
+        if a is None or b is None or b <= 0:
+            return None
+        return a / b
+
+    def pct_pos(a: float | None, b: float | None) -> float | None:
+        r = div_pos(a, b)
+        return r * 100 if r is not None else None
+
     def opt(key: str) -> float | int:  # additive component: missing -> 0
         return _num(values, key) or 0
 
@@ -322,12 +332,12 @@ def compute_derived(
     put("fcf_margin", pct(fcf, rev))
 
     # Returns / tax (%)
-    put("roe", pct(ni, eq))
+    put("roe", pct_pos(ni, eq))
     put("roa", pct(ni, assets))
-    put("effective_tax_rate", pct(_num(values, "income_tax"), _num(values, "pretax_income")))
+    put("effective_tax_rate", pct_pos(_num(values, "income_tax"), _num(values, "pretax_income")))
 
     # Leverage / coverage (x)
-    put("debt_to_equity", div(total_debt, eq))
+    put("debt_to_equity", div_pos(total_debt, eq))
     put("debt_to_assets", div(total_debt, assets))
     put("net_debt_to_ebitda", div(net_debt, ebitda))
     put("interest_coverage", div(oi, _num(values, "interest_expense")))
