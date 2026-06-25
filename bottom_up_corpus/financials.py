@@ -209,6 +209,12 @@ def _num(values: dict, key: str) -> float | int | None:
     return None
 
 
+def _src(values: dict, key: str) -> str | None:
+    """The source XBRL tag that backed a curated value, if recorded."""
+    v = values.get(key)
+    return v.get("tag") if v else None
+
+
 def compute_derived(
     values: dict[str, dict], frequency: str = "annual", currency: str = "USD"
 ) -> dict[str, dict]:
@@ -516,12 +522,14 @@ def build_period_summaries(
         for key, cands in per_concept.items():
             chosen = _latest_filed(cands)  # restatements win
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
-                           "label": CONCEPTS_BY_KEY[key].label}
+                           "label": CONCEPTS_BY_KEY[key].label,
+                           "tag": chosen.get("tag")}
             all_points.extend(cands)
         for key, cands in instant.get(end, {}).items():
             chosen = _latest_filed(cands)
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
-                           "label": CONCEPTS_BY_KEY[key].label}
+                           "label": CONCEPTS_BY_KEY[key].label,
+                           "tag": chosen.get("tag")}
             all_points.extend(cands)
         if not values:
             continue
@@ -618,7 +626,8 @@ def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
     }
     rows = [
         {**base, "kind": "reported", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"]}
+         "label": v["label"], "value": v["value"], "unit": v["unit"],
+         "tag": v.get("tag")}
         for key, v in summary.values.items()
     ]
     rows += [

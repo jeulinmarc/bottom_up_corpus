@@ -227,3 +227,17 @@ def test_derived_rendered_in_html():
     assert "Derived metrics" in html
     assert "EBITDA" in html and "Net debt / EBITDA" in html
     assert "Total debt" in html
+
+
+def test_values_carry_source_tag():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    # The resolved XBRL element backing each curated value is recorded.
+    assert fy.values["revenue"]["tag"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
+    assert fy.values["long_term_debt"]["tag"] == "LongTermDebtNoncurrent"
+
+
+def test_normalized_reported_rows_carry_tag():
+    fy = next(x for x in _summaries() if x.frequency == "annual")
+    rows = normalized_rows("0000320193", fy)
+    rev = next(r for r in rows if r["concept"] == "revenue" and r["kind"] == "reported")
+    assert rev["tag"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
