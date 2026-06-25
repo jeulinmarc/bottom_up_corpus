@@ -681,7 +681,8 @@ def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
     """
     base = {
         "cik": cik, "fy": summary.fy, "frequency": summary.frequency,
-        "currency": summary.currency,
+        "currency": summary.currency, "sic": summary.sic,
+        "is_financial": summary.is_financial,
         "period_end": summary.period_end.isoformat() if summary.period_end else None,
         "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
         "sec_form": summary.sec_form, "accession": summary.accession,
@@ -694,7 +695,8 @@ def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
     ]
     rows += [
         {**base, "kind": "derived", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"]}
+         "label": v["label"], "value": v["value"], "unit": v["unit"],
+         "sector_relevant": v.get("sector_relevant", True)}
         for key, v in summary.derived.items()
     ]
     return rows

@@ -370,3 +370,24 @@ def test_period_summary_is_financial_from_sic():
     s = build_period_summaries(SAMPLE_FACTS, company="X", company_current="X", sic="6311")
     assert all(x.is_financial for x in s)
     assert all(x.sic == "6311" for x in s)
+
+
+def test_normalized_rows_carry_sic_and_sector_flags():
+    # Insurer SIC -> is_financial True on every row; sector-sensitive derived rows
+    # flagged, sector-neutral ones relevant. Nothing is dropped.
+    s = build_period_summaries(SAMPLE_FACTS, company="X", company_current="X", sic="6311")
+    fy = next(x for x in s if x.frequency == "annual")
+    rows = normalized_rows("0000320193", fy)
+    assert all(r["sic"] == "6311" for r in rows)
+    assert all(r["is_financial"] is True for r in rows)
+    ebitda = next(r for r in rows if r["concept"] == "ebitda" and r["kind"] == "derived")
+    assert ebitda["sector_relevant"] is False
+    net_margin = next(r for r in rows if r["concept"] == "net_margin")
+    assert net_margin["sector_relevant"] is True
+
+
+def test_edgar_xbrl_threads_sic(xbrl_fetcher, config):
+    from bottom_up_corpus.sources.edgar_xbrl import EdgarXBRL
+    src = EdgarXBRL(fetcher=xbrl_fetcher, config=config)
+    _facts, summaries = src.period_summaries("0000320193")
+    assert summaries and all(s.sic == "3571" for s in summaries)

@@ -218,7 +218,7 @@ SAMPLE_FACTS = {
     }},
 }
 
-SAMPLE_FACTS_SUBMISSIONS = {"entityName": "Apple Inc.", "formerNames": []}
+SAMPLE_FACTS_SUBMISSIONS = {"entityName": "Apple Inc.", "formerNames": [], "sic": "3571"}
 
 
 @pytest.fixture
