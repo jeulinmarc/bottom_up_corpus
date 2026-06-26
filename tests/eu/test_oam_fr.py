@@ -53,3 +53,56 @@ def test_fr_discover_queries_lei_and_isins():
     assert "TESTLEI123" in url
     assert "FR0000123456" in url
     assert "FR0000789012" in url
+
+
+def test_fr_discover_no_url_records_counted_in_errors():
+    """Records missing url_de_recuperation must be counted and recorded in errors
+    (not silently dropped), so the data loss is detectable. One record has a URL,
+    one does not — expect 1 Document and a 'no-url' error entry."""
+    fixture = {
+        "total_count": 2,
+        "results": [
+            {
+                "uin_idt_uin": "REC001",
+                "url_de_recuperation": "https://example.com/doc1.pdf",
+                "type_of_information": "Ongoing regulated information",
+                "subtype_of_information": "Inside Information",
+                "informationdeposee_inf_dat_emt": "2024-01-01T00:00:00+00:00",
+            },
+            {
+                "uin_idt_uin": "REC002",
+                "url_de_recuperation": None,  # <-- missing URL
+                "type_of_information": "Ongoing regulated information",
+                "subtype_of_information": "Inside Information",
+                "informationdeposee_inf_dat_emt": "2024-01-02T00:00:00+00:00",
+            },
+        ],
+    }
+    f = _Fetcher({"/records": fixture})
+    src = InfoFinanciereFR(fetcher=f)
+    docs = src.discover(Entity(lei="969500P31E3EW0YOR413", name="TotalEnergies SE", country="FR"))
+    assert len(docs) == 1, "only the record with a URL should produce a Document"
+    no_url_errors = [e for e in src.errors if e.get("context") == "no-url"]
+    assert no_url_errors, "missing-URL drop must be recorded as a 'no-url' error"
+    assert "1 records" in no_url_errors[0]["error"]
+
+
+def test_fr_discover_malformed_identifier_not_injected():
+    """Identifiers containing characters outside ^[A-Z0-9]+$ (e.g. a stray quote)
+    must be rejected before building the where-clause — no injection, no crash."""
+    captured_urls = []
+
+    class _CaptureFetcher:
+        def get_json(self, url, **_):
+            captured_urls.append(url)
+            return {"total_count": 0, "results": []}
+
+    malformed_lei = 'BAD"INJECTED'   # contains a quote — must NOT appear in query
+    safe_isin = "FR0000123456"        # valid, must appear
+    src = InfoFinanciereFR(fetcher=_CaptureFetcher())
+    src.discover(Entity(lei=malformed_lei, name="Test Co", country="FR",
+                        isins=(safe_isin,)))
+    assert captured_urls, "fetcher should still be called (safe ISIN present)"
+    url = captured_urls[0]
+    assert '"' not in url, "malformed identifier must not be interpolated into the query"
+    assert safe_isin in url, "valid ISIN must still appear in the query"

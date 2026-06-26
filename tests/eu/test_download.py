@@ -13,6 +13,36 @@ class _DLFetcher:
         return len(b"PKG" + url.encode())
 
 
+class _FailingFetcher:
+    """Fetcher whose download always raises, simulating a mid-stream failure."""
+    def download(self, url, dest, **_):
+        # Write partial content to dest (simulating corruption) then raise.
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"PARTIAL")
+        raise OSError("connection reset")
+
+
+def test_atomic_download_no_truncated_file_on_failure(tmp_path):
+    """A failing download must leave NO file at dest — only a manifest error entry.
+    The atomic .part + os.replace pattern ensures a truncated artifact can never
+    be trusted by the idempotency check (dest.exists())."""
+    cfg = Config(data_dir=tmp_path / "data", contact="t@e.com")
+    doc = Document(doc_id="atomic-1", lei="L2", country="DE", doc_type="annual_report",
+                   period_end=date(2023, 12, 31), published_ts="2024-03-01", discovered_ts="x",
+                   language="de", source="filings.xbrl.org",
+                   files=[{"name": "report.html", "url": "http://x/report.html", "kind": "report_url"}],
+                   native_meta={})
+    man = download_document(doc, fetcher=_FailingFetcher(), config=cfg)
+    dest = cfg.raw_dir / "L2" / "ESEF-AR" / "2023" / "atomic-1" / "report.html"
+    # dest must NOT exist — the failed .part file must have been cleaned up
+    assert not dest.exists(), "truncated file must not survive a download failure"
+    # The .part file must also be gone
+    part = dest.with_name(dest.name + ".part")
+    assert not part.exists(), ".part temp file must be cleaned up on failure"
+    # The manifest must record the error so the failure is visible
+    assert len(man["files"]) == 1 and "error" in man["files"][0]
+
+
 def test_download_writes_all_files_and_manifest(tmp_path):
     cfg = Config(data_dir=tmp_path / "data", contact="t@e.com")
     doc = Document(doc_id="fxo-1", lei="L1", country="DE", doc_type="annual_report",

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from ..config import Config
@@ -32,7 +33,16 @@ def download_document(doc: Document, *, fetcher, config: Config) -> dict:
         dest = base / (f.get("name") or f["url"].rsplit("/", 1)[-1])
         try:
             if not dest.exists():
-                fetcher.download(f["url"], dest)
+                tmp = dest.with_name(dest.name + ".part")
+                try:
+                    fetcher.download(f["url"], tmp)
+                    os.replace(tmp, dest)
+                except Exception:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise
             sha = _sha256_file(dest)
         except Exception as exc:  # noqa: BLE001
             files_out.append({**f, "error": str(exc)})

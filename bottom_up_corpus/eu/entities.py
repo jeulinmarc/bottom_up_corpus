@@ -54,15 +54,21 @@ def _lookup_isin(isin: str, fetcher) -> Entity:
 
 
 def _lookup_name(name: str, country: str, fetcher) -> Entity:
-    url = f"{GLEIF}?filter%5Bentity.legalName%5D={quote(name)}&page%5Bsize%5D=1"
+    url = f"{GLEIF}?filter%5Bentity.legalName%5D={quote(name)}&page%5Bsize%5D=10"
     try:
         rows = fetcher.get_json(url).get("data") or []
     except Exception:
         rows = []
-    if len(rows) == 1 or (rows and country):
+    # If a country is given, keep only rows matching that country.
+    if country:
+        rows = [
+            r for r in rows
+            if _from_gleif_record(r["attributes"])[2] == country
+        ]
+    # Resolve ONLY if exactly one candidate remains — never guess an ambiguous match.
+    if len(rows) == 1:
         lei_v, nm, ctry = _from_gleif_record(rows[0]["attributes"])
-        if not country or ctry == country:
-            return Entity(lei=lei_v, name=nm, country=ctry, resolution="name")
+        return Entity(lei=lei_v, name=nm, country=ctry, resolution="name")
     return Entity(lei=None, name=name, country=country, resolution="unresolved")
 
 

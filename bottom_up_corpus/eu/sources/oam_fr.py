@@ -6,11 +6,16 @@ items ARE the field dicts; no record/fields nesting). Confirmed field names belo
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
 from ..oam_base import IssuerRef, OamSource
+
+# LEIs and ISINs are uppercase alphanumeric; reject anything else to prevent
+# stray quotes from breaking or altering the ODS where-clause.
+_SAFE_ID_RE = re.compile(r'^[A-Z0-9]+$')
 
 BASE = "https://www.info-financiere.gouv.fr/api/explore/v2.1/catalog/datasets"
 DATASET = "flux-amf-new-prod"
@@ -47,11 +52,17 @@ class InfoFinanciereFR(OamSource):
         if not entity.lei and not entity.isins:
             return []
         # Build OR-clause over LEI and each ISIN so pre-LEI-era records aren't silently dropped.
+        # Validate identifiers against ^[A-Z0-9]+$ before interpolating into the query string
+        # to prevent stray quotes from breaking or altering the ODS where-clause.
         clauses = []
         if entity.lei:
-            clauses.append(f'identificationsociete_iso_cd_lei="{entity.lei}"')
+            if _SAFE_ID_RE.match(entity.lei):
+                clauses.append(f'identificationsociete_iso_cd_lei="{entity.lei}"')
         for isin in entity.isins:
-            clauses.append(f'identificationsociete_iso_cd_isi="{isin}"')
+            if _SAFE_ID_RE.match(isin):
+                clauses.append(f'identificationsociete_iso_cd_isi="{isin}"')
+        if not clauses:
+            return []
         where = quote(" OR ".join(f"({c})" if len(clauses) > 1 else c for c in clauses))
         q = f"{BASE}/{DATASET}/records?where={where}&limit=100"
         try:
@@ -66,9 +77,11 @@ class InfoFinanciereFR(OamSource):
                                f"{len(results)}/{total_count} records")
         now = datetime.now(timezone.utc).isoformat()
         out: list[Document] = []
+        skipped = 0
         for f in results:
             url = f.get("url_de_recuperation")
             if not url:
+                skipped += 1
                 continue
             out.append(Document(
                 doc_id=f"fr-{f.get('uin_idt_uin')}", lei=entity.lei, country="FR",
@@ -79,4 +92,6 @@ class InfoFinanciereFR(OamSource):
                 discovered_ts=now, language="fr", source=self.name,
                 files=[{"name": url.rsplit("/", 1)[-1], "url": url, "kind": "document"}],
                 native_meta=f))
+        if skipped:
+            self._record_error("no-url", q, f"{skipped} records had no url_de_recuperation")
         return out

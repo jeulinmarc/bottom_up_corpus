@@ -25,10 +25,29 @@ def test_resolve_by_lei_uses_gleif_record():
     assert e.resolution == "lei"
 
 
-def test_resolve_by_name_picks_single_match():
+def test_resolve_by_name_ambiguous_country_is_unresolved():
+    # The re-captured gleif_name_sap.json (page[size]=10) returns 3 records total;
+    # filtering to country="DE" leaves 2 candidates (SAP SE + SAP Deutschland SE & Co. KG).
+    # Under the new rule (exactly-one wins), this must be unresolved — never bind to wrong LEI.
     f = _Fetcher({"filter": (FIX / "gleif_name_sap.json").read_text()})
     [e] = resolve_entities([{"name": "SAP SE", "country": "DE"}], fetcher=f)
-    assert e.lei == "529900D6BF99LW9R2E68"
+    assert e.lei is None
+    assert e.resolution == "unresolved"
+
+
+def test_ambiguous_name_resolves_unresolved():
+    # Two records both with country="FR" → ambiguous → unresolved.
+    f = _Fetcher({"filter": (FIX / "gleif_name_ambiguous.json").read_text()})
+    [e] = resolve_entities([{"name": "Foo", "country": "FR"}], fetcher=f)
+    assert e.lei is None
+    assert e.resolution == "unresolved"
+
+
+def test_unique_name_resolves_with_name_tier():
+    # Single record with country="FR" → exactly one candidate → resolves.
+    f = _Fetcher({"filter": (FIX / "gleif_name_unique.json").read_text()})
+    [e] = resolve_entities([{"name": "UniqueBar SA", "country": "FR"}], fetcher=f)
+    assert e.lei == "FR0000000000000000C3"
     assert e.resolution == "name"
 
 
