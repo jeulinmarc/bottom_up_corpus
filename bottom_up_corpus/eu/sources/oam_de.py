@@ -56,7 +56,6 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # alternative ensures the final result row is not lost when no row follows it.
 _ROW_RE = re.compile(r'<div class="row( back)?">(.*?)(?=<div class="row|\Z)', re.S)
 _FIRST_RE = re.compile(r'<div class="first">(.*?)</div>', re.S)
-_PART_RE = re.compile(r'<div class="part">(.*?)</div>', re.S)
 _INFO_RE = re.compile(r'<div class="info">\s*<a href="([^"]*)">(.*?)</a>', re.S)
 _DATE_RE = re.compile(r'<div class="date">(.*?)</div>', re.S)
 _DATE_DMY_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
@@ -256,7 +255,13 @@ class BundesanzeigerDE(OamSource):
         return docs, dropped
 
     def _next_page_url(self, html: str, seen: set[str]) -> str | None:
-        """First pager link not already crawled, else None (last page)."""
+        """First pager link not already crawled, else None (last page).
+
+        Assumes a page's own pager does not link to itself (verified live: the
+        Wicket pager omits the current page's link, so the first unseen link is
+        genuinely the next page). The ``seen`` set is the backstop against any
+        revisit regardless.
+        """
         for url in _PAGER_RE.findall(html):
             if url not in seen:
                 return url

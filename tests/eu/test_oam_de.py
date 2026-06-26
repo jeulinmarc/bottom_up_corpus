@@ -82,6 +82,10 @@ def test_parses_and_filters_to_target_issuer():
         for d in docs
     )
     assert all(len(d.files) == 1 and d.files[0]["kind"] == "html" for d in docs)
+    # The real fixture contains noise rows (e.g. Bridgewater) that the filter drops;
+    # assert that drop is RECORDED so the filter path is exercised and never silent.
+    assert any(e["context"] == "issuer-filter" for e in src.errors), \
+        "dropped noise rows must be recorded (never silently partial)"
 
 
 def test_inline_content_captured():
