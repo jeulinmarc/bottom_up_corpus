@@ -29,6 +29,7 @@ Every network step is wrapped so a single failure records an error via
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -44,12 +45,24 @@ _BASE = "https://www.cnmv.es/portal"
 _BUSQUEDA_LANDING = _BASE + "/Consultas/BusquedaPorEntidad.aspx?nombre={name}"
 _BUSQUEDA_POST = _BASE + "/Consultas/BusquedaPorEntidad"
 
-# Each tuple: (url_path_fragment_with_{nif}_placeholder, doc_type)
+# Each tuple: (url_path_fragment_with_{nif}_placeholder, doc_type). These two
+# registers share the <li …subtituloRegistroEnlace> row shape. Annual financial
+# reports live in a different register (a <table>) handled by _discover_ifa.
 _REGISTERS = [
-    ("consultas/em_inffinanual.aspx?id=EE&nif={nif}", "annual_report"),
     ("Informacion-Privilegiada/resultado-ip.aspx?nif={nif}", "inside_information"),
     ("Otra-Informacion-Relevante/resultado-oir.aspx?nif={nif}", "other"),
 ]
+
+# Annual financial reports (Informes financieros anuales) — a <table id=…gridInformes>
+# keyed by NIF, one row per fiscal year (individual + consolidated accounts + the ESEF
+# ZIP/Xbri package). All years on one page (no pagination).
+_IFA_URL = _BASE + "/Consultas/IFA/ListadoIFA.aspx?id=0&nif={nif}"
+_IFA_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S | re.I)
+_IFA_CELL_RE = re.compile(r'<td[^>]*data-th="([^"]*)"[^>]*>(.*?)</td>', re.S | re.I)
+# A downloadable report link in an IFA row: an absolute verdocumento URL (recent,
+# ?e=token or ?t=guid) or a relative historical /AUDITA/YYYY/N.pdf path.
+_IFA_DL_RE = re.compile(
+    r'href="([^"]*(?:webservices/verdocumento/ver\?[^"]+|/AUDITA/\d+/[^"]+\.pdf))"', re.I)
 
 # Follow at most this many result pages per register; if there is a next page
 # beyond this cap, record a truncation error (same contract as oam_it.py).
@@ -79,6 +92,16 @@ _OPTION_RE = re.compile(
     r'<option(?:\s+[^>]*?)?\s+value="([^"]*)"[^>]*>\s*([^<]*?)\s*</option>',
     re.I | re.S,
 )
+
+# When the search term matches exactly ONE entity the site skips the <select> and
+# redirects straight to that entity's DatosEntidad page. These recover the NIF from
+# that page — gated on the entity-detail title so we never mistake a multi-result or
+# unrelated page for a direct hit.
+_ENTITY_TITLE_RE = re.compile(
+    r'Informaci[oó]n de la Entidad\s*-\s*([^"<]+?)\s*"', re.I)
+# nif= can sit anywhere in the query string (issuers: datosentidad?nif=…; credit
+# institutions: datosentidad?numero=49&tipo=ECN&nif=…).
+_DATOSENTIDAD_NIF_RE = re.compile(r'datosentidad\?[^"\'<>]*\bnif=([A-Z0-9-]+)', re.I)
 
 # The document-row link:
 # <a id="…subtituloRegistroEnlace" href="ABSOLUTE_URL" target="_blank"><span …>TITLE</span></a>
@@ -113,6 +136,9 @@ _LEGAL_SUFFIX_RE = re.compile(
 def _normalise(name: str) -> str:
     """Collapse whitespace, casefold, strip a trailing legal-form suffix."""
     n = _WS_RE.sub(' ', name).strip().casefold()
+    # Strip diacritics: CNMV stores accent-folded names (TELEFONICA), GLEIF keeps
+    # them (Telefónica), so match on the ASCII-folded form.
+    n = "".join(c for c in unicodedata.normalize("NFKD", n) if not unicodedata.combining(c))
     n = _LEGAL_SUFFIX_RE.sub('', n).strip()
     return n
 
@@ -138,6 +164,25 @@ def _parse_date(date_text: str) -> str | None:
         return datetime(int(yyyy), int(mm), int(dd)).date().isoformat()
     except ValueError:
         return None
+
+
+def _parse_date_obj(date_text: str):
+    """dd/mm/yyyy → datetime.date, or None."""
+    m = _DATE_RE.search(date_text or '')
+    if not m:
+        return None
+    dd, mm, yyyy = m.groups()
+    try:
+        return datetime(int(yyyy), int(mm), int(dd)).date()
+    except ValueError:
+        return None
+
+
+def _slug(text: str) -> str:
+    """A short ascii slug for a column label, used in IFA file names."""
+    s = _TAG_STRIP_RE.sub('', text).strip().casefold()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return re.sub(r'[^a-z0-9]+', '-', s).strip('-')[:24] or 'doc'
 
 
 def _extract_guid(url: str) -> str | None:
@@ -193,7 +238,66 @@ class CnmvES(OamSource):
             except Exception as exc:  # noqa: BLE001
                 self._record_error('discover', register_url, exc)
 
+        ifa_url = _IFA_URL.format(nif=quote(nif, safe=''))
+        try:
+            out.extend(self._discover_ifa(ifa_url, nif, entity, now))
+        except Exception as exc:  # noqa: BLE001
+            self._record_error('discover', ifa_url, exc)
+
         return out
+
+    # ------------------------------------------------------------------
+    # Annual financial reports (IFA) — table register
+    # ------------------------------------------------------------------
+
+    def _discover_ifa(
+        self, url: str, nif: str, entity: Entity, now: str
+    ) -> list[Document]:
+        """Parse the annual-financial-reports table: one Document per fiscal year,
+        carrying every report file in the row (individual + consolidated + ESEF zip)."""
+        try:
+            html = self.fetcher.get_text(url)
+        except Exception as exc:  # noqa: BLE001
+            self._record_error('ifa-page', url, exc)
+            return []
+
+        docs: list[Document] = []
+        for row_m in _IFA_ROW_RE.finditer(html):
+            row = row_m.group(1)
+            cells = {label.strip(): cell for label, cell in _IFA_CELL_RE.findall(row)}
+            if not cells:
+                continue  # header / non-data row
+
+            period_end = _parse_date_obj(cells.get('Fecha Estados Financieros', ''))
+            published_ts = _parse_date(cells.get('Fecha de publicación (1)', '')) \
+                or _parse_date(cells.get('Fecha de publicación', ''))
+
+            files: list[dict] = []
+            for label, cell in cells.items():
+                for href in _IFA_DL_RE.findall(cell):
+                    href = href.replace('&amp;', '&')
+                    abs_url = href if href.startswith('http') else 'https://www.cnmv.es' + href
+                    is_esef = 'zip' in label.lower() or 'xbri' in label.lower()
+                    ext = 'zip' if is_esef else 'pdf'
+                    files.append({
+                        'name': f'{len(files)}-{_slug(label)}.{ext}',
+                        'kind': 'esef' if is_esef else 'document',
+                        'url': abs_url,
+                    })
+            if not files:
+                continue
+
+            nreg = _WS_RE.sub('', _TAG_STRIP_RE.sub('', cells.get('Nº Registro Oficial', ''))) \
+                or (period_end.isoformat() if period_end else str(len(docs)))
+            docs.append(Document(
+                doc_id=f'es-{nif}-ifa-{nreg}',
+                lei=entity.lei, country='ES', doc_type='annual_report',
+                period_end=period_end, published_ts=published_ts, discovered_ts=now,
+                language='es', source=self.name, files=files,
+                native_meta={'nif': nif, 'registro_oficial': nreg},
+            ))
+
+        return docs
 
     # ------------------------------------------------------------------
     # Name → NIF resolution
@@ -264,6 +368,15 @@ class CnmvES(OamSource):
             return matches[0][0]
 
         if not matches:
+            # A uniquely-matching name skips the <select> entirely: the site redirects
+            # straight to the entity's DatosEntidad page. Recover the NIF from there,
+            # but ONLY when that page's own entity name still EXACTLY matches the target
+            # (strict no-guess — an unrelated direct hit is rejected).
+            title = _ENTITY_TITLE_RE.search(html)
+            nif_hit = _DATOSENTIDAD_NIF_RE.search(html)
+            if title and nif_hit and _normalise(title.group(1)) == norm_target:
+                return nif_hit.group(1)
+
             self._record_error(
                 'resolve-no-match',
                 url,

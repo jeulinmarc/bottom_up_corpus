@@ -23,6 +23,23 @@ FIX = Path(__file__).parent.parent / "fixtures" / "eu"
 # Real captured fixture HTML
 _BUSQUEDA_HTML = (FIX / "es_busqueda_entidad_iberdrola.html").read_text()
 _RESULTADO_IP_HTML = (FIX / "es_resultado_ip_iberdrola.html").read_text()
+_LISTADO_IFA_HTML = (FIX / "es_listadoifa_iberdrola.html").read_text()
+
+# A direct-hit page: a uniquely-matching name skips the <select> and the site serves
+# the entity's DatosEntidad page straight away (issuer form: nif first in the query).
+_DIRECT_HIT_HTML = """
+<html><head>
+<meta name="title" content="CNMV - Información de la Entidad - ACME POWER, S.A." />
+<link rel="canonical" href="https://www.cnmv.es/portal/consultas/datosentidad?nif=A-99999999&lang=es" />
+</head><body>ACME POWER, S.A.</body></html>
+"""
+# A credit-institution direct hit: nif sits AFTER numero/tipo in the query string.
+_DIRECT_HIT_BANK_HTML = """
+<html><head>
+<meta name="title" content="CNMV - Información de la Entidad - BANCO ACME, S.A." />
+<link rel="canonical" href="https://www.cnmv.es/portal/consultas/datosentidad?numero=49&tipo=ECN&nif=A12345678&lang=es" />
+</head><body>BANCO ACME, S.A.</body></html>
+"""
 
 # Minimal landing HTML with the three WebForms hidden fields.
 _LANDING_HTML = """
@@ -62,11 +79,13 @@ class _StubFetcher:
         landing_html: str = _LANDING_HTML,
         post_html: str = _BUSQUEDA_HTML,
         resultado_ip_html: str = _RESULTADO_IP_HTML,
+        ifa_html: str = _LISTADO_IFA_HTML,
         empty_html: str = _EMPTY_REGISTER_HTML,
     ):
         self._landing = landing_html
         self._post = post_html
         self._ip = resultado_ip_html
+        self._ifa = ifa_html
         self._empty = empty_html
         self.get_calls: list[str] = []
         self.post_calls: list[tuple[str, dict]] = []
@@ -75,9 +94,11 @@ class _StubFetcher:
         self.get_calls.append(url)
         if 'BusquedaPorEntidad' in url:
             return self._landing
+        if 'ListadoIFA' in url:
+            return self._ifa
         if 'resultado-ip' in url:
             return self._ip
-        if 'em_inffinanual' in url or 'resultado-oir' in url:
+        if 'resultado-oir' in url:
             return self._empty
         raise RuntimeError(f"Unexpected get_text url: {url}")
 
@@ -95,8 +116,14 @@ class _StubFetcher:
 def test_normalise_collapses_whitespace_and_strips_suffix():
     assert _normalise("IBERDROLA, S.A.") == "iberdrola"
     assert _normalise("iberdrola, s.a.") == "iberdrola"
-    assert _normalise("IBERDROLA  FINANCIACIÓN  S.A.") == "iberdrola financiación"
     assert _normalise("  ENI   S.P.A.  ") == "eni"
+
+
+def test_normalise_strips_diacritics():
+    # CNMV stores accent-folded names (TELEFONICA); GLEIF keeps them (Telefónica).
+    assert _normalise("Telefónica, S.A.") == "telefonica"
+    assert _normalise("Telefónica, S.A.") == _normalise("TELEFONICA, S.A.")
+    assert _normalise("IBERDROLA  FINANCIACIÓN  S.A.") == "iberdrola financiacion"
 
 
 def test_parse_date_dd_mm_yyyy():
@@ -143,6 +170,46 @@ def test_resolve_ambiguous_or_missing_returns_none():
     ), f"expected a resolution error; got {src.errors}"
 
 
+def test_resolve_direct_hit_issuer_page():
+    """A uniquely-matching name skips the <select> and redirects to DatosEntidad;
+    the NIF is recovered from that page when its entity name still matches exactly."""
+    src = CnmvES(fetcher=_StubFetcher(post_html=_DIRECT_HIT_HTML))
+    assert src._resolve_nif("ACME POWER, S.A.") == "A-99999999"
+    assert not src.errors
+
+
+def test_resolve_direct_hit_credit_institution_nif_anywhere_in_query():
+    """Credit institutions put nif= after numero/tipo in the DatosEntidad URL."""
+    src = CnmvES(fetcher=_StubFetcher(post_html=_DIRECT_HIT_BANK_HTML))
+    assert src._resolve_nif("Banco Acme, S.A.") == "A12345678"
+
+
+def test_resolve_direct_hit_rejected_when_name_mismatches():
+    """A direct-hit page whose entity name does NOT match the target is rejected
+    (strict no-guess) — never bind an unrelated NIF."""
+    src = CnmvES(fetcher=_StubFetcher(post_html=_DIRECT_HIT_HTML))
+    assert src._resolve_nif("TOTALLY DIFFERENT CO, S.A.") is None
+    assert any(e["context"] == "resolve-no-match" for e in src.errors)
+
+
+def test_discover_ifa_annual_reports():
+    """The IFA table yields one annual_report Document per fiscal year, each carrying
+    its report files (individual/consolidated + ESEF zip), with a real period_end."""
+    src = CnmvES(fetcher=_StubFetcher())
+    docs = src.discover(Entity(lei="L1", name="IBERDROLA, S.A.", country="ES"))
+    annual = [d for d in docs if d.doc_type == "annual_report"]
+    assert annual, "expected annual_report Documents from the IFA table"
+    assert all(d.period_end is not None for d in annual), "period_end from Fecha Estados Financieros"
+    assert all(d.files for d in annual)
+    # Every annual file is a real CNMV document URL (verdocumento or AUDITA).
+    assert all(
+        ("verdocumento/ver" in f["url"] or "/AUDITA/" in f["url"])
+        for d in annual for f in d.files
+    )
+    # At least one row exposes the ESEF (ZIP/Xbri) package.
+    assert any(f["kind"] == "esef" for d in annual for f in d.files)
+
+
 def test_resolve_caches_nif():
     """A second call with the same (normalised) name must not hit the network again."""
     fetcher = _StubFetcher()
@@ -177,7 +244,11 @@ def test_discover_parses_verdocumento_rows():
     assert all(d.language == "es" for d in docs)
     assert all(d.lei == "L1" for d in docs)
 
-    for doc in docs:
+    # The <li>-style registers (inside_information / other) yield single-file docs
+    # with a ?t=GUID verdocumento URL (annual_report IFA rows are tested separately).
+    li_docs = [d for d in docs if d.doc_type != "annual_report"]
+    assert li_docs
+    for doc in li_docs:
         assert len(doc.files) == 1
         f = doc.files[0]
         assert f["kind"] == "document", f"expected kind=document, got {f['kind']!r}"
@@ -196,18 +267,17 @@ def test_discover_resultado_ip_has_correct_doc_type():
 
 
 def test_doc_type_per_register():
-    """The register→doc_type mapping is correct."""
-    from bottom_up_corpus.eu.sources.oam_es import _REGISTERS
+    """The <li>-register mapping is ip→inside_information, oir→other; annual reports
+    come from the separate IFA table register, not _REGISTERS."""
+    from bottom_up_corpus.eu.sources.oam_es import _REGISTERS, _IFA_URL
 
     mapping = {frag: dt for frag, dt in _REGISTERS}
-    # Check all three register types are present.
-    assert "annual_report" in mapping.values()
     assert "inside_information" in mapping.values()
     assert "other" in mapping.values()
-    # Check key fragments.
-    assert any("em_inffinanual" in k for k in mapping.keys())
+    assert "annual_report" not in mapping.values(), "annual reports are the IFA register"
     assert any("resultado-ip" in k for k in mapping.keys())
     assert any("resultado-oir" in k for k in mapping.keys())
+    assert "ListadoIFA" in _IFA_URL
 
 
 def test_empty_name_returns_empty():
