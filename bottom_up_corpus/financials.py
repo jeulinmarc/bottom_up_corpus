@@ -528,7 +528,8 @@ def compute_derived(
     put("tangible_book_value", tbv)
 
     # Returns on capital: NOPAT / invested capital. Invested capital = total debt +
-    # equity (parent + NCI) - cash & equivalents. Tax rate clamped to [0,1] for NOPAT.
+    # total equity (parent + NCI) -- the total-capital base, no cash netting (keeps
+    # the ratio sane for cash-rich issuers). Tax rate clamped to [0,1] for NOPAT.
     pretax = _num(values, "pretax_income")
     inc_tax = _num(values, "income_tax")
     tax_rate = (inc_tax / pretax) if (inc_tax is not None and pretax is not None and pretax > 0) else None
@@ -538,7 +539,7 @@ def compute_derived(
     put("nopat", nopat)
     invested = None
     if total_debt is not None and eq is not None:
-        invested = total_debt + eq + opt("noncontrolling_interest") - opt("cash")
+        invested = total_debt + eq + opt("noncontrolling_interest")
     put("invested_capital", invested)
     put("roic", pct_pos(nopat, invested))
 
@@ -683,6 +684,33 @@ def _points_for(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
     return []
 
 
+def _points_by_priority(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
+    """All points across the concept's fallback tags, each carrying its tag's
+    priority index (``_prio``).
+
+    Filers switch tags across taxonomy vintages (e.g. Microsoft's cost of revenue
+    moved from ``CostOfRevenue`` to ``CostOfGoodsAndServicesSold``; Alphabet's
+    revenue from ``RevenueFromContractWithCustomerExcludingAssessedTax`` to
+    ``Revenues``). The old first-tag-wins lookup returned the stale tag's points
+    and dropped the recent period. Carrying priority lets per-period selection
+    prefer the highest-priority tag that actually has a value for *that* period.
+    """
+    pts: list[dict] = []
+    for prio, tag in enumerate(concept.tags):
+        for p in flat.get(tag, []):
+            q = dict(p)
+            q["_prio"] = prio
+            pts.append(q)
+    return pts
+
+
+def _choose(cands: list[dict]) -> dict:
+    """Resolve one (period, concept): the highest-priority tag present for this
+    period, then the latest-filed point within it (restatements win)."""
+    best = min(p.get("_prio", 0) for p in cands)
+    return _latest_filed([p for p in cands if p.get("_prio", 0) == best])
+
+
 def reporting_currency(flat: dict[str, list[dict]]) -> str | None:
     """The issuer's dominant monetary currency (most frequent currency unit).
 
@@ -750,14 +778,13 @@ def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> Flo
     buckets = {"quarterly": quarterly, "annual": annual, "ytd9": ytd9}
     for key in _TTM_FLOW_KEYS:
         concept = CONCEPTS_BY_KEY[key]
-        # Union points across ALL fallback tags (not just the first present one):
-        # a filer may tag a concept differently across taxonomy vintages
-        # (e.g. SalesRevenueNet in older 10-Qs, Revenues in the 10-K), and TTM
-        # reconstruction needs every period regardless of which tag carried it.
-        points = [p for tag in concept.tags for p in flat.get(tag, [])]
-        # group candidate points by (bucket, end) and keep the latest-filed
+        # Priority-aware union across the concept's fallback tags: a filer may tag a
+        # concept differently across vintages, and TTM reconstruction needs every
+        # period regardless of which tag carried it -- while still preferring the
+        # higher-priority tag per period (avoids mixing e.g. excluding- vs
+        # including-assessed-tax revenue when both are present for one period).
         grouped: dict[tuple[str, date], list[dict]] = {}
-        for p in _currency_filtered(points, concept, currency):
+        for p in _currency_filtered(_points_by_priority(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             start = _to_date(p.get("start"))
             if not end or not start:
@@ -767,7 +794,7 @@ def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> Flo
                 continue
             grouped.setdefault((bucket, end), []).append(p)
         for (bucket, end), cands in grouped.items():
-            buckets[bucket].setdefault(key, {})[end] = _latest_filed(cands)["val"]
+            buckets[bucket].setdefault(key, {})[end] = _choose(cands)["val"]
     return FlowSeries(quarterly=quarterly, annual=annual, ytd9=ytd9)
 
 
@@ -852,7 +879,7 @@ def build_period_summaries(
     freqs_seen: set[str] = set()
 
     for concept in CONCEPTS:
-        for p in _currency_filtered(_points_for(concept, flat), concept, currency):
+        for p in _currency_filtered(_points_by_priority(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             if not end:
                 continue
@@ -887,13 +914,13 @@ def build_period_summaries(
         values: dict[str, dict] = {}
         all_points: list[dict] = []
         for key, cands in per_concept.items():
-            chosen = _latest_filed(cands)  # restatements win
+            chosen = _choose(cands)  # highest-priority tag for this period, restatements win
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
                            "label": CONCEPTS_BY_KEY[key].label,
                            "tag": chosen.get("tag")}
             all_points.extend(cands)
         for key, cands in instant.get(end, {}).items():
-            chosen = _latest_filed(cands)
+            chosen = _choose(cands)
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
                            "label": CONCEPTS_BY_KEY[key].label,
                            "tag": chosen.get("tag")}

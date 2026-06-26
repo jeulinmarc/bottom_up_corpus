@@ -35,10 +35,10 @@ def test_net_debt_subtracts_long_term_investments():
 
 def test_roic_and_invested_capital():
     d = compute_derived(_inputs())
-    # NOPAT = 20 * (1 - 5/15) = 13.3333 ; invested = 50 + 200 + 0 NCI - 30 cash = 220
+    # NOPAT = 20 * (1 - 5/15) = 13.3333 ; invested = 50 debt + 200 equity + 0 NCI = 250
     assert d["nopat"]["value"] == pytest.approx(13.3333, abs=1e-3)
-    assert d["invested_capital"]["value"] == 220
-    assert d["roic"]["value"] == pytest.approx(13.3333 / 220 * 100, abs=1e-3)
+    assert d["invested_capital"]["value"] == 250
+    assert d["roic"]["value"] == pytest.approx(13.3333 / 250 * 100, abs=1e-3)
 
 
 def test_book_value_nets_out_preferred():
@@ -101,3 +101,27 @@ def test_equity_is_parent_only():
     assert CONCEPTS_BY_KEY["equity"].tags == ("StockholdersEquity",)
     assert "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest" \
         in CONCEPTS_BY_KEY["equity_total"].tags
+
+
+def test_period_resolution_prefers_higher_priority_tag_per_period():
+    # A filer that switched cost-of-revenue tags across years: the primary tag is
+    # stale (2022 only), the recent year is under the second fallback. Per-period
+    # resolution must surface the recent year from the second tag (not drop it).
+    from bottom_up_corpus.financials import build_period_summaries
+
+    def dur(tag_val, start, end, filed):
+        return {"start": start, "end": end, "val": tag_val, "accn": "a",
+                "fy": 2023, "fp": "FY", "form": "10-K", "filed": filed}
+
+    facts = {"facts": {"us-gaap": {
+        "CostOfRevenue": {"label": "COGS", "units": {"USD": [
+            dur(100, "2021-01-01", "2021-12-31", "2022-02-01")]}},          # stale primary
+        "CostOfGoodsAndServicesSold": {"label": "COGS", "units": {"USD": [
+            dur(140, "2023-01-01", "2023-12-31", "2024-02-01")]}},          # recent, 2nd fallback
+        "Revenues": {"label": "Rev", "units": {"USD": [
+            dur(500, "2023-01-01", "2023-12-31", "2024-02-01")]}},
+    }}}
+    s = build_period_summaries(facts, company="X", company_current="X")
+    fy23 = next(x for x in s if x.fy == 2023)
+    assert fy23.values["cost_of_revenue"]["value"] == 140
+    assert fy23.values["cost_of_revenue"]["tag"] == "CostOfGoodsAndServicesSold"
