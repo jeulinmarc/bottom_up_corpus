@@ -150,7 +150,7 @@ def test_backoff_is_jittered_within_bounds(monkeypatch):
 
 
 def test_post_json_returns_parsed_json(cfg):
-    """Fetcher.post_json uses session.post, throttles, and returns parsed JSON."""
+    """Fetcher.post_json POSTs the JSON body via session.post and returns parsed JSON."""
 
     class _FakeSessionWithPost:
         """Minimal fake session that records both get and post calls."""

@@ -12,14 +12,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
 
 from ..documents import Document
 from ..entities import Entity
 from ..oam_base import IssuerRef, OamSource
-
-if TYPE_CHECKING:
-    pass
 
 BASE = "https://consob.1info.it/PORTALE1INFO"
 # Downloads are served from the site ROOT (not under /PORTALE1INFO). Verified live:
@@ -38,8 +34,14 @@ _CAT_MAP: dict[str, str] = {
     "2.3": "holding_notification",
 }
 
-# ESEF file extensions that indicate it is NOT a plain document (should get zip treatment)
+# Extensions that ARE plain documents — a protocolCodeXbrl with one of these is not
+# an ESEF package and must NOT get zip treatment.
 _NON_DOC_EXTS = {".pdf", ".html", ".xhtml"}
+
+# DataTables page size + a safety backstop on per-issuer pagination (well above any
+# real issuer's filing count; ENI — among the largest — has ~1.5k comunicati).
+_PAGE = 500
+_MAX_RECORDS = 50_000
 
 _WS_RE = re.compile(r"\s+")
 
@@ -99,25 +101,60 @@ class OneInfoIT(OamSource):
             ("/API/Documenti", "documenti"),
             ("/API/Comunicati", "comunicati"),
         ]:
-            url = BASE + endpoint
+            out.extend(
+                self._discover_endpoint(BASE + endpoint, filetype, ndg, entity, now)
+            )
+
+        return out
+
+    def _discover_endpoint(
+        self, url: str, filetype: str, ndg: int, entity: Entity, now: str
+    ) -> list[Document]:
+        """Page through one DataTables endpoint until every record is fetched.
+
+        A single ``length``-capped request silently drops everything past the first
+        page (ENI has ~660 documenti / ~1550 comunicati), so we walk ``start`` until
+        we have consumed ``recordsFiltered`` rows — never silently partial.
+        """
+        docs: list[Document] = []
+        start = 0
+        total: int | None = None
+        while True:
             body = {
                 "draw": 1,
-                "start": 0,
-                "length": 200,
+                "start": start,
+                "length": _PAGE,
                 "SearchFilter": {"emittente": [str(ndg)]},
             }
             try:
                 resp = self.fetcher.post_json(url, body)
             except Exception as exc:  # noqa: BLE001
-                self._record_error("discover", url, exc)
-                continue
+                self._record_error("discover", f"{url}?start={start}", exc)
+                break
 
-            for row in resp.get("data") or []:
+            rows = resp.get("data") or []
+            if total is None:
+                total = resp.get("recordsFiltered")
+            for row in rows:
                 doc = self._build_document(row, filetype, entity, now)
                 if doc is not None:
-                    out.append(doc)
+                    docs.append(doc)
 
-        return out
+            start += len(rows)
+            if not rows or (total is not None and start >= total):
+                break
+            if start >= _MAX_RECORDS:
+                self._record_error(
+                    "discover",
+                    f"{url}?start={start}",
+                    RuntimeError(
+                        f"pagination hit the {_MAX_RECORDS}-record cap "
+                        f"(recordsFiltered={total}); results truncated"
+                    ),
+                )
+                break
+
+        return docs
 
     # ------------------------------------------------------------------
     # Internals

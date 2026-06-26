@@ -40,11 +40,24 @@ class _StubFetcher:
         raise RuntimeError(f"Unexpected get_json url: {url}")
 
     def post_json(self, url: str, body, **_):
+        start = body.get("start", 0)
+        length = body.get("length", 500)
         if "/API/Documenti" in url:
-            return self._documenti
+            data = self._documenti.get("data") or []
+            return self._page(data, start, length)
         if "/API/Comunicati" in url:
-            return {"draw": 1, "recordsTotal": 0, "recordsFiltered": 0, "data": []}
+            return self._page([], start, length)
         raise RuntimeError(f"Unexpected post_json url: {url}")
+
+    @staticmethod
+    def _page(rows: list[dict], start: int, length: int) -> dict:
+        """Emulate the 1Info DataTables paginator (start/length over a backing list)."""
+        return {
+            "draw": 1,
+            "recordsTotal": len(rows),
+            "recordsFiltered": len(rows),
+            "data": rows[start:start + length],
+        }
 
 
 def _make_stub(companies_extra: list[dict] | None = None) -> _StubFetcher:
@@ -103,6 +116,46 @@ def test_resolve_name_to_ndg_and_discover():
     )
     assert all(d.lei == "L1" for d in docs)
     assert all(d.language == "it" for d in docs)
+
+
+def test_discover_paginates_beyond_one_page():
+    """A single length-capped request truncates large issuers (ENI has ~660 documenti
+    / ~1550 comunicati). discover() must page through and return EVERY row exactly once.
+    """
+    from bottom_up_corpus.eu.sources.oam_it import _PAGE
+
+    n_rows = _PAGE * 2 + 37  # 1037 rows -> 3 pages, last partial
+    rows = [
+        {"pdf": f"DOC{i:05d}_oneinfo", "protocolCodeXbrl": None,
+         "categoria": "2.2", "dataStoccaggio": 1767207557, "dataEsercizio": 1767207557}
+        for i in range(n_rows)
+    ]
+
+    class _PagingStub:
+        def __init__(self, doc_rows):
+            self._rows = doc_rows
+            self.documenti_calls = 0
+
+        def get_json(self, url, **_):
+            return [{"ndg": 117, "descrizione": "ENI", "id": 0, "idRow": 0}]
+
+        def post_json(self, url, body, **_):
+            start, length = body.get("start", 0), body.get("length", 500)
+            rows = self._rows if "/API/Documenti" in url else []
+            if "/API/Documenti" in url:
+                self.documenti_calls += 1
+            return {"draw": 1, "recordsTotal": len(rows),
+                    "recordsFiltered": len(rows), "data": rows[start:start + length]}
+
+    stub = _PagingStub(rows)
+    src = OneInfoIT(fetcher=stub)
+    docs = src.discover(Entity(lei="L1", name="ENI", country="IT"))
+
+    assert len(docs) == n_rows, "every row must be returned exactly once (no truncation, no dupes)"
+    ids = [d.files[0]["url"].split("file=")[1].split("&")[0] for d in docs]
+    assert len(set(ids)) == n_rows, "no duplicate documents across pages"
+    assert stub.documenti_calls == 3, "1037 rows / 500 per page = 3 requests"
+    assert not src.errors
 
 
 # -----------------------------------------------------------------------
