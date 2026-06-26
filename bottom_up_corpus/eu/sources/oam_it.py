@@ -1,0 +1,196 @@
+"""1Info (CONSOB OAM / Computershare) backend — Italy.
+
+Unauthenticated JSON REST API at ``https://consob.1info.it/PORTALE1INFO``.
+
+* ``GET  /API/companies/documenti``  → issuer name → ndg map.
+* ``POST /API/Documenti``            → regulatory documents (DataTables response).
+* ``POST /API/Comunicati``           → press-release-style comunicati.
+* Download via ``PdfShow.aspx``      — ESEF zip uses ``protocolCodeXbrl``;
+  PDF uses ``pdf`` id.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+from ..documents import Document
+from ..entities import Entity
+from ..oam_base import IssuerRef, OamSource
+
+if TYPE_CHECKING:
+    pass
+
+BASE = "https://consob.1info.it/PORTALE1INFO"
+_DL = (
+    BASE
+    + "/PdfViewer/PdfShow.aspx"
+    "?username=oneinfo&password=oneinfo&service=&type={filetype}&year={year}&file={file}&download=1"
+)
+
+# categoria → DOC_TYPES member
+_CAT_MAP: dict[str, str] = {
+    "1.1": "annual_report",
+    "1.2": "half_year_report",
+    "2.2": "inside_information",
+    "2.3": "holding_notification",
+}
+
+# ESEF file extensions that indicate it is NOT a plain document (should get zip treatment)
+_NON_DOC_EXTS = {".pdf", ".html", ".xhtml"}
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _normalise(name: str) -> str:
+    """Collapse whitespace and uppercase — matches stray-spaced descrizioni."""
+    return _WS_RE.sub(" ", name).strip().upper()
+
+
+def _year_utc(epoch_seconds: int | float | None) -> str | None:
+    """Return the four-digit UTC year as a string from an epoch-seconds integer."""
+    if epoch_seconds is None:
+        return None
+    try:
+        return str(datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc).year)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def _iso_utc(epoch_seconds: int | float | None) -> str | None:
+    """Return an ISO 8601 timestamp string from epoch-seconds."""
+    if epoch_seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc).isoformat()
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+class OneInfoIT(OamSource):
+    """Italy OAM backend — resolves issuer name → ndg, then POSTs for docs."""
+
+    name = "oam-it"
+    country = "IT"
+
+    def __init__(self, fetcher=None, config=None):
+        super().__init__(fetcher=fetcher, config=config)
+        self._companies: dict[str, int] | None = None  # normalised_name -> ndg
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def list_issuers(self) -> list[IssuerRef]:
+        """Return empty — full enumeration is a scale-up concern."""
+        return []
+
+    def discover(self, entity: Entity) -> list[Document]:
+        ndg = self._resolve_ndg(entity.name)
+        if ndg is None:
+            return []
+
+        now = datetime.now(timezone.utc).isoformat()
+        out: list[Document] = []
+
+        for endpoint, filetype in [
+            ("/API/Documenti", "documenti"),
+            ("/API/Comunicati", "comunicati"),
+        ]:
+            url = BASE + endpoint
+            body = {
+                "draw": 1,
+                "start": 0,
+                "length": 200,
+                "SearchFilter": {"emittente": [str(ndg)]},
+            }
+            try:
+                resp = self.fetcher.post_json(url, body)
+            except Exception as exc:  # noqa: BLE001
+                self._record_error("discover", url, exc)
+                continue
+
+            for row in resp.get("data") or []:
+                doc = self._build_document(row, filetype, entity, now)
+                if doc is not None:
+                    out.append(doc)
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _load_companies(self) -> dict[str, int]:
+        url = BASE + "/API/companies/documenti"
+        try:
+            rows = self.fetcher.get_json(url)
+            return {
+                _normalise(r["descrizione"]): r["ndg"]
+                for r in rows
+                if r.get("descrizione") and r.get("ndg") is not None
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._record_error("companies", url, exc)
+            return {}
+
+    def _resolve_ndg(self, name: str) -> int | None:
+        if self._companies is None:
+            self._companies = self._load_companies()
+        return self._companies.get(_normalise(name))
+
+    def _build_document(
+        self,
+        row: dict,
+        filetype: str,
+        entity: Entity,
+        now: str,
+    ) -> Document | None:
+        """Build a Document from a single data row; return None if no files."""
+        pdf = row.get("pdf")
+        xbrl = row.get("protocolCodeXbrl")
+        storage_epoch = row.get("dataStoccaggio")
+        exercise_epoch = row.get("dataEsercizio")
+
+        files: list[dict] = []
+
+        # ESEF zip — only when protocolCodeXbrl is present and NOT a plain doc ext
+        if xbrl:
+            ext = ""
+            if "." in xbrl:
+                ext = xbrl[xbrl.rfind("."):]
+            if ext.lower() not in _NON_DOC_EXTS:
+                year = _year_utc(exercise_epoch) or _year_utc(storage_epoch) or "0"
+                url = _DL.format(filetype=filetype, year=year, file=xbrl)
+                files.append({"name": xbrl + ".zip", "kind": "esef", "url": url})
+
+        # Regular PDF
+        if pdf:
+            year = _year_utc(storage_epoch) or "0"
+            pdf_name = pdf + ".pdf"
+            url = _DL.format(filetype=filetype, year=year, file=pdf_name)
+            files.append({"name": pdf_name, "kind": "document", "url": url})
+
+        if not files:
+            return None
+
+        categoria = row.get("categoria") or ""
+        doc_type = _CAT_MAP.get(categoria, "other")
+
+        # doc_id: prefer pdf id, fall back to protocolCode
+        raw_id = pdf or row.get("protocolCode") or row.get("id")
+        doc_id = f"it-{filetype}-{raw_id}"
+
+        return Document(
+            doc_id=doc_id,
+            lei=entity.lei,
+            country="IT",
+            doc_type=doc_type,
+            period_end=None,
+            published_ts=_iso_utc(storage_epoch),
+            discovered_ts=now,
+            language="it",
+            source=self.name,
+            files=files,
+            native_meta=row,
+        )

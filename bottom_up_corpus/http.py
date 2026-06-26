@@ -120,6 +120,34 @@ class Fetcher:
         """Fetch and parse a JSON body (used by data.sec.gov endpoints)."""
         return self.get(url, timeout=timeout).json()
 
+    def post_json(self, url: str, json_body, *, timeout: float | None = None):
+        """POST ``url`` with a JSON body; returns the parsed JSON response.
+
+        Applies the same throttle, retry, and raise-for-status policy as
+        :meth:`get`.  429 / 5xx responses are treated as retryable.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(self.config.max_retries + 1):
+            self._throttle(url)
+            try:
+                resp = self.session.post(
+                    url,
+                    json=json_body,
+                    timeout=timeout or self.config.timeout,
+                )
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    raise requests.HTTPError(f"{resp.status_code} for {url}", response=resp)
+                resp.raise_for_status()
+                return resp.json()
+            except (requests.RequestException, requests.HTTPError) as exc:
+                last_exc = exc
+                if attempt < self.config.max_retries:
+                    time.sleep(self._backoff_seconds(attempt, exc))
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
+
     def download(self, url: str, dest, *, chunk_size: int = 1 << 16) -> int:
         """Stream ``url`` to ``dest`` (a path-like). Returns bytes written."""
         from pathlib import Path
