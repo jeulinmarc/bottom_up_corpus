@@ -20,17 +20,36 @@ Restatements resolve to the latest `filed`; `publication_date` is the earliest
 `filed` for the period. Each value also records its source XBRL **tag** as
 provenance.
 
+**Per-period tag resolution.** A concept's value for a period comes from the
+**highest-priority fallback tag that actually has a value for that period**, then
+the latest-filed point within it. Filers switch tags across taxonomy vintages
+(e.g. Microsoft's cost of revenue moved `CostOfRevenue` → `CostOfGoodsAndServicesSold`;
+Alphabet's revenue `RevenueFromContractWithCustomerExcludingAssessedTax` → `Revenues`);
+a first-tag-wins lookup would return the stale tag and silently drop the recent
+period. Per-period resolution only adds coverage — it never changes an
+already-resolved value.
+
 Monetary facts are filtered to the issuer's dominant reporting currency, so a
 convenience translation (e.g. a USD value alongside a primary EUR one) never gets
 summed or divided as if it were the functional currency.
 
 ## Curated concepts
 
-~40 reported line items across income statement, per-share, cash flow, and balance
+~60 reported line items across income statement, per-share, cash flow, and balance
 sheet, each with fallback XBRL tags in priority order (see `CONCEPTS` in
-`financials.py`). Examples: `revenue`, `operating_income`, `net_income`,
-`dep_amort`, `cfo`, `capex`, `assets`, `equity`, `long_term_debt`, `cash`,
-`shares_outstanding`.
+`financials.py`). Beyond the core lines (`revenue`, `operating_income`,
+`net_income`, `cfo`, `capex`, `assets`, `equity`, `long_term_debt`, `cash`) the set
+includes `long_term_investments` (noncurrent marketable securities),
+`preferred_stock` (carrying value), `noncontrolling_interest`, `equity_total`,
+`net_income_nci`, `acquisitions_net`, `debt_proceeds`/`debt_repayments`,
+`restricted_cash`, `retained_earnings`, `treasury_stock`, `aoci`, and
+`pension_obligations`.
+
+`equity` is **parent-only** (`StockholdersEquity`); the NCI-inclusive figure lives
+in `equity_total`, so ROE / book value never divide parent income by parent+NCI
+equity. `preferred_stock` prioritises the **carrying-value** tag
+(`PreferredStockIncludingAdditionalPaidInCapital`) over the par-only
+`PreferredStockValue` (which is 0/par at most filers and absent at some banks).
 
 ## Derived metrics (single period)
 
@@ -43,20 +62,41 @@ ratios are `%` or `x`.
 |---|---|
 | `total_debt` | long-term debt + current portion + short-term borrowings |
 | `total_debt_incl_leases` | total debt + finance & operating lease liabilities |
-| `net_debt` | total debt − cash − short-term investments |
+| `net_debt` | total debt − cash − short-term investments − **long-term investments** |
+| `net_cash` | −`net_debt` (positive = net cash; offsets ST **and** LT investments) |
 | `ebitda` | operating income + D&A |
 | `free_cash_flow` | CFO − capex |
 | `working_capital` | current assets − current liabilities |
-| `tangible_book_value` | equity − goodwill − intangibles |
+| `tangible_book_value` | common equity (− preferred) − goodwill − intangibles |
+| `nopat`, `invested_capital` | op. income × (1 − tax rate) ; total debt + total equity |
+| `roic` | NOPAT ÷ invested capital (%) — **annual only** |
 | `gross/operating/net/ebitda/fcf_margin` | the respective profit ÷ revenue (%) |
-| `roe`, `roa` | net income ÷ equity / assets (%) — **annual only** |
+| `capex/rnd_intensity`, `sga_ratio` | the respective expense ÷ revenue (%) |
+| `dividend_payout` | dividends paid ÷ net income (%) |
+| `total_payout` | (dividends + buybacks) ÷ FCF (%) |
+| `cash_conversion` | FCF ÷ net income (%) |
+| `roe` | net income **to common** (− preferred div) ÷ equity (%) — **annual only** |
+| `roa` | net income ÷ assets (%) — **annual only** |
 | `effective_tax_rate` | income tax ÷ pretax income (%) |
 | `debt_to_equity`, `debt_to_assets` | total debt ÷ equity / assets (x) |
 | `net_debt_to_ebitda` | net debt ÷ EBITDA (x) — **annual only** |
 | `interest_coverage` | operating income ÷ interest expense (x) |
+| `cfo_to_debt`, `fcf_to_debt` | CFO / FCF ÷ total debt (x) — **annual only** |
 | `current/quick/cash_ratio` | liquidity ratios (x) |
 | `asset_turnover` | revenue ÷ assets (x) — **annual only** |
-| `book_value_per_share` | equity ÷ shares outstanding |
+| `dso/dio/dpo` | receivables / inventory / payables ÷ (revenue or COGS ÷ 365) — **annual only** |
+| `ccc` | DSO + DIO − DPO (days) — **annual only** |
+| `book_value_per_share`, `tangible_book_value_per_share` | (common equity / TBV) ÷ shares |
+
+**Net debt / net cash.** `net_debt` subtracts **long-term marketable securities**
+(`MarketableSecuritiesNoncurrent`, ...) as well as cash and short-term investments —
+without this it overstated net debt for cash-rich issuers (Apple read +$44B net
+debt when it holds ~$78B of long-term securities and is ~$34B **net cash**). `net_cash`
+is the positive mirror for readability. **ROIC** uses invested capital = total debt +
+total equity (incl. NCI), with **no cash netting** — keeping the ratio sane for
+cash-rich firms (validated against published values: Costco ~22%, Microsoft ~27%,
+Walmart ~15%). **ROE** and book value are on a **common-equity** basis (net of
+preferred), matching the per-share book values banks report (verified vs BofA / JPMorgan).
 
 ### Overlap-aware aggregation (no double counting)
 
@@ -129,8 +169,23 @@ four decimal places: **32.5629** at 2025-12-27 and **34.9060** at 2026-03-28
   consumers that want Bloomberg's "n.m." filter downstream.
 - Returns/averages use reported period-end balances (no intra-period averaging
   beyond the 2-point TTM average).
+- A filer that tags pretax income only as a geographic split
+  (`...BeforeIncomeTaxesDomestic` + `...Foreign`, no consolidated line — e.g.
+  McDonald's) yields no `pretax_income`, so `effective_tax_rate` / `nopat` / `roic`
+  are omitted. The domestic-only tag is deliberately not used (it would make the
+  tax rate = total tax ÷ US-only pretax). Summing the geographic split is a possible
+  future enhancement.
+- `long_term_debt` does not capture `LongTermDebtAndCapitalLeaseObligations` (used
+  by e.g. Comcast); adding it would bundle capital leases into `total_debt`, so it
+  is left out pending an explicit lease-treatment decision.
 - Full IFRS (`ifrs-full`) concept mapping is deferred to the international pillar;
   an IFRS-only filer currently maps just `net_income` (via `ProfitLoss`).
+
+**Cross-checked live** against real filings for a 10-issuer basket (Apple, Microsoft,
+Alphabet, Berkshire, Comcast, McDonald's, Walmart, Costco, JPMorgan, BofA): net
+cash/debt, ROIC, margins, ROE, common-share book value, and the working-capital
+cycle all match published values (e.g. Apple net cash ~$34B and CCC ~−71 days;
+BofA/JPMorgan common BVPS & tangible BVPS to the dollar; Costco/Walmart CCC ~2–3 days).
 
 ## Output
 
