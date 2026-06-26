@@ -169,15 +169,16 @@ four decimal places: **32.5629** at 2025-12-27 and **34.9060** at 2026-03-28
   consumers that want Bloomberg's "n.m." filter downstream.
 - Returns/averages use reported period-end balances (no intra-period averaging
   beyond the 2-point TTM average).
-- A filer that tags pretax income only as a geographic split
+- When a filer tags pretax income only as a geographic split
   (`...BeforeIncomeTaxesDomestic` + `...Foreign`, no consolidated line — e.g.
-  McDonald's) yields no `pretax_income`, so `effective_tax_rate` / `nopat` / `roic`
-  are omitted. The domestic-only tag is deliberately not used (it would make the
-  tax rate = total tax ÷ US-only pretax). Summing the geographic split is a possible
-  future enhancement.
-- `long_term_debt` does not capture `LongTermDebtAndCapitalLeaseObligations` (used
-  by e.g. Comcast); adding it would bundle capital leases into `total_debt`, so it
-  is left out pending an explicit lease-treatment decision.
+  McDonald's), `pretax_income` is reconstructed as their sum (the domestic-only tag
+  is never used alone — it would make the tax rate = total tax ÷ US-only pretax).
+- `gross_margin` falls back to `(revenue − cost_of_revenue) / revenue` when the
+  filer reports cost but no explicit `GrossProfit` line (e.g. Walmart).
+- `long_term_debt` captures `LongTermDebtAndCapitalLeaseObligations` (e.g. Comcast)
+  as a last-resort fallback; it bundles capitalised (finance) leases into the debt
+  figure, which is debt-like and acceptable when the filer reports debt only in that
+  combined form.
 - Full IFRS (`ifrs-full`) concept mapping is deferred to the international pillar;
   an IFRS-only filer currently maps just `net_income` (via `ProfitLoss`).
 

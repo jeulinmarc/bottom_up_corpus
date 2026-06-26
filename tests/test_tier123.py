@@ -103,6 +103,32 @@ def test_equity_is_parent_only():
         in CONCEPTS_BY_KEY["equity_total"].tags
 
 
+def test_pretax_reconstructed_from_geographic_split():
+    # No consolidated pretax line; only Domestic + Foreign (e.g. McDonald's).
+    vals = {"operating_income": _v(20), "income_tax": _v(2.1),
+            "pretax_domestic": _v(3), "pretax_foreign": _v(7),
+            "long_term_debt": _v(50, tag="LongTermDebtNoncurrent"), "equity": _v(200)}
+    d = compute_derived(vals)
+    assert d["effective_tax_rate"]["value"] == pytest.approx(21.0)   # 2.1 / (3+7)
+    assert d["nopat"]["value"] == pytest.approx(20 * (1 - 0.21), abs=1e-6)
+    assert d["roic"]["value"] == pytest.approx(20 * 0.79 / 250 * 100, abs=1e-6)
+
+
+def test_gross_margin_derived_from_cost_when_untagged():
+    vals = {"revenue": _v(100), "cost_of_revenue": _v(60)}  # no GrossProfit line
+    assert compute_derived(vals)["gross_margin"]["value"] == pytest.approx(40.0)
+    # An explicit GrossProfit tag still takes precedence.
+    vals["gross_profit"] = _v(45)
+    assert compute_derived(vals)["gross_margin"]["value"] == pytest.approx(45.0)
+
+
+def test_capital_lease_debt_fallback_resolves_total_debt():
+    assert "LongTermDebtAndCapitalLeaseObligations" in CONCEPTS_BY_KEY["long_term_debt"].tags
+    vals = {"long_term_debt": _v(90, tag="LongTermDebtAndCapitalLeaseObligations")}
+    # Treated as the noncurrent portion -> no roll-up overlap; total debt = 90.
+    assert compute_derived(vals)["total_debt"]["value"] == 90
+
+
 def test_period_resolution_prefers_higher_priority_tag_per_period():
     # A filer that switched cost-of-revenue tags across years: the primary tag is
     # stale (2022 only), the recent year is under the second fallback. Per-period

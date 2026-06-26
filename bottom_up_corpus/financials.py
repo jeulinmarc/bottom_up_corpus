@@ -64,6 +64,12 @@ CONCEPTS: tuple[Concept, ...] = (
     Concept("pretax_income", "Pretax income",
             ("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
              "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"), False),
+    # Geographic split: some filers (e.g. McDonald's) tag only Domestic + Foreign
+    # and no consolidated pretax line; the sum reconstructs pretax (see compute_derived).
+    Concept("pretax_domestic", "Pretax income (domestic)",
+            ("IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",), False),
+    Concept("pretax_foreign", "Pretax income (foreign)",
+            ("IncomeLossFromContinuingOperationsBeforeIncomeTaxesForeign",), False),
     Concept("income_tax", "Income tax expense", ("IncomeTaxExpenseBenefit",), False),
     # NetIncomeLoss is attributable to the parent (after NCI); ProfitLoss is the
     # consolidated total. net_income_nci is the NCI portion (reconciliation only).
@@ -142,10 +148,14 @@ CONCEPTS: tuple[Concept, ...] = (
             ("AccountsPayableCurrent", "AccountsPayableAndAccruedLiabilitiesCurrent"), True),
     # Debt components (needed for total debt / leverage). Long-term debt is
     # anchored on the noncurrent tag so it does not overlap the current portion.
+    # The ...AndCapitalLeaseObligations tags (e.g. Comcast) are last-resort fallbacks:
+    # they bundle capitalised (finance) leases into the debt figure, which is debt-like
+    # and acceptable when the filer reports debt only in that combined form.
     Concept("long_term_debt", "Long-term debt (noncurrent)",
-            ("LongTermDebtNoncurrent", "LongTermDebt"), True),
+            ("LongTermDebtNoncurrent", "LongTermDebt",
+             "LongTermDebtAndCapitalLeaseObligations"), True),
     Concept("lt_debt_current", "Long-term debt (current portion)",
-            ("LongTermDebtCurrent",), True),
+            ("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent"), True),
     Concept("short_term_debt", "Short-term borrowings",
             ("ShortTermBorrowings", "CommercialPaper", "NotesPayableCurrent", "DebtCurrent"), True),
     # Lease liabilities (for adjusted / lease-inclusive leverage, post ASC 842)
@@ -531,6 +541,10 @@ def compute_derived(
     # total equity (parent + NCI) -- the total-capital base, no cash netting (keeps
     # the ratio sane for cash-rich issuers). Tax rate clamped to [0,1] for NOPAT.
     pretax = _num(values, "pretax_income")
+    if pretax is None:  # filers tagging only the geographic split (e.g. McDonald's)
+        pd, pf = _num(values, "pretax_domestic"), _num(values, "pretax_foreign")
+        if pd is not None and pf is not None:
+            pretax = pd + pf
     inc_tax = _num(values, "income_tax")
     tax_rate = (inc_tax / pretax) if (inc_tax is not None and pretax is not None and pretax > 0) else None
     if tax_rate is not None:
@@ -543,8 +557,14 @@ def compute_derived(
     put("invested_capital", invested)
     put("roic", pct_pos(nopat, invested))
 
-    # Margins (%)
-    put("gross_margin", pct(_num(values, "gross_profit"), rev))
+    # Margins (%). Gross profit falls back to revenue - cost of revenue when the
+    # filer reports cost but no explicit GrossProfit line.
+    gp = _num(values, "gross_profit")
+    if gp is None:
+        cogs0 = _num(values, "cost_of_revenue")
+        if rev is not None and cogs0 is not None:
+            gp = rev - cogs0
+    put("gross_margin", pct(gp, rev))
     put("operating_margin", pct(oi, rev))
     put("net_margin", pct(ni, rev))
     put("ebitda_margin", pct(ebitda, rev))
