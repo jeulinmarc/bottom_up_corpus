@@ -2,7 +2,7 @@
 
 `bottom_up_corpus/financials.py` distils the SEC `companyfacts` XBRL feed into one
 **summary per actual reporting period** (annual / quarterly / semi-annual), each
-carrying ~40 curated line items, a block of **derived metrics** (single-period),
+carrying ~60 curated line items, a block of **derived metrics** (single-period),
 and a block of **trailing-twelve-month (TTM)** ratios aligned with Bloomberg's
 methodology. The full raw JSON is kept separately for exhaustivity.
 

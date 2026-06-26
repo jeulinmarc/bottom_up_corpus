@@ -560,10 +560,11 @@ def compute_derived(
     put("capex_intensity", pct(capex, rev))
     put("rnd_intensity", pct(_num(values, "rnd_expense"), rev))
     put("sga_ratio", pct(_num(values, "sga_expense"), rev))
-    put("dividend_payout", pct(_num(values, "dividends_paid"), ni))
-    if fcf is not None:
-        put("total_payout", pct(opt("dividends_paid") + opt("buybacks"), fcf))
-    put("cash_conversion", pct(fcf, ni))
+    # Payout / conversion: suppress on non-positive denominators (a loss-year or
+    # negative-FCF ratio reads as junk rather than "n.m.").
+    put("dividend_payout", pct_pos(_num(values, "dividends_paid"), ni))
+    put("total_payout", pct_pos(opt("dividends_paid") + opt("buybacks"), fcf))
+    put("cash_conversion", pct_pos(fcf, ni))
 
     # Leverage / coverage (x)
     put("debt_to_equity", div_pos(total_debt, eq))
