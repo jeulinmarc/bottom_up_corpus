@@ -93,6 +93,14 @@ def test_resolve_name_to_ndg_and_discover():
         for d in docs
         for f in d.files
     )
+    # Downloads live at the site ROOT; the /PORTALE1INFO/PdfViewer path 404s (verified
+    # live). Regression guard so the API base never leaks into the download host again.
+    assert all(
+        f["url"].startswith("https://consob.1info.it/PdfViewer/PdfShow.aspx")
+        and "/PORTALE1INFO/" not in f["url"]
+        for d in docs
+        for f in d.files
+    )
     assert all(d.lei == "L1" for d in docs)
     assert all(d.language == "it" for d in docs)
 

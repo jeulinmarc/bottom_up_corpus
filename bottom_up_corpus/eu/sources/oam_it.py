@@ -22,9 +22,11 @@ if TYPE_CHECKING:
     pass
 
 BASE = "https://consob.1info.it/PORTALE1INFO"
+# Downloads are served from the site ROOT (not under /PORTALE1INFO). Verified live:
+# the /PORTALE1INFO/PdfViewer path returns a 404 HTML page, while the root path
+# returns the real bytes (PDF %PDF- / ESEF PK.. zip). Keep these two hosts distinct.
 _DL = (
-    BASE
-    + "/PdfViewer/PdfShow.aspx"
+    "https://consob.1info.it/PdfViewer/PdfShow.aspx"
     "?username=oneinfo&password=oneinfo&service=&type={filetype}&year={year}&file={file}&download=1"
 )
 
