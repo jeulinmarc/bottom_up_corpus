@@ -57,13 +57,22 @@ CONCEPTS: tuple[Concept, ...] = (
     Concept("rnd_expense", "R&D expense", ("ResearchAndDevelopmentExpense",), False),
     Concept("operating_income", "Operating income", ("OperatingIncomeLoss",), False),
     Concept("interest_expense", "Interest expense",
-            ("InterestExpense", "InterestExpenseNonoperating", "InterestAndDebtExpense"), False),
+            ("InterestExpense", "InterestExpenseNonoperating", "InterestAndDebtExpense",
+             "InterestExpenseOperating"), False),
+    # Pretax income: the Domestic-only subtotal is deliberately excluded -- for a
+    # multinational it would make effective_tax_rate = total tax / domestic pretax.
     Concept("pretax_income", "Pretax income",
             ("IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
-             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
-             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic"), False),
+             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"), False),
     Concept("income_tax", "Income tax expense", ("IncomeTaxExpenseBenefit",), False),
+    # NetIncomeLoss is attributable to the parent (after NCI); ProfitLoss is the
+    # consolidated total. net_income_nci is the NCI portion (reconciliation only).
     Concept("net_income", "Net income", ("NetIncomeLoss", "ProfitLoss"), False),
+    Concept("net_income_nci", "Net income attributable to NCI",
+            ("NetIncomeLossAttributableToNoncontrollingInterest",), False),
+    Concept("preferred_dividends", "Preferred dividends",
+            ("PreferredStockDividendsAndOtherAdjustments",
+             "PreferredStockDividendsIncomeStatementImpact"), False),
     # Depreciation & amortization (cash-flow statement; needed for EBITDA)
     Concept("dep_amort", "Depreciation & amortization",
             ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet",
@@ -87,14 +96,37 @@ CONCEPTS: tuple[Concept, ...] = (
     Concept("stock_comp", "Stock-based compensation", ("ShareBasedCompensation",), False),
     Concept("dividends_paid", "Dividends paid",
             ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends"), False),
-    Concept("buybacks", "Share repurchases", ("PaymentsForRepurchaseOfCommonStock",), False),
+    Concept("buybacks", "Share repurchases",
+            ("PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfEquity"), False),
+    Concept("acquisitions_net", "Acquisitions (net of cash acquired)",
+            ("PaymentsToAcquireBusinessesNetOfCashAcquired", "PaymentsToAcquireBusinessesGross"), False),
+    Concept("debt_proceeds", "Debt issuance proceeds",
+            ("ProceedsFromIssuanceOfLongTermDebt", "ProceedsFromDebtNetOfIssuanceCosts",
+             "ProceedsFromIssuanceOfDebt"), False),
+    Concept("debt_repayments", "Debt repayments",
+            ("RepaymentsOfLongTermDebt", "RepaymentsOfDebt"), False),
+    Concept("finance_lease_principal", "Finance lease principal payments",
+            ("FinanceLeasePrincipalPayments",), False),
+    Concept("asset_sale_proceeds", "Proceeds from asset/business sales",
+            ("ProceedsFromSaleOfPropertyPlantAndEquipment",
+             "ProceedsFromDivestitureOfBusinessesNetOfCashDivested"), False),
     # --- Balance sheet (instant) ---
     Concept("assets", "Total assets", ("Assets",), True),
     Concept("assets_current", "Current assets", ("AssetsCurrent",), True),
     Concept("cash", "Cash & equivalents",
             ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"), True),
     Concept("short_term_investments", "Short-term investments",
-            ("ShortTermInvestments", "MarketableSecuritiesCurrent"), True),
+            ("ShortTermInvestments", "MarketableSecuritiesCurrent",
+             "AvailableForSaleSecuritiesDebtSecuritiesCurrent"), True),
+    # Long-term marketable securities: a large liquid asset for cash-rich issuers
+    # (Apple, Microsoft, ...) that net debt must offset. (Financial-sector issuers
+    # hold these under sector-specific tags; net debt is sector-flagged anyway.)
+    Concept("long_term_investments", "Long-term investments",
+            ("MarketableSecuritiesNoncurrent", "AvailableForSaleSecuritiesDebtSecuritiesNoncurrent",
+             "LongTermInvestments"), True),
+    Concept("restricted_cash", "Restricted cash",
+            ("RestrictedCashAndCashEquivalents", "RestrictedCashNoncurrent",
+             "RestrictedCashAndCashEquivalentsCurrentAndNoncurrent"), True),
     Concept("receivables", "Accounts receivable",
             ("AccountsReceivableNetCurrent", "ReceivablesNetCurrent"), True),
     Concept("inventory", "Inventory", ("InventoryNet",), True),
@@ -102,7 +134,8 @@ CONCEPTS: tuple[Concept, ...] = (
             ("PropertyPlantAndEquipmentNet",), True),
     Concept("goodwill", "Goodwill", ("Goodwill",), True),
     Concept("intangibles", "Intangible assets (ex-goodwill)",
-            ("IntangibleAssetsNetExcludingGoodwill", "FiniteLivedIntangibleAssetsNet"), True),
+            ("IntangibleAssetsNetExcludingGoodwill", "FiniteLivedIntangibleAssetsNet",
+             "IndefiniteLivedIntangibleAssetsExcludingGoodwill"), True),
     Concept("liabilities", "Total liabilities", ("Liabilities",), True),
     Concept("liabilities_current", "Current liabilities", ("LiabilitiesCurrent",), True),
     Concept("payables", "Accounts payable",
@@ -124,9 +157,27 @@ CONCEPTS: tuple[Concept, ...] = (
             ("OperatingLeaseLiabilityCurrent",), True),
     Concept("operating_lease_noncurrent", "Operating lease liability (noncurrent)",
             ("OperatingLeaseLiabilityNoncurrent",), True),
-    Concept("equity", "Stockholders' equity",
-            ("StockholdersEquity",
-             "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"), True),
+    # Parent-only stockholders' equity. The NCI-inclusive figure is a DIFFERENT
+    # number (equity_total) -- keeping it out of this fallback prevents silently
+    # dividing parent-only net income by parent+NCI equity in ROE / book value.
+    Concept("equity", "Stockholders' equity (parent)", ("StockholdersEquity",), True),
+    Concept("equity_total", "Total equity (incl. NCI)",
+            ("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",), True),
+    Concept("noncontrolling_interest", "Noncontrolling interest", ("MinorityInterest",), True),
+    # Preferred stock CARRYING value (par + APIC), not par-only: PreferredStockValue
+    # is 0/par for most filers and absent for some banks, so the incl.-APIC tag and
+    # the outstanding/liquidation tags take priority (verified against BofA/Wells).
+    Concept("preferred_stock", "Preferred stock (carrying value)",
+            ("PreferredStockIncludingAdditionalPaidInCapital", "PreferredStockValueOutstanding",
+             "PreferredStockLiquidationPreferenceValue", "PreferredStockValue"), True),
+    Concept("retained_earnings", "Retained earnings / (accumulated deficit)",
+            ("RetainedEarningsAccumulatedDeficit",), True),
+    Concept("treasury_stock", "Treasury stock",
+            ("TreasuryStockValue", "TreasuryStockCommonValue"), True),
+    Concept("aoci", "Accumulated other comprehensive income / (loss)",
+            ("AccumulatedOtherComprehensiveIncomeLossNetOfTax",), True),
+    Concept("pension_obligations", "Pension & post-retirement obligations (noncurrent)",
+            ("PensionAndOtherPostretirementDefinedBenefitPlansLiabilitiesNoncurrent",), True),
     # --- Shares (instant, shares) ---
     Concept("shares_outstanding", "Shares outstanding",
             ("CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"), True, "shares"),
@@ -175,10 +226,13 @@ DERIVED: tuple[Derived, ...] = (
     Derived("total_debt", "Total debt", "USD"),
     Derived("total_debt_incl_leases", "Total debt incl. leases", "USD"),
     Derived("net_debt", "Net debt", "USD"),
+    Derived("net_cash", "Net cash position (incl. ST+LT investments)", "USD"),
     Derived("ebitda", "EBITDA", "USD"),
     Derived("free_cash_flow", "Free cash flow", "USD"),
     Derived("working_capital", "Working capital", "USD"),
     Derived("tangible_book_value", "Tangible book value", "USD"),
+    Derived("nopat", "NOPAT (op. income after tax)", "USD", annual_only=True),
+    Derived("invested_capital", "Invested capital", "USD"),
     # Margins (%)
     Derived("gross_margin", "Gross margin", "%"),
     Derived("operating_margin", "Operating margin", "%"),
@@ -186,21 +240,36 @@ DERIVED: tuple[Derived, ...] = (
     Derived("ebitda_margin", "EBITDA margin", "%"),
     Derived("fcf_margin", "FCF margin", "%"),
     # Returns (%) — stock/flow ratio -> annual only (same rationale as asset_turnover)
-    Derived("roe", "Return on equity", "%", annual_only=True),
+    Derived("roe", "Return on common equity", "%", annual_only=True),
     Derived("roa", "Return on assets", "%", annual_only=True),
+    Derived("roic", "Return on invested capital", "%", annual_only=True),
     Derived("effective_tax_rate", "Effective tax rate", "%"),
+    # Expense intensities & payout / quality (%) — flow/flow, meaningful at any frequency
+    Derived("capex_intensity", "Capex intensity (capex / revenue)", "%"),
+    Derived("rnd_intensity", "R&D intensity", "%"),
+    Derived("sga_ratio", "SG&A / revenue", "%"),
+    Derived("dividend_payout", "Dividend payout (dividends / net income)", "%"),
+    Derived("total_payout", "Total payout (div + buybacks / FCF)", "%"),
+    Derived("cash_conversion", "Cash conversion (FCF / net income)", "%"),
     # Leverage / coverage (multiples)
     Derived("debt_to_equity", "Debt / equity", "x"),
     Derived("debt_to_assets", "Debt / assets", "x"),
     Derived("net_debt_to_ebitda", "Net debt / EBITDA", "x", annual_only=True),
     Derived("interest_coverage", "Interest coverage (op. income / interest)", "x"),
+    Derived("cfo_to_debt", "CFO / total debt", "x", annual_only=True),
+    Derived("fcf_to_debt", "FCF / total debt", "x", annual_only=True),
     # Liquidity (multiples)
     Derived("current_ratio", "Current ratio", "x"),
     Derived("quick_ratio", "Quick ratio", "x"),
     Derived("cash_ratio", "Cash ratio", "x"),
     # Efficiency / per share
     Derived("asset_turnover", "Asset turnover", "x", annual_only=True),
-    Derived("book_value_per_share", "Book value per share", "USD/shares"),
+    Derived("dso", "Days sales outstanding", "days", annual_only=True),
+    Derived("dio", "Days inventory outstanding", "days", annual_only=True),
+    Derived("dpo", "Days payable outstanding", "days", annual_only=True),
+    Derived("ccc", "Cash conversion cycle", "days", annual_only=True),
+    Derived("book_value_per_share", "Book value per common share", "USD/shares"),
+    Derived("tangible_book_value_per_share", "Tangible book value per share", "USD/shares"),
 )
 
 DERIVED_BY_KEY = {d.key: d for d in DERIVED}
@@ -211,9 +280,13 @@ DERIVED_BY_KEY = {d.key: d for d in DERIVED}
 # `sector_relevant` flag, False for these keys when the issuer's SIC is financial,
 # so the corpus stays complete and consistent regardless of SIC availability.
 SECTOR_SENSITIVE: frozenset[str] = frozenset({
-    "ebitda", "ebitda_margin", "net_debt", "net_debt_to_ebitda", "interest_coverage",
-    "current_ratio", "quick_ratio", "cash_ratio", "working_capital",
+    "ebitda", "ebitda_margin", "net_debt", "net_cash", "net_debt_to_ebitda",
+    "interest_coverage", "current_ratio", "quick_ratio", "cash_ratio", "working_capital",
     "asset_turnover", "gross_margin", "total_debt_incl_leases",
+    # Tier 2 metrics that are non-meaningful for banks/insurers (no COGS/inventory,
+    # capex/cash treated as operating, ROIC not the standard capital metric).
+    "roic", "nopat", "invested_capital", "cfo_to_debt", "fcf_to_debt",
+    "capex_intensity", "dso", "dio", "dpo", "ccc",
     # TTM variants (Phase B)
     "ebitda_margin_ttm", "net_debt_to_ebitda_ttm", "interest_coverage_ttm",
     "asset_turnover_ttm", "gross_margin_ttm",
@@ -432,8 +505,12 @@ def compute_derived(
         sti = opt("short_term_investments")
         if _src(values, "cash") == "CashCashEquivalentsAndShortTermInvestments":
             sti = 0  # cash tag already includes short-term investments
-        net_debt = total_debt - cash - sti
+        # Long-term marketable securities are a liquid offset to debt (Apple,
+        # Microsoft, ...): excluding them overstates net debt / hides net cash.
+        net_debt = total_debt - cash - sti - opt("long_term_investments")
     put("net_debt", net_debt)
+    # Friendly mirror: positive = net cash, negative = net debt.
+    put("net_cash", -net_debt if net_debt is not None else None)
 
     da = _num(values, "dep_amort")
     ebitda = oi + da if (oi is not None and da is not None) else None
@@ -445,26 +522,57 @@ def compute_derived(
 
     if ac is not None and lc is not None:
         put("working_capital", ac - lc)
-    if eq is not None:
-        put("tangible_book_value", eq - opt("goodwill") - opt("intangibles"))
+    # Common-equity book value nets out preferred stock and intangibles.
+    common_eq = (eq - opt("preferred_stock")) if eq is not None else None
+    tbv = (common_eq - opt("goodwill") - opt("intangibles")) if common_eq is not None else None
+    put("tangible_book_value", tbv)
+
+    # Returns on capital: NOPAT / invested capital. Invested capital = total debt +
+    # total equity (parent + NCI) -- the total-capital base, no cash netting (keeps
+    # the ratio sane for cash-rich issuers). Tax rate clamped to [0,1] for NOPAT.
+    pretax = _num(values, "pretax_income")
+    inc_tax = _num(values, "income_tax")
+    tax_rate = (inc_tax / pretax) if (inc_tax is not None and pretax is not None and pretax > 0) else None
+    if tax_rate is not None:
+        tax_rate = min(max(tax_rate, 0.0), 1.0)
+    nopat = oi * (1 - tax_rate) if (oi is not None and tax_rate is not None) else None
+    put("nopat", nopat)
+    invested = None
+    if total_debt is not None and eq is not None:
+        invested = total_debt + eq + opt("noncontrolling_interest")
+    put("invested_capital", invested)
+    put("roic", pct_pos(nopat, invested))
 
     # Margins (%)
     put("gross_margin", pct(_num(values, "gross_profit"), rev))
     put("operating_margin", pct(oi, rev))
     put("net_margin", pct(ni, rev))
     put("ebitda_margin", pct(ebitda, rev))
-    put("fcf_margin", pct(fcf, rev))
+    put("fcf_margin", pct_pos(fcf, rev))  # guard negative revenue, allow negative FCF
 
-    # Returns / tax (%)
-    put("roe", pct_pos(ni, eq))
+    # Returns / tax (%). ROE is on COMMON equity: (net income - preferred dividends).
+    ni_common = (ni - opt("preferred_dividends")) if ni is not None else None
+    put("roe", pct_pos(ni_common, eq))
     put("roa", pct(ni, assets))
-    put("effective_tax_rate", pct_pos(_num(values, "income_tax"), _num(values, "pretax_income")))
+    put("effective_tax_rate", pct_pos(inc_tax, pretax))
+
+    # Expense intensity & payout / quality (%)
+    put("capex_intensity", pct(capex, rev))
+    put("rnd_intensity", pct(_num(values, "rnd_expense"), rev))
+    put("sga_ratio", pct(_num(values, "sga_expense"), rev))
+    # Payout / conversion: suppress on non-positive denominators (a loss-year or
+    # negative-FCF ratio reads as junk rather than "n.m.").
+    put("dividend_payout", pct_pos(_num(values, "dividends_paid"), ni))
+    put("total_payout", pct_pos(opt("dividends_paid") + opt("buybacks"), fcf))
+    put("cash_conversion", pct_pos(fcf, ni))
 
     # Leverage / coverage (x)
     put("debt_to_equity", div_pos(total_debt, eq))
     put("debt_to_assets", div(total_debt, assets))
     put("net_debt_to_ebitda", div(net_debt, ebitda))
     put("interest_coverage", div(oi, _num(values, "interest_expense")))
+    put("cfo_to_debt", div(cfo, total_debt))
+    put("fcf_to_debt", div(fcf, total_debt))
 
     # Liquidity (x)
     put("current_ratio", div(ac, lc))
@@ -478,7 +586,20 @@ def compute_derived(
 
     # Efficiency / per share
     put("asset_turnover", div(rev, assets))
-    put("book_value_per_share", div(eq, _num(values, "shares_outstanding")))
+    # Working-capital cycle (days). Annual-only: the /365 annualisation assumes a
+    # full-year flow in the numerator's denominator.
+    cogs = _num(values, "cost_of_revenue")
+    dso = div(_num(values, "receivables"), rev / 365) if rev else None
+    dio = div(_num(values, "inventory"), cogs / 365) if cogs else None
+    dpo = div(_num(values, "payables"), cogs / 365) if cogs else None
+    put("dso", dso)
+    put("dio", dio)
+    put("dpo", dpo)
+    if dso is not None and dio is not None and dpo is not None:
+        put("ccc", dso + dio - dpo)
+    shares = _num(values, "shares_outstanding")
+    put("book_value_per_share", div(common_eq, shares))
+    put("tangible_book_value_per_share", div(tbv, shares))
 
     return out
 
@@ -564,6 +685,33 @@ def _points_for(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
     return []
 
 
+def _points_by_priority(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
+    """All points across the concept's fallback tags, each carrying its tag's
+    priority index (``_prio``).
+
+    Filers switch tags across taxonomy vintages (e.g. Microsoft's cost of revenue
+    moved from ``CostOfRevenue`` to ``CostOfGoodsAndServicesSold``; Alphabet's
+    revenue from ``RevenueFromContractWithCustomerExcludingAssessedTax`` to
+    ``Revenues``). The old first-tag-wins lookup returned the stale tag's points
+    and dropped the recent period. Carrying priority lets per-period selection
+    prefer the highest-priority tag that actually has a value for *that* period.
+    """
+    pts: list[dict] = []
+    for prio, tag in enumerate(concept.tags):
+        for p in flat.get(tag, []):
+            q = dict(p)
+            q["_prio"] = prio
+            pts.append(q)
+    return pts
+
+
+def _choose(cands: list[dict]) -> dict:
+    """Resolve one (period, concept): the highest-priority tag present for this
+    period, then the latest-filed point within it (restatements win)."""
+    best = min(p.get("_prio", 0) for p in cands)
+    return _latest_filed([p for p in cands if p.get("_prio", 0) == best])
+
+
 def reporting_currency(flat: dict[str, list[dict]]) -> str | None:
     """The issuer's dominant monetary currency (most frequent currency unit).
 
@@ -631,14 +779,13 @@ def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> Flo
     buckets = {"quarterly": quarterly, "annual": annual, "ytd9": ytd9}
     for key in _TTM_FLOW_KEYS:
         concept = CONCEPTS_BY_KEY[key]
-        # Union points across ALL fallback tags (not just the first present one):
-        # a filer may tag a concept differently across taxonomy vintages
-        # (e.g. SalesRevenueNet in older 10-Qs, Revenues in the 10-K), and TTM
-        # reconstruction needs every period regardless of which tag carried it.
-        points = [p for tag in concept.tags for p in flat.get(tag, [])]
-        # group candidate points by (bucket, end) and keep the latest-filed
+        # Priority-aware union across the concept's fallback tags: a filer may tag a
+        # concept differently across vintages, and TTM reconstruction needs every
+        # period regardless of which tag carried it -- while still preferring the
+        # higher-priority tag per period (avoids mixing e.g. excluding- vs
+        # including-assessed-tax revenue when both are present for one period).
         grouped: dict[tuple[str, date], list[dict]] = {}
-        for p in _currency_filtered(points, concept, currency):
+        for p in _currency_filtered(_points_by_priority(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             start = _to_date(p.get("start"))
             if not end or not start:
@@ -648,7 +795,7 @@ def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> Flo
                 continue
             grouped.setdefault((bucket, end), []).append(p)
         for (bucket, end), cands in grouped.items():
-            buckets[bucket].setdefault(key, {})[end] = _latest_filed(cands)["val"]
+            buckets[bucket].setdefault(key, {})[end] = _choose(cands)["val"]
     return FlowSeries(quarterly=quarterly, annual=annual, ytd9=ytd9)
 
 
@@ -733,7 +880,7 @@ def build_period_summaries(
     freqs_seen: set[str] = set()
 
     for concept in CONCEPTS:
-        for p in _currency_filtered(_points_for(concept, flat), concept, currency):
+        for p in _currency_filtered(_points_by_priority(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             if not end:
                 continue
@@ -768,13 +915,13 @@ def build_period_summaries(
         values: dict[str, dict] = {}
         all_points: list[dict] = []
         for key, cands in per_concept.items():
-            chosen = _latest_filed(cands)  # restatements win
+            chosen = _choose(cands)  # highest-priority tag for this period, restatements win
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
                            "label": CONCEPTS_BY_KEY[key].label,
                            "tag": chosen.get("tag")}
             all_points.extend(cands)
         for key, cands in instant.get(end, {}).items():
-            chosen = _latest_filed(cands)
+            chosen = _choose(cands)
             values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
                            "label": CONCEPTS_BY_KEY[key].label,
                            "tag": chosen.get("tag")}
@@ -851,6 +998,8 @@ def _fmt(value, unit: str) -> str:
         return f"{value:,.1f}%"
     if unit == "x":
         return f"{value:,.2f}x"
+    if unit == "days":
+        return f"{value:,.1f} days"
     return f"{value:,.0f}"  # monetary (whole units of the reporting currency)
 
 
