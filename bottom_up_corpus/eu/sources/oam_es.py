@@ -103,6 +103,9 @@ _ENTITY_TITLE_RE = re.compile(
 # institutions: datosentidad?numero=49&tipo=ECN&nif=…).
 _DATOSENTIDAD_NIF_RE = re.compile(r'datosentidad\?[^"\'<>]*\bnif=([A-Z0-9-]+)', re.I)
 
+# Strip HTML tags for title/label extraction (simpler than importing a parser).
+_TAG_STRIP_RE = re.compile(r'<[^>]+>')
+
 # The document-row link:
 # <a id="…subtituloRegistroEnlace" href="ABSOLUTE_URL" target="_blank"><span …>TITLE</span></a>
 _ROW_LINK_RE = re.compile(
@@ -154,18 +157,6 @@ def _scrape_hidden(html: str, field_name: str) -> str | None:
     return None
 
 
-def _parse_date(date_text: str) -> str | None:
-    """dd/mm/yyyy → ISO date string (YYYY-MM-DD), or None."""
-    m = _DATE_RE.search(date_text or '')
-    if not m:
-        return None
-    dd, mm, yyyy = m.groups()
-    try:
-        return datetime(int(yyyy), int(mm), int(dd)).date().isoformat()
-    except ValueError:
-        return None
-
-
 def _parse_date_obj(date_text: str):
     """dd/mm/yyyy → datetime.date, or None."""
     m = _DATE_RE.search(date_text or '')
@@ -176,6 +167,12 @@ def _parse_date_obj(date_text: str):
         return datetime(int(yyyy), int(mm), int(dd)).date()
     except ValueError:
         return None
+
+
+def _parse_date(date_text: str) -> str | None:
+    """dd/mm/yyyy → ISO date string (YYYY-MM-DD), or None."""
+    d = _parse_date_obj(date_text)
+    return d.isoformat() if d else None
 
 
 def _slug(text: str) -> str:
@@ -418,6 +415,12 @@ class CnmvES(OamSource):
             try:
                 html = self.fetcher.get_text(url)
             except Exception as exc:  # noqa: BLE001
+                status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                if page > 0 and status in (400, 404):
+                    # CNMV answers a past-the-end page probe with 400/404 — that is
+                    # "no more pages", not a failure. Terminate cleanly so we don't
+                    # flood the error channel with one entry per short register.
+                    break
                 self._record_error('register-page', url, exc)
                 break
 
@@ -497,7 +500,3 @@ class CnmvES(OamSource):
             docs.append(doc)
 
         return docs
-
-
-# Strip HTML tags for title extraction (simpler than importing a parser).
-_TAG_STRIP_RE = re.compile(r'<[^>]+>')

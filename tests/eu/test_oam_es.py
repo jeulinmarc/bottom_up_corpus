@@ -201,9 +201,11 @@ def test_discover_ifa_annual_reports():
     assert annual, "expected annual_report Documents from the IFA table"
     assert all(d.period_end is not None for d in annual), "period_end from Fecha Estados Financieros"
     assert all(d.files for d in annual)
-    # Every annual file is a real CNMV document URL (verdocumento or AUDITA).
+    # Every annual file is an ABSOLUTE CNMV document URL (verdocumento or AUDITA);
+    # the relative /AUDITA/… hrefs must have been joined to the host.
     assert all(
-        ("verdocumento/ver" in f["url"] or "/AUDITA/" in f["url"])
+        f["url"].startswith("https://www.cnmv.es/")
+        and ("verdocumento/ver" in f["url"] or "/AUDITA/" in f["url"])
         for d in annual for f in d.files
     )
     # At least one row exposes the ESEF (ZIP/Xbri) package.
