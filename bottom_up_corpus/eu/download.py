@@ -30,6 +30,12 @@ def download_document(doc: Document, *, fetcher, config: Config) -> dict:
 
     files_out = []
     for f in doc.files:
+        if f.get("content") is None and not f.get("url"):
+            # Index-only file: nothing to fetch and no stable URL to retry (e.g. a DE
+            # capture-at-discovery that failed — re-fetching its session-bound link
+            # later would persist a stale page). Record it without downloading.
+            files_out.append({k: v for k, v in f.items() if k != "content"})
+            continue
         dest = base / (f.get("name") or (f.get("url") or "file").rsplit("/", 1)[-1])
         try:
             if not dest.exists():

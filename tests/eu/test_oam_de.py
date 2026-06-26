@@ -195,8 +195,12 @@ def test_detail_fetch_failure_emits_document_without_content():
     docs = src.discover(Entity(lei="L1", name="SAP SE", country="DE"))
 
     assert len(docs) == 1
-    assert "content" not in docs[0].files[0], "no content when capture failed"
-    assert docs[0].files[0]["url"]  # provenance url still present
+    f = docs[0].files[0]
+    assert "content" not in f, "no content when capture failed"
+    # The session-bound url is dropped so download.py won't re-fetch a stale page;
+    # it is marked index-only and the link survives as provenance in native_meta.
+    assert "url" not in f and f.get("capture_failed") is True
+    assert docs[0].native_meta["detail_url"]  # provenance preserved
     assert any(e["context"] == "detail" for e in src.errors)
 
 

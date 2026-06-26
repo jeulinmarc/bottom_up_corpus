@@ -291,6 +291,12 @@ class BundesanzeigerDE(OamSource):
             file_entry["content"] = self.fetcher.get_text(href)
         except Exception as exc:  # noqa: BLE001
             self._record_error("detail", href, exc)
+            # The href is a session-bound Wicket link; re-fetching it cross-session
+            # (at download time) can return an unrelated "session expired" 200 page.
+            # Drop it so download.py never persists a stale body — the link survives
+            # as provenance in native_meta.detail_url, and the index entry survives.
+            file_entry.pop("url", None)
+            file_entry["capture_failed"] = True
 
         return Document(
             doc_id=doc_id,
