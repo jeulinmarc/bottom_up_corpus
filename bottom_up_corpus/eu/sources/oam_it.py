@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from ..documents import Document
 from ..entities import Entity
@@ -200,14 +201,14 @@ class OneInfoIT(OamSource):
                 ext = xbrl[xbrl.rfind("."):]
             if ext.lower() not in _NON_DOC_EXTS:
                 year = _year_utc(exercise_epoch) or _year_utc(storage_epoch) or "0"
-                url = _DL.format(filetype=filetype, year=year, file=xbrl)
+                url = _DL.format(filetype=filetype, year=year, file=quote(xbrl, safe=''))
                 files.append({"name": xbrl + ".zip", "kind": "esef", "url": url})
 
         # Regular PDF
         if pdf:
             year = _year_utc(storage_epoch) or "0"
             pdf_name = pdf + ".pdf"
-            url = _DL.format(filetype=filetype, year=year, file=pdf_name)
+            url = _DL.format(filetype=filetype, year=year, file=quote(pdf_name, safe=''))
             files.append({"name": pdf_name, "kind": "document", "url": url})
 
         if not files:

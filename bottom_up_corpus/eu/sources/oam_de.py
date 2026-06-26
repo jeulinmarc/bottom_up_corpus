@@ -319,7 +319,12 @@ class BundesanzeigerDE(OamSource):
 
     @staticmethod
     def _doc_id(entity: Entity, published_ts: str | None, title: str, register: str) -> str:
-        """Deterministic id from issuer + date + a short title hash + register."""
+        """Deterministic id from issuer + date + a short title hash + register.
+
+        Two genuinely distinct publications that share issuer+date+title+register would
+        collide and dedupe to one in merge_documents — vanishingly rare given the title
+        hash, and acceptable: such pairs are near-certainly the same disclosure.
+        """
         ymd = (published_ts or "0000-00-00").replace("-", "")
         key = f"{entity.lei or entity.name}|{ymd}|{title}|{register}"
         short = hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]

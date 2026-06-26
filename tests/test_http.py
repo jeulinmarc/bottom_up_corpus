@@ -226,3 +226,56 @@ def test_throttles_repeated_same_host(monkeypatch):
     f.get_text("https://www.sec.gov/a")
     f.get_text("https://www.sec.gov/a")
     assert sleeps and sleeps[0] == pytest.approx(0.05, abs=1e-6)
+
+
+def test_post_text_returns_body_and_posts_form_data(cfg):
+    """Fetcher.post_text POSTs form data via session.post and returns the text body."""
+
+    class _FormSession:
+        def __init__(self, response):
+            self.headers = {}
+            self.verify = True
+            self._response = response
+            self.post_calls = []
+
+        def get(self, *a, **kw):
+            raise RuntimeError("get called unexpectedly")
+
+        def post(self, url, data=None, timeout=None, **_):
+            self.post_calls.append({"url": url, "data": data, "timeout": timeout})
+            return self._response
+
+    resp = FakeResponse(text="<html>ok</html>")
+    sess = _FormSession(resp)
+    f = Fetcher(cfg, session=sess)
+    body = f.post_text("https://www.cnmv.es/portal/Consultas/BusquedaPorEntidad",
+                       {"ctl00$ContentPrincipal$txtBusqueda": "IBERDROLA"})
+    assert body == "<html>ok</html>"
+    assert len(sess.post_calls) == 1
+    assert sess.post_calls[0]["data"] == {"ctl00$ContentPrincipal$txtBusqueda": "IBERDROLA"}
+
+
+def test_post_text_retries_on_429(cfg):
+    """Fetcher.post_text retries on 429 just like get()/post_json."""
+
+    class _RetryFormSession:
+        def __init__(self, responses):
+            self.headers = {}
+            self.verify = True
+            self._responses = list(responses)
+            self._i = 0
+            self.calls = 0
+
+        def get(self, *a, **kw):
+            raise RuntimeError("get called unexpectedly")
+
+        def post(self, url, data=None, timeout=None, **_):
+            resp = self._responses[min(self._i, len(self._responses) - 1)]
+            self._i += 1
+            self.calls += 1
+            return resp
+
+    sess = _RetryFormSession([FakeResponse(429), FakeResponse(text="<html>done</html>")])
+    f = Fetcher(cfg, session=sess)
+    assert f.post_text("https://www.cnmv.es/x", {}) == "<html>done</html>"
+    assert sess.calls == 2
