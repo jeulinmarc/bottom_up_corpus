@@ -91,6 +91,55 @@ def test_post_body_filters_by_isin():
     assert body.get("isinCode") == ABINBEV_ISIN
     assert body.get("startRowIndex") == 0
     assert "pageSize" in body
+    # A dropped/misspelled sort key would silently re-order (and could mis-page) the query.
+    assert body.get("sortDirection") == "Descending"
+
+
+def test_multiple_isins_dedup_by_topic_id():
+    """Two ISINs that both return the same requiredReportingTopicId yield one Document."""
+    result = json.loads((FIX / "be_stori_result_abinbev.json").read_text())
+
+    class _PerIsinStub:
+        """Returns the SAME fixture for the first page of EACH ISIN (so both ISINs
+        surface the same items), empty thereafter — exercising cross-ISIN dedup."""
+        def __init__(self):
+            self.posts = []
+
+        def post_json(self, url, body, **_):
+            self.posts.append({"url": url, "body": body})
+            return result if body.get("startRowIndex", 0) == 0 else {
+                "resultCount": result["resultCount"], "storiResultItems": []}
+
+        def get_json(self, url, **_):
+            return {}
+
+    http = _PerIsinStub()
+    src = StoriBE(http=http)
+    docs = src.discover(Entity(lei=None, name="AB INBEV", country="BE",
+                               isins=(ABINBEV_ISIN, "BE0003793107")))
+    ids = [d.doc_id for d in docs]
+    assert ids, "expected documents"
+    assert len(ids) == len(set(ids)), "documents must be deduped across ISINs by topic id"
+    # Each ISIN's first page returned the same items; dedup collapses them to one set.
+    assert len(docs) == len({i["requiredReportingTopicId"] for i in result["storiResultItems"]})
+    assert {p["body"].get("isinCode") for p in http.posts} == {ABINBEV_ISIN, "BE0003793107"}
+
+
+def test_ensure_session_without_curl_cffi_records_error(monkeypatch):
+    """The lazy curl_cffi import failing must be recorded (not crash) and yield no session."""
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_curl(name, *a, **k):
+        if name.startswith("curl_cffi"):
+            raise ImportError("curl_cffi not installed")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_curl)
+    src = StoriBE()  # no injected http → forces the live lazy path
+    session = src._ensure_session()
+    assert session is None
+    assert any(e["context"] == "dependency" for e in src.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +262,10 @@ def test_list_issuers_returns_empty():
     assert StoriBE(http=_StubHttp()).list_issuers() == []
 
 
-def test_missing_curl_cffi_does_not_crash_import():
-    # The backend constructs fine without curl_cffi when an http stub is injected.
+def test_constructs_with_injected_http():
+    # With an injected http stub the backend never touches curl_cffi / the network.
+    # (The real lazy-import error path is covered by
+    # test_ensure_session_without_curl_cffi_records_error.)
     src = StoriBE(http=_StubHttp())
     assert src.name == "oam-be"
     assert src.country == "BE"

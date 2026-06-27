@@ -102,7 +102,7 @@ class StoriBE(OamSource):
         # Injected stub (tests) or a lazily-built curl_cffi session (live).
         self._http = http
         self._session = None  # the curl_cffi session, built on first live use
-        self._companies_cache: dict[str, str | None] | None = None
+        self._companies_cache: dict[str, list[str]] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -211,7 +211,10 @@ class StoriBE(OamSource):
                 "language": entry.get("language"),
             })
 
-        doc_id = f"be-{topic_id}" if topic_id else f"be-{len(seen)}"
+        # requiredReportingTopicId is the primary key; fall back to a stable, unique
+        # id (the first fileDataId — a GUID) so distinct keyless items never collide.
+        fallback = files[0]["url"].rsplit("fileDataId=", 1)[-1] if files else None
+        doc_id = f"be-{topic_id or fallback or item.get('dateReceived') or now}"
         return Document(
             doc_id=doc_id,
             lei=item.get("lei") or entity.lei,
@@ -256,9 +259,9 @@ class StoriBE(OamSource):
                 cid = row.get("companyId")
                 if abbr and cid:
                     cache.setdefault(abbr, []).append(cid)
-            self._companies_cache = cache  # type: ignore[assignment]
+            self._companies_cache = cache
 
-        ids = self._companies_cache.get(key) or []  # type: ignore[union-attr]
+        ids = self._companies_cache.get(key) or []
         if len(ids) == 1:
             return ids[0]
         self._record_error(
