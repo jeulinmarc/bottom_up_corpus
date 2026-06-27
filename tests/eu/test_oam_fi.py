@@ -296,6 +296,27 @@ def test_discover_documents_have_doc_type_in_doc_types():
     assert all(d.doc_type in DOC_TYPES for d in docs)
 
 
+def test_discover_nokia_doc_types_cover_expected_categories():
+    """Nokia fixture has 6 rows with distinct categories; verify the key mappings.
+
+    Specifically, the 'Managers&#39; transactions' row (HTML-entity-escaped) must
+    map to holding_notification (not 'other'), which would fail if category text
+    is not html.unescape()d before _doc_type() lookup.
+    """
+    src = OamFI(fetcher=_StubFetcher())
+    docs = src.discover(Entity(lei="FI-LEI-001", name="Nokia Oyj", country="FI"))
+    doc_types = {d.doc_type for d in docs}
+    assert "holding_notification" in doc_types, (
+        f"Expected holding_notification from Managers' transactions row; got {doc_types}"
+    )
+    assert "annual_report" in doc_types, (
+        f"Expected annual_report from Annual row; got {doc_types}"
+    )
+    assert "inside_information" in doc_types, (
+        f"Expected inside_information from Inside information row; got {doc_types}"
+    )
+
+
 def test_discover_documents_carry_lei():
     src = OamFI(fetcher=_StubFetcher())
     docs = src.discover(Entity(lei="FI-LEI-001", name="Nokia Oyj", country="FI"))

@@ -417,13 +417,13 @@ class OamFI(OamSource):
             if not link_m:
                 continue
             view_id = link_m.group(1)
-            title = link_m.group(2).strip()
+            title = html.unescape(link_m.group(2).strip())
 
             date_m = _ROW_DATE_RE.search(block)
             raw_date = date_m.group(1).strip() if date_m else ""
 
             cat_m = _ROW_CATEGORY_RE.search(block)
-            category = cat_m.group(1).strip() if cat_m else ""
+            category = html.unescape(cat_m.group(1).strip()) if cat_m else ""
 
             doc = self._hop_view_and_build(view_id, title, raw_date, category, entity, now)
             if doc is not None:
