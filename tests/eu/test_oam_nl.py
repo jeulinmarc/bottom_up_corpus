@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from bottom_up_corpus.eu.documents import DOC_TYPES
 from bottom_up_corpus.eu.entities import Entity
 from bottom_up_corpus.eu.sources.oam_nl import AfmNL, _normalise

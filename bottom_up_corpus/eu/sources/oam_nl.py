@@ -49,15 +49,12 @@ _REGISTER_NAME = "financiele-verslaggeving"
 # Compiled regexes
 # ---------------------------------------------------------------------------
 
-# Outer <vermelding> block. The export is flat XML on (nearly) one line; the
-# outer block is bounded by the first <vermelding> opening tag up to the
-# next </vermelding> that closes it. Each outer block also contains ONE inner
-# <vermelding>…</vermelding> display label — we avoid confusing it with an
-# outer entry by extracting named fields via separate tag regexes below.
-#
-# Strategy: split on outer </vermelding> boundaries. Each chunk between the
-# LAST <vermelding> and the next </vermelding> is an entry. We match field
-# by field within that chunk.
+# Each register entry is an outer <vermelding> that also contains ONE inner
+# <vermelding>…</vermelding> display label. This non-greedy match stops at the
+# FIRST (inner) </vermelding> — which is safe because all of the named field
+# tags (id, datum, uitgevende-instelling, boekjaar, filename, objecttype_eng)
+# appear BEFORE the inner label, so the captured chunk holds every field. We
+# then pull each field out of the chunk by its own tag regex below.
 _OUTER_VERMELDING_RE = re.compile(
     r"<vermelding>(.*?)</vermelding>",
     re.S,
