@@ -112,7 +112,6 @@ class NsmGB(OamSource):
         docs: list[Document] = []
         from_offset = 0
         total: int | None = None
-        truncation_recorded = False
 
         while True:
             body = {
@@ -134,10 +133,11 @@ class NsmGB(OamSource):
             hits_env = resp.get("hits") or {}
 
             # Read total on first response; record truncation immediately if needed.
+            # The `total is None` gate runs exactly once, so this can't double-record.
             if total is None:
                 total_obj = hits_env.get("total") or {}
                 total = total_obj.get("value", 0) if isinstance(total_obj, dict) else int(total_obj)
-                if total > _MAX_RESULTS and not truncation_recorded:
+                if total > _MAX_RESULTS:
                     self._record_error(
                         "truncated",
                         _SEARCH_URL,
@@ -146,7 +146,6 @@ class NsmGB(OamSource):
                             "results truncated"
                         ),
                     )
-                    truncation_recorded = True
 
             hits = hits_env.get("hits") or []
             if not hits:

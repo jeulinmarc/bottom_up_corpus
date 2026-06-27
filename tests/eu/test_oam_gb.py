@@ -122,6 +122,11 @@ def test_post_body_filters_by_lei():
     assert criteria == [{"name": "lei", "value": TESCO_LEI}], (
         f"criteria must be exact LEI filter; got {criteria}"
     )
+    # Guard the rest of the envelope: a wrong dateCriteria/sort would silently return
+    # ALL ~5.3M disclosures (in a different order) instead of the issuer's filings.
+    assert first_body["criteriaObj"]["dateCriteria"] is None
+    assert first_body["sort"] == "publication_date"
+    assert first_body["sortorder"] == "desc"
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +207,7 @@ def test_truncation_recorded_when_total_exceeds_max():
     assert truncation_errors, "expected a truncated error when total > _MAX_RESULTS"
 
 
-def test_no_truncation_error_when_within_one_page():
+def test_no_truncation_error_when_total_below_cap():
     """No truncation error when total fits in one page."""
     stub = _make_stub()
     src = NsmGB(fetcher=stub)
