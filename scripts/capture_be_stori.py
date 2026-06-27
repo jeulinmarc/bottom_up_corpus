@@ -17,6 +17,13 @@ fixtures into tests/fixtures/eu/ and prints a structured summary. With those, th
 BE STORI backend can be built and validated against REAL current responses (no
 guessing against a 4-year-old archive).
 
+The WAF rejects the *client fingerprint* (TLS/JA3 + HTTP2), not only the IP — even
+plain python-`requests` from a residential network is reset. So this script uses
+`curl_cffi` to impersonate a real Chrome/Safari/Edge fingerprint, which a normal
+browser presents (and which the WAF allows from a clean IP). Install it first:
+
+    pip install curl_cffi
+
 USAGE
 -----
     python scripts/capture_be_stori.py
@@ -25,6 +32,11 @@ USAGE
 
 It only READS public pages (a search + one document). Then commit the new
 tests/fixtures/eu/be_stori_*.* files (or paste the printed summary back).
+
+If EVERY impersonation profile is still reset: confirm STORI loads in your normal
+browser first (it's a public site). If the browser works but this script can't, the
+last resort is a headless real browser (Playwright) — tell the assistant and it will
+switch the capture to that.
 """
 from __future__ import annotations
 
@@ -33,10 +45,49 @@ import pathlib
 import re
 import sys
 
+# Prefer curl_cffi (browser TLS/JA3 + HTTP2 impersonation); fall back to requests.
+_IMPERSONATE = ["chrome124", "chrome120", "chrome", "safari17_0", "edge122"]
 try:
-    import requests
+    from curl_cffi import requests as _curl
+    _HAVE_CURL = True
 except ImportError:  # pragma: no cover
-    sys.exit("This script needs `requests` (pip install requests).")
+    _HAVE_CURL = False
+try:
+    import requests as _plain
+except ImportError:  # pragma: no cover
+    _plain = None
+
+if not _HAVE_CURL and _plain is None:
+    sys.exit("Install curl_cffi (recommended) or requests: pip install curl_cffi")
+
+
+def _open_session():
+    """Return (session, label) for whichever client can reach STORI's WAF.
+
+    Tries each Chrome/Safari/Edge impersonation profile, then plain requests.
+    Returns (None, None) if every strategy is reset.
+    """
+    if _HAVE_CURL:
+        for imp in _IMPERSONATE:
+            try:
+                sess = _curl.Session(impersonate=imp, timeout=30)
+                sess.headers.update({"Accept-Language": "en,fr,nl"})
+                r = sess.get(BASE + "/", timeout=30)
+                if r.status_code < 500:
+                    print(f"  ✓ reached STORI via curl_cffi impersonate={imp} (HTTP {r.status_code})")
+                    return sess, f"curl_cffi:{imp}"
+            except Exception as exc:
+                print(f"  · curl_cffi {imp}: {type(exc).__name__} — {str(exc)[:60]}")
+    if _plain is not None:
+        try:
+            sess = _plain.Session()
+            sess.headers.update({"User-Agent": UA, "Accept-Language": "en,fr,nl"})
+            r = sess.get(BASE + "/", timeout=30)
+            print(f"  ✓ reached STORI via plain requests (HTTP {r.status_code})")
+            return sess, "requests"
+        except Exception as exc:
+            print(f"  · plain requests: {type(exc).__name__} — {str(exc)[:60]}")
+    return None, None
 
 BASE = "https://stori.fsma.be"
 FIX = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "eu"
@@ -94,17 +145,18 @@ def main() -> int:
     ap.add_argument("--isin", default="", help="optional ISIN to search instead/as well")
     args = ap.parse_args()
 
-    s = requests.Session()
-    s.headers.update({"User-Agent": UA, "Accept-Language": "en,fr,nl"})
-
     print(f"[1/4] GET {BASE}/ (reachability + search form)")
-    try:
-        r = s.get(BASE + "/", timeout=30)
-    except Exception as exc:
-        print(f"  ✗ could not reach STORI: {exc}\n"
-              f"  → You appear to be on a network the STORI WAF also blocks. Try a\n"
-              f"    residential connection / mobile hotspot, then re-run.")
+    if not _HAVE_CURL:
+        print("  ! curl_cffi not installed — only plain requests available, which the\n"
+              "    STORI WAF rejects by fingerprint. Strongly recommend: pip install curl_cffi")
+    s, via = _open_session()
+    if s is None:
+        print("  ✗ every client was reset by STORI's WAF.\n"
+              "  → 1) pip install curl_cffi  and re-run (impersonates a real browser).\n"
+              "    2) confirm https://stori.fsma.be loads in your normal browser.\n"
+              "    3) if the browser works but this can't, we'll switch to Playwright.")
         return 2
+    r = s.get(BASE + "/", timeout=30)
     form_html = r.text
     sp = _save("be_stori_search.html", form_html)
     print(f"  ✓ {r.status_code}, {len(form_html)} bytes  → {sp}")
