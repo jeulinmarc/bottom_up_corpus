@@ -31,14 +31,10 @@ from __future__ import annotations
 
 import unicodedata
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING
 
-from ..documents import DOC_TYPES, Document
+from ..documents import Document
 from ..entities import Entity
 from ..oam_base import IssuerRef, OamSource
-
-if TYPE_CHECKING:
-    pass
 
 # ---------------------------------------------------------------------------
 # Module constants
