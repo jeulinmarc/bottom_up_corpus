@@ -11,6 +11,11 @@ from urllib.parse import quote
 
 GLEIF = "https://api.gleif.org/api/v1/lei-records"
 
+# Cap on ISINs fetched per entity. One ISIN is enough to key the ISIN-search OAM
+# backends (BE/…); a few add robustness. The cap bounds both the GLEIF page and the
+# downstream per-ISIN request fan-out.
+_ISIN_CAP = 25
+
 
 @dataclass(frozen=True)
 class Entity:
@@ -30,7 +35,26 @@ def _from_gleif_record(attrs: dict) -> tuple[str, str, str]:
     return attrs.get("lei", ""), name, country
 
 
-def _lookup_lei(lei: str, fetcher) -> Entity | None:
+def _fetch_isins(lei: str, fetcher, *, seed: str = "", cap: int | None = None) -> tuple[str, ...]:
+    """The issuer's ISINs from GLEIF (LEI->isins), capped. `seed` (the ISIN we resolved
+    by, if any) is kept first. Degrades to () on any error — ISINs are best-effort."""
+    cap = _ISIN_CAP if cap is None else cap  # read at call time so the cap stays configurable
+    out: list[str] = [seed] if seed else []
+    if lei:
+        try:
+            rows = fetcher.get_json(f"{GLEIF}/{quote(lei)}/isins?page%5Bsize%5D=100").get("data") or []
+            for r in rows:
+                isin = (r.get("attributes") or {}).get("isin")
+                if isin and isin not in out:
+                    out.append(isin)
+                if len(out) >= cap:
+                    break
+        except Exception:
+            pass  # ISINs are best-effort; a malformed/failed response yields what we have
+    return tuple(out)
+
+
+def _lookup_lei(lei: str, fetcher, *, with_isins: bool) -> Entity | None:
     try:
         data = fetcher.get_json(f"{GLEIF}/{lei}").get("data")
     except Exception:
@@ -38,10 +62,11 @@ def _lookup_lei(lei: str, fetcher) -> Entity | None:
     if not data:
         return None
     lei_v, name, country = _from_gleif_record(data["attributes"])
-    return Entity(lei=lei_v or lei, name=name, country=country, resolution="lei")
+    isins = _fetch_isins(lei_v or lei, fetcher) if with_isins else ()
+    return Entity(lei=lei_v or lei, name=name, country=country, isins=isins, resolution="lei")
 
 
-def _lookup_isin(isin: str, fetcher) -> Entity:
+def _lookup_isin(isin: str, fetcher, *, with_isins: bool) -> Entity:
     url = f"{GLEIF}?filter%5Bisin%5D={quote(isin)}&page%5Bsize%5D=1"
     try:
         rows = fetcher.get_json(url).get("data") or []
@@ -49,11 +74,12 @@ def _lookup_isin(isin: str, fetcher) -> Entity:
         rows = []
     if rows:
         lei_v, nm, ctry = _from_gleif_record(rows[0]["attributes"])
-        return Entity(lei=lei_v, name=nm, country=ctry, resolution="isin")
+        isins = _fetch_isins(lei_v, fetcher, seed=isin) if with_isins else (isin,)
+        return Entity(lei=lei_v, name=nm, country=ctry, isins=isins, resolution="isin")
     return Entity(lei=None, name="", country="", resolution="unresolved")
 
 
-def _lookup_name(name: str, country: str, fetcher) -> Entity:
+def _lookup_name(name: str, country: str, fetcher, *, with_isins: bool) -> Entity:
     url = f"{GLEIF}?filter%5Bentity.legalName%5D={quote(name)}&page%5Bsize%5D=10"
     try:
         rows = fetcher.get_json(url).get("data") or []
@@ -68,21 +94,26 @@ def _lookup_name(name: str, country: str, fetcher) -> Entity:
     # Resolve ONLY if exactly one candidate remains — never guess an ambiguous match.
     if len(rows) == 1:
         lei_v, nm, ctry = _from_gleif_record(rows[0]["attributes"])
-        return Entity(lei=lei_v, name=nm, country=ctry, resolution="name")
+        isins = _fetch_isins(lei_v, fetcher) if with_isins else ()
+        return Entity(lei=lei_v, name=nm, country=ctry, isins=isins, resolution="name")
     return Entity(lei=None, name=name, country=country, resolution="unresolved")
 
 
-def resolve_entities(specs: list[dict], *, fetcher) -> list[Entity]:
+def resolve_entities(specs: list[dict], *, fetcher, populate_isins: bool = True) -> list[Entity]:
+    """Resolve each spec to an Entity. When ``populate_isins`` (default), each resolved
+    entity also carries the issuer's ISINs from GLEIF — the identity the ISIN-keyed OAM
+    backends (e.g. Belgium) search on."""
     out: list[Entity] = []
     for spec in specs:
         if spec.get("lei"):
-            e = _lookup_lei(spec["lei"], fetcher)
+            e = _lookup_lei(spec["lei"], fetcher, with_isins=populate_isins)
             out.append(e or Entity(None, spec.get("name", ""), spec.get("country", ""),
                                     resolution="unresolved"))
         elif spec.get("isin"):
-            out.append(_lookup_isin(spec["isin"], fetcher))
+            out.append(_lookup_isin(spec["isin"], fetcher, with_isins=populate_isins))
         elif spec.get("name"):
-            out.append(_lookup_name(spec["name"], spec.get("country", ""), fetcher))
+            out.append(_lookup_name(spec["name"], spec.get("country", ""), fetcher,
+                                    with_isins=populate_isins))
         else:  # ticker tier — requires OpenFIGI, deferred to Task 1c
             out.append(Entity(None, spec.get("name", ""), spec.get("country", ""),
                               resolution="unresolved"))
