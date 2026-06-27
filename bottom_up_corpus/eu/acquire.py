@@ -17,6 +17,7 @@ from .sources.filings_org import FilingsXbrlOrg
 from .sources.oam_de import BundesanzeigerDE
 from .sources.oam_es import CnmvES
 from .sources.oam_fr import InfoFinanciereFR
+from .sources.oam_gb import NsmGB
 from .sources.oam_it import OneInfoIT
 from .sources.oam_nl import AfmNL
 
@@ -27,6 +28,7 @@ COUNTRY_BACKENDS = {
     "DE": BundesanzeigerDE,
     "ES": CnmvES,
     "FR": InfoFinanciereFR,
+    "GB": NsmGB,
     "IT": OneInfoIT,
     "NL": AfmNL,
 }
