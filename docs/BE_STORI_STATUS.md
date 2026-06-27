@@ -1,11 +1,26 @@
-# Belgium (FSMA / STORI) — status & finish plan
+# Belgium (FSMA / STORI) — RESOLVED
 
-**TL;DR:** BE is the one EU OAM not yet shipped. Its authoritative source,
-`https://stori.fsma.be`, is **unreachable from the build/CI environment** because a
-WAF resets HTTP requests by source-IP reputation. It is reachable from a normal
-residential/office network. One script (`scripts/capture_be_stori.py`), run once
-from such a network, captures the real responses needed to build and validate the
-backend.
+**Status: built & live-validated.** `bottom_up_corpus/eu/sources/oam_be.py` (`StoriBE`,
+`COUNTRY_BACKENDS["BE"]`) queries the modern FSMA JSON API and was validated end-to-end
+from a normal network: AB InBev (ISIN `BE0974293251`) → **446 documents**, and a real
+469 KB PDF downloads. The backend is a clean JSON-API client (like the UK NSM): search
+by `isinCode`, map `reportingTopicName` → doc_type, download via `/download?fileDataId=`.
+
+The API (`https://webapi.fsma.be/api/v1/{lang}/stori`) sits behind an F5 WAF, so the
+backend's HTTP layer impersonates Chrome via **`curl_cffi`** (optional dep: `pip install
+".[be]"`) with `Origin`/`Referer: https://www.fsma.be` and a cookie-bootstrapped session.
+It must run from a non-datacenter network (the WAF blocks flagged IPs). `scripts/
+validate_be.py` runs the real backend end-to-end for a sanity check.
+
+The rest of this document is the investigation record that led here (the F5-WAF diagnosis
+and how the live API was captured via the browser), kept for context.
+
+---
+
+**Original TL;DR (superseded):** BE's classic `stori.fsma.be` site is unreachable from
+CI because an F5 WAF blocks non-browser clients; the modern API on `webapi.fsma.be` was
+captured via a real browser (Chrome DevTools) and the backend built against those real
+responses.
 
 ## Why it's blocked here (diagnosis)
 
