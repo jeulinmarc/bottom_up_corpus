@@ -420,3 +420,21 @@ def test_details_error_recorded_but_other_rows_continue():
     # First row fails, rows 1+2 succeed
     assert len(docs) == 2, f"expected 2 docs (one failed), got {len(docs)}"
     assert any(e["context"] == "details" for e in src.errors)
+
+
+def test_doc_type_maps_english_detail_labels():
+    """Live path: the search row's CategoryColumn is 'Udsteder'; the real category is
+    the English label exposed in /details. Both forms must map."""
+    from bottom_up_corpus.eu.sources.oam_dk import _doc_type, _category_from_detail
+    assert _doc_type("Annual financial report") == "annual_report"
+    assert _doc_type("Half-yearly financial report") == "half_year_report"
+    assert _doc_type("Inside information") == "inside_information"
+    assert _doc_type("Udsteder") == "other"          # the useless row value
+    assert _doc_type("YearlyFinancialReport") == "annual_report"  # old API key still works
+
+    detail = {"sections": [{"heading": "Notification", "elements": [
+        {"type": "keyvalue", "key": {"name": "Type"}, "value": {"type": "text", "text": "Issuer"}},
+        {"type": "keyvalue", "key": {"name": ""}, "value": {"type": "text", "text": "Inside information"}},
+    ]}]}
+    assert _category_from_detail(detail) == "Inside information"
+    assert _doc_type(_category_from_detail(detail)) == "inside_information"

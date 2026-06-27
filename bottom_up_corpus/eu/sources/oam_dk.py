@@ -24,6 +24,7 @@ No auth, no WAF, standard JSON headers.
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
 from datetime import datetime, timezone
 
@@ -45,6 +46,7 @@ _PAGE_SIZE = 100
 # ---------------------------------------------------------------------------
 
 _CATEGORY_MAP: dict[str, str] = {
+    # API category keys (CategoryColumn — present in older responses)
     "yearlyfinancialreport": "annual_report",
     "halfyearlyfinancialreport": "half_year_report",
     "quarterlyfinancialreport": "interim_statement",
@@ -54,21 +56,52 @@ _CATEGORY_MAP: dict[str, str] = {
     "totalvotingrightsandsharecapital": "holding_notification",
     "prospectus": "prospectus",
     "ownshares": "other",
-    "paymentstogoverments": "other",
-    "paymentstogov": "other",
     "paymentstogovernments": "other",
     "homememberstate": "other",
     "changeinrightsattachedtosecurities": "other",
     "relatedpartytransactions": "other",
     "takeoverbid": "other",
     "shortselling": "other",
+    # Human-readable English labels (as exposed in /details — the live path: the
+    # search row's CategoryColumn is "Udsteder"/issuer, so the real type lives here).
+    "annualfinancialreport": "annual_report",
+    "interimreport": "interim_statement",
+    "quarterlyreport": "interim_statement",
+    "majorshareholderannouncement": "holding_notification",
+    "majorshareholder": "holding_notification",
+    "totalvotingrightsandcapital": "holding_notification",
+    "managerstransactions": "holding_notification",
+    "acquisitionordisposalofownshares": "other",
 }
 
 
-def _doc_type(category_column: str) -> str:
-    """Map a CategoryColumn value to a DOC_TYPES member (case-insensitive)."""
-    key = (category_column or "").strip().lower().replace(" ", "")
+def _doc_type(category: str) -> str:
+    """Map an API category KEY or a human-readable category LABEL to a DOC_TYPES
+    member. Normalises by stripping all non-alphanumerics so 'Half-yearly financial
+    report' and 'HalfYearlyFinancialReport' collapse to the same key."""
+    key = re.sub(r"[^a-z0-9]", "", (category or "").lower())
     return _CATEGORY_MAP.get(key, "other")
+
+
+def _category_from_detail(detail: dict) -> str:
+    """The human-readable category from a /details response.
+
+    The first section ("Notification") lists, among its keyvalue text elements, the
+    document category as an unnamed element (e.g. "Annual financial report") right
+    after the "Type" element. Return the first text value that maps to a known
+    doc_type, else "".
+    """
+    for section in (detail or {}).get("sections", [])[:1] or (detail or {}).get("sections", []):
+        for elem in section.get("elements", []):
+            if elem.get("type") != "keyvalue":
+                continue
+            value = elem.get("value") or {}
+            if value.get("type") != "text":
+                continue
+            text = (value.get("text") or value.get("value") or "").strip()
+            if text and _doc_type(text) != "other":
+                return text
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +142,11 @@ class OamDK(OamSource):
     def __init__(self, fetcher=None, config=None):
         super().__init__(fetcher=fetcher, config=config)
         self._cvr_map: dict[str, list[str]] | None = None  # normalised_name -> [cvr, ...]
+        # Ask the API for English so /details carries English category labels
+        # ("Own shares", not "Egne aktier") — the doc_type map keys on English.
+        session = getattr(self.fetcher, "session", None)
+        if session is not None and hasattr(session, "headers"):
+            session.headers["Accept-Language"] = "en"
 
     # ------------------------------------------------------------------
     # Public API
@@ -191,6 +229,11 @@ class OamDK(OamSource):
                 if not files:
                     # Row has no downloadable attachments — skip silently
                     continue
+
+                # The live search row's CategoryColumn is "Udsteder" (issuer type), so
+                # derive the real doc category from the detail's English label; fall back
+                # to CategoryColumn (older responses carry the API key there).
+                category = _category_from_detail(detail) or category
 
                 docs.append(Document(
                     doc_id=f"dk-{row_id}",
