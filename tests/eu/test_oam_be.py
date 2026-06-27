@@ -43,8 +43,14 @@ class _StubHttp:
 
     def post_json(self, url, body, **_):
         self.posts.append({"url": url, "body": body})
-        # First page only carries items; subsequent pages drain so paging stops.
-        if len([p for p in self.posts if p["url"] == url]) == 1:
+        # Peek requests (pageSize=1) return the fixture's first item so the
+        # companyNumber is readable; they don't count as "the real first page".
+        if body.get("pageSize") == 1:
+            item = self._result["storiResultItems"][0]
+            return {"resultCount": self._result["resultCount"], "storiResultItems": [item]}
+        # Full pages: first real page returns items; subsequent pages drain.
+        full_pages = [p for p in self.posts if p["url"] == url and p["body"].get("pageSize") != 1]
+        if len(full_pages) == 1:
             return self._result
         return {"resultCount": self._result["resultCount"], "storiResultItems": []}
 
@@ -269,3 +275,186 @@ def test_constructs_with_injected_http():
     src = StoriBE(http=_StubHttp())
     assert src.name == "oam-be"
     assert src.country == "BE"
+
+
+# ---------------------------------------------------------------------------
+# peek-companyNumber optimization
+# ---------------------------------------------------------------------------
+
+def _make_item(topic_id: str, company_number: str, file_id: str) -> dict:
+    return {
+        "requiredReportingTopicId": topic_id,
+        "companyName": "TEST CO",
+        "companyNumber": company_number,
+        "nationality": "BE",
+        "reportingTopicName": "Rapport financier annuel",
+        "datePublication": "2025-01-01T00:00:00",
+        "dateReceived": "2025-01-01T00:00:00",
+        "lei": "TESTLEI",
+        "mainDocuments": [{
+            "fileDataId": file_id,
+            "language": "fr",
+            "originalFileName": f"{file_id}.pdf",
+            "fileType": "pdf",
+        }],
+        "attachments": [],
+        "isinCodes": [],
+        "documentTitle": "Annual Report",
+    }
+
+
+class _PeekAwareStub:
+    """Stub that tracks peek calls (pageSize=1) vs full-page calls separately.
+
+    Each ISIN is configured with a company_number and a list of full-page items.
+    The peek for any ISIN returns one item with the configured company_number.
+    Full pages: first page returns the configured items, subsequent pages return empty.
+    """
+
+    def __init__(self, isin_config: dict[str, tuple[str, list[dict]]]):
+        # isin_config: {isin: (company_number, [items])}
+        self._config = isin_config
+        self.peek_calls: list[dict] = []   # pageSize==1 bodies
+        self.full_calls: list[dict] = []   # pageSize>1 bodies
+
+    def post_json(self, url, body, **_):
+        isin = body.get("isinCode")
+        page_size = body.get("pageSize", 50)
+        start = body.get("startRowIndex", 0)
+
+        if page_size == 1:
+            self.peek_calls.append(body)
+            if isin not in self._config:
+                return {"resultCount": 0, "storiResultItems": []}
+            company_number, items = self._config[isin]
+            if not items:
+                return {"resultCount": 0, "storiResultItems": []}
+            peek_item = dict(items[0])
+            peek_item["companyNumber"] = company_number
+            return {"resultCount": len(items), "storiResultItems": [peek_item]}
+        else:
+            self.full_calls.append(body)
+            if isin not in self._config or start > 0:
+                return {"resultCount": 0, "storiResultItems": []}
+            company_number, items = self._config[isin]
+            tagged = [dict(i) | {"companyNumber": company_number} for i in items]
+            return {"resultCount": len(tagged), "storiResultItems": tagged}
+
+    def get_json(self, url, **_):
+        return {}
+
+
+def test_peek_skips_redundant_company():
+    """Two ISINs mapping to the same companyNumber: second ISIN is peeked but not
+    fully paginated — only one full pagination is issued for that company."""
+    company = "0417497106"
+    item_a = _make_item("topic-A", company, "file-A")
+    item_b = _make_item("topic-B", company, "file-B")  # same company, different topic
+
+    isin1, isin2 = "BE0000000001", "BE0000000002"
+    http = _PeekAwareStub({
+        isin1: (company, [item_a]),
+        isin2: (company, [item_b]),
+    })
+    src = StoriBE(http=http)
+    docs = src.discover(Entity(lei=None, name="TEST CO", country="BE",
+                                isins=(isin1, isin2)))
+
+    # Both ISINs should have been peeked.
+    peek_isins = {b["isinCode"] for b in http.peek_calls}
+    assert peek_isins == {isin1, isin2}, "both ISINs must be peeked"
+
+    # Only isin1 should have triggered a full pagination (isin2 shares the company).
+    full_isins = {b["isinCode"] for b in http.full_calls}
+    assert full_isins == {isin1}, "isin2 must be skipped (same companyNumber)"
+
+    # Documents: only from isin1's full fetch; topic-B was never fetched (correct —
+    # items for the same STORI company are already captured from isin1's full run).
+    assert len(docs) == 1
+    assert docs[0].doc_id == f"be-{item_a['requiredReportingTopicId']}"
+
+
+def test_peek_distinct_company_is_fully_fetched():
+    """Two ISINs mapping to DIFFERENT companyNumbers → both are fully paginated."""
+    company_x, company_y = "0417497106", "0436180892"
+    item_x = _make_item("topic-X", company_x, "file-X")
+    item_y = _make_item("topic-Y", company_y, "file-Y")
+
+    isin1, isin2 = "BE0000000001", "BE0000000002"
+    http = _PeekAwareStub({
+        isin1: (company_x, [item_x]),
+        isin2: (company_y, [item_y]),
+    })
+    src = StoriBE(http=http)
+    docs = src.discover(Entity(lei=None, name="TEST CO", country="BE",
+                                isins=(isin1, isin2)))
+
+    # Both ISINs peeked.
+    assert {b["isinCode"] for b in http.peek_calls} == {isin1, isin2}
+    # Both ISINs fully paginated (different companies).
+    assert {b["isinCode"] for b in http.full_calls} == {isin1, isin2}
+    # Documents from both companies.
+    doc_ids = {d.doc_id for d in docs}
+    assert f"be-{item_x['requiredReportingTopicId']}" in doc_ids
+    assert f"be-{item_y['requiredReportingTopicId']}" in doc_ids
+
+
+def test_peek_empty_isin_skipped():
+    """An ISIN whose peek returns 0 items produces no docs and no error."""
+    company = "0417497106"
+    item_a = _make_item("topic-A", company, "file-A")
+
+    isin1, isin2 = "BE0000000001", "BE9999999999"  # isin2 not in config → 0 items
+    http = _PeekAwareStub({
+        isin1: (company, [item_a]),
+        # isin2 absent → peek returns resultCount=0
+    })
+    src = StoriBE(http=http)
+    docs = src.discover(Entity(lei=None, name="TEST CO", country="BE",
+                                isins=(isin1, isin2)))
+
+    # isin2 peeked (resultCount=0) — must not produce a full pagination.
+    assert any(b["isinCode"] == isin2 for b in http.peek_calls), "isin2 must be peeked"
+    assert not any(b["isinCode"] == isin2 for b in http.full_calls), \
+        "isin2 must not trigger full pagination"
+
+    # No errors recorded for the empty ISIN.
+    assert not src.errors, f"no errors expected, got: {src.errors}"
+
+    # Docs from isin1 only.
+    assert len(docs) == 1
+    assert docs[0].doc_id == f"be-{item_a['requiredReportingTopicId']}"
+
+
+def test_peek_error_falls_through_to_full_search():
+    """A transient peek failure must not drop the ISIN — falls through to full search."""
+    company = "0417497106"
+    item_a = _make_item("topic-A", company, "file-A")
+
+    class _PeekFailStub:
+        def __init__(self):
+            self.calls = 0
+
+        def post_json(self, url, body, **_):
+            self.calls += 1
+            if body.get("pageSize") == 1:
+                raise RuntimeError("transient WAF error")
+            # Full page
+            if body.get("startRowIndex", 0) == 0:
+                return {"resultCount": 1, "storiResultItems": [
+                    dict(item_a) | {"companyNumber": company}
+                ]}
+            return {"resultCount": 1, "storiResultItems": []}
+
+        def get_json(self, url, **_):
+            return {}
+
+    src = StoriBE(http=_PeekFailStub())
+    docs = src.discover(Entity(lei=None, name="TEST CO", country="BE",
+                                isins=("BE0000000001",)))
+
+    # Peek error is recorded.
+    assert any(e["context"] == "peek" for e in src.errors)
+    # Full search still runs and returns the doc.
+    assert len(docs) == 1
+    assert docs[0].doc_id == f"be-{item_a['requiredReportingTopicId']}"

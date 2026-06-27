@@ -126,13 +126,81 @@ class StoriBE(OamSource):
             return []
 
         seen: set[str] = set()
+        fetched_company_numbers: set[str] = set()
         out: list[Document] = []
         for filt in filters:
+            # Peek: one request at pageSize=1 to read the companyNumber before
+            # committing to full pagination.  If the company was already fully
+            # fetched for a previous ISIN, skip the full pagination (the docs are
+            # already captured). Falls through to full pagination on peek errors.
+            if "isinCode" in filt:
+                company_number, skip = self._peek_company_number(
+                    filt, fetched_company_numbers
+                )
+                if skip:
+                    continue
             try:
-                out.extend(self._search(filt, entity, now, seen))
+                docs = self._search(filt, entity, now, seen)
             except Exception as exc:  # noqa: BLE001
                 self._record_error("search", f"{_BASE}/result", exc)
+                continue
+            out.extend(docs)
+            # Record every companyNumber seen in this ISIN's full fetch so that
+            # subsequent ISINs mapping to the same company are skipped.
+            if "isinCode" in filt:
+                for d in docs:
+                    cn = (d.native_meta or {}).get("companyNumber")
+                    if cn:
+                        fetched_company_numbers.add(str(cn))
+                # Also record from a successful peek (covers the case of 0 docs).
+                if company_number is not None:
+                    fetched_company_numbers.add(company_number)
         return out
+
+    # ------------------------------------------------------------------
+    # Peek helper
+    # ------------------------------------------------------------------
+
+    def _peek_company_number(
+        self, filt: dict, fetched: set[str]
+    ) -> tuple[str | None, bool]:
+        """POST pageSize=1 to read the ``companyNumber`` without full pagination.
+
+        Returns ``(company_number, skip)`` where:
+        - ``company_number`` is the string from the first item (or None on error /
+          empty response).
+        - ``skip`` is True when the company was already fully fetched and the caller
+          should skip full pagination.
+
+        A peek error is recorded and returns ``(None, False)`` so the caller falls
+        through to a normal full pagination (never silently drops an ISIN).
+        """
+        body = {
+            "startRowIndex": 0,
+            "pageSize": 1,
+            "sortDirection": "Descending",
+            **filt,
+        }
+        try:
+            resp = self._post_json(f"{_BASE}/result", body)
+        except Exception as exc:  # noqa: BLE001
+            self._record_error("peek", f"{_BASE}/result", exc)
+            return None, False
+
+        result_count = int(resp.get("resultCount") or 0)
+        if result_count == 0:
+            return None, True  # empty ISIN — skip silently, no error
+
+        items = resp.get("storiResultItems") or []
+        if not items:
+            # resultCount > 0 but no items in peek response — fall through to full search.
+            return None, False
+
+        company_number = str(items[0].get("companyNumber") or "").strip() or None
+        if company_number and company_number in fetched:
+            return company_number, True  # already fully fetched — skip
+
+        return company_number, False
 
     # ------------------------------------------------------------------
     # Search + pagination
