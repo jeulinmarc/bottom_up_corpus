@@ -16,6 +16,11 @@ dependencies = [
     "python-dateutil>=2.9",
 ]
 
+[project.optional-dependencies]
+# The Belgium (FSMA STORI) backend needs a browser-impersonating HTTP client to
+# clear the FSMA F5 WAF. Imported lazily; only required to run the BE backend.
+be = ["curl_cffi>=0.7"]
+
 [project.scripts]
 bottom_up_corpus = "bottom_up_corpus.cli:main"
 
