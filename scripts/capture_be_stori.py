@@ -1,52 +1,58 @@
 #!/usr/bin/env python3
-"""Capture real STORI (Belgium / FSMA) responses — run from a NON-datacenter network.
+"""Capture real FSMA / STORI (Belgium) responses — run from a NON-datacenter network.
 
 WHY THIS EXISTS
 ---------------
-STORI's authoritative site, https://stori.fsma.be, sits behind a WAF that RESETS
-HTTP requests coming from datacenter / cloud / VPN egress IPs (the connection is
-reset the moment the request is sent — verified: the TLS handshake itself succeeds,
-even a Chrome-impersonated client is reset, and we egress from a non-Belgian
-datacenter range). It is NOT geo-blocked and NOT a TLS-fingerprint block — it is
-source-IP reputation. A normal residential/office browser (e.g. Marc's machine in
-France) reaches it fine; our build/CI sandbox cannot.
+The FSMA's filing infrastructure sits behind an **F5 BIG-IP ASM WAF** that blocks
+automated/non-browser HTTP clients. Two hosts matter:
 
-So this one script does the recon-first capture that the assistant normally does
-itself, from the one network path that works: YOURS. Run it once; it writes real
-fixtures into tests/fixtures/eu/ and prints a structured summary. With those, the
-BE STORI backend can be built and validated against REAL current responses (no
-guessing against a 4-year-old archive).
+  * stori.fsma.be       — the classic STORI search app (ASP.NET WebForms). The WAF
+                          RESETS the connection for non-browser clients.
+  * webapi.fsma.be      — a MODERN JSON API (Swagger-documented) that the FSMA's Vue
+                          tools call (drupal setting `vueToolsApi`). The WAF returns
+                          an F5 "Error Page … support ID: …" for non-browser clients.
 
-The WAF rejects the *client fingerprint* (TLS/JA3 + HTTP2), not only the IP — even
-plain python-`requests` from a residential network is reset. So this script uses
-`curl_cffi` to impersonate a real Chrome/Safari/Edge fingerprint, which a normal
-browser presents (and which the WAF allows from a clean IP). Install it first:
+Verified: the bare TLS handshake succeeds, but any HTTP request from curl /
+python-`requests` — and even `curl_cffi` impersonating Chrome — is blocked **from a
+datacenter/CI IP**. It is the client fingerprint *and* source-IP reputation together.
+A normal residential/office browser passes. So this script must be run from YOUR
+machine, and it impersonates a real Chrome fingerprint (curl_cffi) to satisfy the WAF.
 
+WHAT IT DOES (in priority order)
+  1. Pull the webapi.fsma.be OpenAPI spec (/swagger/v1/swagger.json). If this works it
+     is the JACKPOT — it documents every STORI endpoint and the backend becomes a clean
+     JSON-API client (like the UK NSM), no scraping.
+  2. From the spec, probe a STORI search/issuer/document endpoint and save a sample.
+  3. Fallback: capture the classic stori.fsma.be WebForms search + a result page.
+Everything reachable is saved under tests/fixtures/eu/ and summarised on stdout.
+
+SETUP
     pip install curl_cffi
-
-USAGE
------
+RUN
     python scripts/capture_be_stori.py
-    # optionally point it at a specific issuer / ISIN:
-    python scripts/capture_be_stori.py --company "Anheuser-Busch InBev" --isin BE0974293251
+Then commit the new tests/fixtures/eu/be_* files (or paste the printed summary back).
 
-It only READS public pages (a search + one document). Then commit the new
-tests/fixtures/eu/be_stori_*.* files (or paste the printed summary back).
-
-If EVERY impersonation profile is still reset: confirm STORI loads in your normal
-browser first (it's a public site). If the browser works but this script can't, the
-last resort is a headless real browser (Playwright) — tell the assistant and it will
-switch the capture to that.
+If every request shows "F5-WAF-BLOCK": confirm https://www.fsma.be/fr/stori and the
+STORI search load in your normal browser. If they do but this can't, open the browser
+DevTools → Network tab, run a STORI search, and paste the request URL(s) that hit
+webapi.fsma.be — that is all the assistant needs.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import sys
 
-# Prefer curl_cffi (browser TLS/JA3 + HTTP2 impersonation); fall back to requests.
+FIX = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "eu"
+WEBAPI = "https://webapi.fsma.be"
+STORI = "https://stori.fsma.be"
+SWAGGER_SPEC = WEBAPI + "/swagger/v1/swagger.json"
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _IMPERSONATE = ["chrome124", "chrome120", "chrome", "safari17_0", "edge122"]
+
 try:
     from curl_cffi import requests as _curl
     _HAVE_CURL = True
@@ -57,71 +63,72 @@ try:
 except ImportError:  # pragma: no cover
     _plain = None
 
-if not _HAVE_CURL and _plain is None:
-    sys.exit("Install curl_cffi (recommended) or requests: pip install curl_cffi")
+
+def _is_f5_block(text: str) -> bool:
+    return ("support ID" in text or "Error Page" in text or "Website error" in text)
+
+
+def _save(name: str, content) -> pathlib.Path:
+    FIX.mkdir(parents=True, exist_ok=True)
+    p = FIX / name
+    if isinstance(content, bytes):
+        p.write_bytes(content)
+    else:
+        p.write_text(content, encoding="utf-8")
+    return p
 
 
 def _open_session():
-    """Return (session, label) for whichever client can reach STORI's WAF.
-
-    Tries each Chrome/Safari/Edge impersonation profile, then plain requests.
-    Returns (None, None) if every strategy is reset.
-    """
+    """Return (session, label) for whichever client clears the F5 WAF, else (None,None)."""
     if _HAVE_CURL:
         for imp in _IMPERSONATE:
             try:
-                sess = _curl.Session(impersonate=imp, timeout=30)
-                sess.headers.update({"Accept-Language": "en,fr,nl"})
-                r = sess.get(BASE + "/", timeout=30)
-                if r.status_code < 500:
-                    print(f"  ✓ reached STORI via curl_cffi impersonate={imp} (HTTP {r.status_code})")
-                    return sess, f"curl_cffi:{imp}"
+                s = _curl.Session(impersonate=imp, timeout=30)
+                s.headers.update({"Accept-Language": "en,fr,nl"})
+                r = s.get(WEBAPI + "/swagger/index.html", timeout=30)
+                if r.status_code < 500 and not _is_f5_block(r.text):
+                    print(f"  ✓ WAF cleared via curl_cffi impersonate={imp}")
+                    return s, f"curl_cffi:{imp}"
+                print(f"  · curl_cffi {imp}: reachable but F5-WAF-BLOCK")
             except Exception as exc:
-                print(f"  · curl_cffi {imp}: {type(exc).__name__} — {str(exc)[:60]}")
+                print(f"  · curl_cffi {imp}: {type(exc).__name__} — {str(exc)[:55]}")
     if _plain is not None:
         try:
-            sess = _plain.Session()
-            sess.headers.update({"User-Agent": UA, "Accept-Language": "en,fr,nl"})
-            r = sess.get(BASE + "/", timeout=30)
-            print(f"  ✓ reached STORI via plain requests (HTTP {r.status_code})")
-            return sess, "requests"
+            s = _plain.Session()
+            s.headers.update({"User-Agent": UA, "Accept-Language": "en,fr,nl"})
+            r = s.get(WEBAPI + "/swagger/index.html", timeout=30)
+            if not _is_f5_block(r.text):
+                print("  ✓ WAF cleared via plain requests")
+                return s, "requests"
+            print("  · plain requests: F5-WAF-BLOCK")
         except Exception as exc:
-            print(f"  · plain requests: {type(exc).__name__} — {str(exc)[:60]}")
+            print(f"  · plain requests: {type(exc).__name__} — {str(exc)[:55]}")
     return None, None
-
-BASE = "https://stori.fsma.be"
-FIX = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "eu"
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
-_HIDDEN = re.compile(r'<input[^>]*type="hidden"[^>]*>', re.I)
-_NAME = re.compile(r'name="([^"]+)"')
-_VALUE = re.compile(r'value="([^"]*)"')
 
 
 def _hidden_fields(html: str) -> dict[str, str]:
-    """All ASP.NET hidden inputs (__VIEWSTATE, __EVENTVALIDATION, ...)."""
-    out: dict[str, str] = {}
-    for tag in _HIDDEN.findall(html):
-        n, v = _NAME.search(tag), _VALUE.search(tag)
+    out = {}
+    for tag in re.findall(r'<input[^>]*type="hidden"[^>]*>', html, re.I):
+        n = re.search(r'name="([^"]+)"', tag)
+        v = re.search(r'value="([^"]*)"', tag)
         if n:
             out[n.group(1)] = v.group(1) if v else ""
     return out
-
-
-def _form_action(html: str) -> str:
-    m = re.search(r'<form[^>]+action="([^"]+)"', html, re.I)
-    if not m:
-        return "/Search.aspx"
-    action = m.group(1).lstrip(".")
-    return action if action.startswith("/") else "/" + action
 
 
 def _named_inputs(html: str) -> list[str]:
     return sorted({n for n in re.findall(r'<(?:input|select|textarea)[^>]*name="([^"]+)"', html, re.I)})
 
 
-def _find(names: list[str], *needles: str) -> str | None:
+def _form_action(html: str) -> str:
+    m = re.search(r'<form[^>]+action="([^"]+)"', html, re.I)
+    if not m:
+        return "/Search.aspx"
+    a = m.group(1).lstrip(".")
+    return a if a.startswith("/") else "/" + a
+
+
+def _find(names, *needles):
     for n in names:
         low = n.lower()
         if all(x in low for x in needles):
@@ -129,104 +136,114 @@ def _find(names: list[str], *needles: str) -> str | None:
     return None
 
 
-def _save(name: str, content: bytes | str) -> pathlib.Path:
-    FIX.mkdir(parents=True, exist_ok=True)
-    p = FIX / name
-    mode = "wb" if isinstance(content, bytes) else "w"
-    with open(p, mode, encoding=None if isinstance(content, bytes) else "utf-8") as fh:
-        fh.write(content)
-    return p
+def _capture_webapi(s) -> bool:
+    """Try the modern JSON API. Returns True if the OpenAPI spec was captured."""
+    print(f"\n[A] webapi.fsma.be JSON API — fetch OpenAPI spec\n    GET {SWAGGER_SPEC}")
+    try:
+        r = s.get(SWAGGER_SPEC, timeout=40)
+    except Exception as exc:
+        print(f"  ✗ {type(exc).__name__}: {exc}")
+        return False
+    if _is_f5_block(r.text) or r.text.lstrip()[:1] not in "{[":
+        print("  ✗ F5-WAF-BLOCK / not JSON — the spec is gated for this client.")
+        return False
+    sp = _save("be_webapi_swagger.json", r.text)
+    print(f"  ✓ JACKPOT — OpenAPI spec captured → {sp}")
+    try:
+        spec = json.loads(r.text)
+    except Exception:
+        return True
+    paths = spec.get("paths", {})
+    print(f"  API title: {spec.get('info', {}).get('title')} | {len(paths)} paths")
+    relevant = [p for p in sorted(paths)
+                if re.search(r"stori|document|issuer|compan|regulated|search|file|emit|filing", p, re.I)]
+    print("  STORI-relevant endpoints:")
+    for p in relevant[:40]:
+        methods = ",".join(m.upper() for m in paths[p] if m in ("get", "post", "put"))
+        print(f"    {methods:8} {p}")
+    # Try a couple of GET endpoints that need no params, to capture a sample shape.
+    for p in relevant:
+        ops = paths[p]
+        if "get" in ops and "{" not in p:
+            url = WEBAPI + p
+            try:
+                rr = s.get(url, timeout=30)
+                if not _is_f5_block(rr.text):
+                    fn = "be_webapi_sample_" + re.sub(r"[^a-z0-9]+", "-", p.lower()).strip("-")[:40] + ".json"
+                    _save(fn, rr.text)
+                    print(f"    sample {p} -> {rr.status_code} saved {fn} ({len(rr.text)}b)")
+                    break
+            except Exception:
+                pass
+    return True
+
+
+def _capture_stori_webforms(s, company: str, isin: str) -> None:
+    """Fallback: the classic stori.fsma.be ASP.NET WebForms search."""
+    print(f"\n[B] stori.fsma.be WebForms fallback\n    GET {STORI}/")
+    try:
+        r = s.get(STORI + "/", timeout=30)
+    except Exception as exc:
+        print(f"  ✗ {type(exc).__name__}: {exc}")
+        return
+    if _is_f5_block(r.text):
+        print("  ✗ F5-WAF-BLOCK on stori.fsma.be too.")
+        return
+    form = r.text
+    _save("be_stori_search.html", form)
+    action, names, hidden = _form_action(form), _named_inputs(form), _hidden_fields(form)
+    company_field = _find(names, "company", "text") or _find(names, "companyname")
+    isin_field = _find(names, "isin")
+    button = _find(names, "search", "button") or _find(names, "btnsearch") or _find(names, "searchbutton")
+    print(f"  form={action} company={company_field} isin={isin_field} button={button}")
+    body = dict(hidden)
+    if isin_field and isin:
+        body[isin_field] = isin
+    elif company_field:
+        body[company_field] = company
+    if button:
+        body[button] = "Search"
+    try:
+        rr = s.post(STORI + action, data=body, timeout=40)
+        _save("be_stori_result.html", rr.text)
+        links = sorted(set(re.findall(
+            r'(?:href|src)="([^"]*(?:ViewDocument|Document|Download|\.pdf|\.zip)[^"]*)"', rr.text, re.I)))
+        print(f"  result saved ({len(rr.text)}b); {len(links)} document links")
+        for d in links[:8]:
+            print(f"    {d[:110]}")
+    except Exception as exc:
+        print(f"  ✗ search POST failed: {exc}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--company", default="Anheuser-Busch InBev",
-                    help="issuer name to search (CompanyName field)")
-    ap.add_argument("--isin", default="", help="optional ISIN to search instead/as well")
+    ap.add_argument("--company", default="Anheuser-Busch InBev")
+    ap.add_argument("--isin", default="BE0974293251")
     args = ap.parse_args()
 
-    print(f"[1/4] GET {BASE}/ (reachability + search form)")
     if not _HAVE_CURL:
-        print("  ! curl_cffi not installed — only plain requests available, which the\n"
-              "    STORI WAF rejects by fingerprint. Strongly recommend: pip install curl_cffi")
+        print("! curl_cffi not installed — the WAF blocks plain requests by fingerprint.")
+        print("  Run:  pip install curl_cffi   then re-run this script.\n")
+
+    print("[0] open a WAF-clearing session")
     s, via = _open_session()
     if s is None:
-        print("  ✗ every client was reset by STORI's WAF.\n"
-              "  → 1) pip install curl_cffi  and re-run (impersonates a real browser).\n"
-              "    2) confirm https://stori.fsma.be loads in your normal browser.\n"
-              "    3) if the browser works but this can't, we'll switch to Playwright.")
+        print("\n✗ Every client was blocked by the F5 WAF from this machine.")
+        print("  1) pip install curl_cffi  and re-run (real browser fingerprint).")
+        print("  2) confirm https://www.fsma.be/fr/stori opens in your browser.")
+        print("  3) if the browser works: DevTools → Network → run a STORI search →")
+        print("     paste the webapi.fsma.be request URL(s). That's all I need.")
         return 2
-    r = s.get(BASE + "/", timeout=30)
-    form_html = r.text
-    sp = _save("be_stori_search.html", form_html)
-    print(f"  ✓ {r.status_code}, {len(form_html)} bytes  → {sp}")
+    print(f"  session: {via}")
 
-    action = _form_action(form_html)
-    names = _named_inputs(form_html)
-    hidden = _hidden_fields(form_html)
-    company_field = _find(names, "company", "text") or _find(names, "companyname")
-    isin_field = _find(names, "isin")
-    button = (_find(names, "search", "button") or _find(names, "btnsearch")
-              or _find(names, "searchbutton") or _find(names, "simplesearch", "button"))
-    print(f"  form action : {action}")
-    print(f"  hidden fields: {', '.join(k for k in hidden if k.startswith('__')) or '(none — not WebForms?)'}")
-    print(f"  company field: {company_field or '??'}")
-    print(f"  isin field   : {isin_field or '??'}")
-    print(f"  search button: {button or '??  (inspect the printed field list)'}")
-    print(f"  all named fields ({len(names)}): {names}")
+    got_spec = _capture_webapi(s)
+    if not got_spec:
+        _capture_stori_webforms(s, args.company, args.isin)
 
-    print(f"\n[2/4] POST search  company={args.company!r} isin={args.isin!r}")
-    body = dict(hidden)
-    if company_field and not args.isin:
-        body[company_field] = args.company
-    if isin_field and args.isin:
-        body[isin_field] = args.isin
-    if button:
-        body[button] = "Search"
-    try:
-        rr = s.post(BASE + action, data=body, timeout=40)
-        rp = _save("be_stori_result.html", rr.text)
-        print(f"  ✓ {rr.status_code}, {len(rr.text)} bytes  → {rp}")
-        result_html = rr.text
-    except Exception as exc:
-        print(f"  ✗ search POST failed: {exc}")
-        return 3
-
-    print("\n[3/4] inspect result rows / document links")
-    # Heuristics — print whatever document/download links the result page exposes so
-    # the backend parser can be written against the REAL structure.
-    doc_links = sorted(set(re.findall(
-        r'(?:href|src)="([^"]*(?:ViewDocument|Document|Download|GetFile|View\.aspx|\.pdf|\.zip)[^"]*)"',
-        result_html, re.I)))
-    postbacks = sorted(set(re.findall(r"__doPostBack\('([^']+)'", result_html)))[:8]
-    grids = re.findall(r'id="([^"]*(?:Grid|Result|Repeater|gv|DataList)[^"]*)"', result_html)[:6]
-    print(f"  document/download links ({len(doc_links)}):")
-    for d in doc_links[:12]:
-        print(f"    {d[:120]}")
-    print(f"  result-grid ids: {grids}")
-    print(f"  sample __doPostBack targets: {postbacks}")
-
-    print("\n[4/4] try to fetch ONE document (first direct link, if any)")
-    direct = next((d for d in doc_links if d.lower().endswith((".pdf", ".zip"))
-                   or "viewdocument" in d.lower() or "download" in d.lower()), None)
-    if direct:
-        url = direct if direct.startswith("http") else BASE + "/" + direct.lstrip("/")
-        try:
-            dr = s.get(url, timeout=60)
-            ext = "zip" if dr.content[:2] == b"PK" else ("pdf" if dr.content[:4] == b"%PDF" else "bin")
-            dp = _save(f"be_stori_document.{ext}", dr.content)
-            print(f"  ✓ {dr.status_code} {dr.headers.get('content-type')} "
-                  f"{len(dr.content)} bytes magic={dr.content[:4]!r}  → {dp}")
-        except Exception as exc:
-            print(f"  ✗ document fetch failed: {exc}")
-    else:
-        print("  (no direct document link in the result HTML — it may be a postback;\n"
-              "   the saved be_stori_result.html still captures the structure.)")
-
-    print("\n────────────────────────────────────────────────────────────────")
-    print("DONE. Next: commit the new tests/fixtures/eu/be_stori_*.* files")
-    print("(or paste this summary back), and the BE backend can be built +")
-    print("validated against these REAL responses.")
+    print("\n────────────────────────────────────────────────────────────")
+    print("DONE. Commit the new tests/fixtures/eu/be_* files (or paste the")
+    print("summary above). With the OpenAPI spec or a real result page, the")
+    print("BE backend is one validated build cycle away.")
     return 0
 
 

@@ -7,32 +7,44 @@ residential/office network. One script (`scripts/capture_be_stori.py`), run once
 from such a network, captures the real responses needed to build and validate the
 backend.
 
-## Why it's blocked here (corrected diagnosis)
+## Why it's blocked here (diagnosis)
 
-Earlier this was loosely called "geo/bot-blocked". That was imprecise. The real
-picture, from direct testing:
+The FSMA's filing infrastructure sits behind an **F5 BIG-IP ASM WAF** that blocks
+automated/non-browser clients. Evidence from direct testing:
 
 | Test | Result |
 |---|---|
 | DNS + TCP `:443` to `stori.fsma.be` | ✅ open |
 | `http://stori.fsma.be` (port 80) | ✅ HTTP 302 → https |
 | **openssl TLS handshake** | ✅ completes, valid `*.fsma.be` cert |
-| **openssl + an actual HTTP GET** | ✗ connection reset |
-| curl / python-`requests` | ✗ `Connection reset by peer` |
-| `curl_cffi` impersonating Chrome (real JA3) | ✗ reset |
+| **openssl / curl / `requests` + an HTTP GET** to `stori.fsma.be` | ✗ `Connection reset by peer` |
+| `curl_cffi` impersonating Chrome (real JA3) from our IP | ✗ reset |
+| `webapi.fsma.be/...` (the JSON API) for any non-browser client | ✗ **F5 "Error Page … support ID:"** block |
+| Marc's residential machine + python-`requests` | ✗ also reset |
 | Our egress IP geo | 🇫🇷 France (so **not** geo-blocked) |
-| `www.fsma.be` (same org) | ✅ reachable |
+| `www.fsma.be` info pages | ✅ reachable |
 
-So: **not** geo, **not** a broken TLS handshake, **not** TLS-fingerprint (JA3)
-filtering. The connection is reset the moment an HTTP request is sent, for every
-automated client, while a bare TLS handshake succeeds — the signature of a WAF
-dropping requests from **datacenter/VPN/cloud egress IPs**. Our sandbox egresses
-from such a range; a residential browser does not. No client-side trick fixes this
-from here — it's the source IP.
+So it is **not** geo, **not** a broken TLS handshake. The F5 WAF fingerprints the
+client (TLS/JA3 + HTTP behaviour) **and** scores source-IP reputation: `stori.fsma.be`
+resets the connection, `webapi.fsma.be` returns the F5 ASM block page ("support ID").
+Plain `requests` is blocked even from Marc's clean residential IP (wrong fingerprint);
+a **real browser fingerprint from a clean IP** is what passes — which is why the
+capture script uses `curl_cffi` (Chrome impersonation) and must run from a normal
+network, not CI.
 
 No reachable substitute exists: `filings.xbrl.org` carries only ~1/10 BE blue chips
 (only KBC of AB InBev/Ageas/UCB/Solvay/Umicore/Proximus/Sofina/GBL/Colruyt), and
 `www.fsma.be` issuer pages are profiles, not the filings archive.
+
+### Better target than the old WebForms site: the JSON API
+
+The current FSMA site (`www.fsma.be`) drives its data tools from a **Vue app calling
+`https://webapi.fsma.be`** (the drupal setting `vueToolsApi`), which exposes a
+**Swagger/OpenAPI** surface (`/swagger/index.html`, spec at `/swagger/v1/swagger.json`).
+If a browser-fingerprinted request from a clean IP clears the WAF, this is a clean
+JSON API — a far better backend than scraping the legacy `stori.fsma.be` WebForms app
+(like the UK FCA NSM). The capture script targets this **first**; the OpenAPI spec
+alone documents every STORI endpoint. The WebForms path is kept only as a fallback.
 
 ## What's confirmed about STORI (from web.archive.org, 2021 snapshot)
 
