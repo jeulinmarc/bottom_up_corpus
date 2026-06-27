@@ -21,7 +21,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime, timezone
-from urllib.parse import urlencode
 
 from ..documents import Document
 from ..entities import Entity
@@ -144,7 +143,7 @@ class OamSE(OamSource):
         vsg = _scrape_hidden(search_html, '__VIEWSTATEGENERATOR')
 
         # 2. POST the name search.
-        post_body = urlencode({
+        post_body = {
             '__VIEWSTATE': vs,
             '__VIEWSTATEGENERATOR': vsg,
             '__EVENTVALIDATION': ev,
@@ -158,7 +157,7 @@ class OamSE(OamSource):
             'ctl00$main$txtOrganizationNumber': '',
             'ctl00$main$txtOrganizationShortName': '',
             _BTN_SEARCH: _BTN_VALUE,
-        })
+        }
         try:
             profile_html = self.fetcher.post_text(_SEARCH_URL, post_body)
         except Exception as exc:  # noqa: BLE001
@@ -233,14 +232,14 @@ class OamSE(OamSource):
                 )
                 break
 
-            page_data = urlencode({
+            page_data = {
                 '__VIEWSTATE': _scrape_hidden(current_html, '__VIEWSTATE'),
                 '__VIEWSTATEGENERATOR': _scrape_hidden(current_html, '__VIEWSTATEGENERATOR'),
                 '__EVENTVALIDATION': _scrape_hidden(current_html, '__EVENTVALIDATION'),
                 '__VIEWSTATEENCRYPTED': _scrape_hidden(current_html, '__VIEWSTATEENCRYPTED'),
                 '__EVENTTARGET': f'ctl00$main${grid_suffix}',
                 '__EVENTARGUMENT': 'Page$Next',
-            })
+            }
             try:
                 current_html = self.fetcher.post_text(_VIEWCOMPANY_URL, page_data)
             except Exception as exc:  # noqa: BLE001
