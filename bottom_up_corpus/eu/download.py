@@ -30,12 +30,27 @@ def download_document(doc: Document, *, fetcher, config: Config) -> dict:
 
     files_out = []
     for f in doc.files:
-        dest = base / (f.get("name") or f["url"].rsplit("/", 1)[-1])
+        if f.get("content") is None and not f.get("url"):
+            # Index-only file: nothing to fetch and no stable URL to retry (e.g. a DE
+            # capture-at-discovery that failed — re-fetching its session-bound link
+            # later would persist a stale page). Record it without downloading.
+            files_out.append({k: v for k, v in f.items() if k != "content"})
+            continue
+        dest = base / (f.get("name") or (f.get("url") or "file").rsplit("/", 1)[-1])
         try:
             if not dest.exists():
                 tmp = dest.with_name(dest.name + ".part")
                 try:
-                    fetcher.download(f["url"], tmp)
+                    # Backends whose source has no stable, re-fetchable URL (e.g. the
+                    # Bundesanzeiger's session-bound Wicket links) capture the bytes at
+                    # discovery time and pass them inline via "content"; write those
+                    # directly instead of re-fetching.
+                    content = f.get("content")
+                    if content is not None:
+                        tmp.write_bytes(content.encode("utf-8")
+                                        if isinstance(content, str) else content)
+                    else:
+                        fetcher.download(f["url"], tmp)
                     os.replace(tmp, dest)
                 except Exception:
                     try:
@@ -45,9 +60,10 @@ def download_document(doc: Document, *, fetcher, config: Config) -> dict:
                     raise
             sha = _sha256_file(dest)
         except Exception as exc:  # noqa: BLE001
-            files_out.append({**f, "error": str(exc)})
+            files_out.append({k: v for k, v in f.items() if k != "content"}
+                             | {"error": str(exc)})
             continue
-        files_out.append({"name": dest.name, "url": f["url"], "kind": f.get("kind"),
+        files_out.append({"name": dest.name, "url": f.get("url"), "kind": f.get("kind"),
                           "sha256": sha, "path": str(dest.relative_to(config.data_dir))})
 
     manifest = {

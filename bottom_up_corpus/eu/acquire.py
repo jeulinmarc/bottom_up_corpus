@@ -14,12 +14,20 @@ from .download import download_document
 from .entities import Entity, resolve_entities
 from .reconcile import reconcile
 from .sources.filings_org import FilingsXbrlOrg
+from .sources.oam_de import BundesanzeigerDE
+from .sources.oam_es import CnmvES
 from .sources.oam_fr import InfoFinanciereFR
+from .sources.oam_it import OneInfoIT
 
-# Increment A backend (ES/DE/IT join here in Increment B, no other change needed).
-# Entities whose country has no backend resolve but discover 0 docs -> the coverage
-# report flags them as "no-documents" (deliberate: never silently partial).
-COUNTRY_BACKENDS = {"FR": InfoFinanciereFR}
+# Increment A+B backends. Entities whose country has no backend resolve but discover
+# 0 docs -> the coverage report flags them as "no-documents" (deliberate: never
+# silently partial).
+COUNTRY_BACKENDS = {
+    "DE": BundesanzeigerDE,
+    "ES": CnmvES,
+    "FR": InfoFinanciereFR,
+    "IT": OneInfoIT,
+}
 
 
 def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
