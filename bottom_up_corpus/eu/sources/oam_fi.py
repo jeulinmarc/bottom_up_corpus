@@ -2,8 +2,7 @@
 
 Flow per entity:
 1. **Bootstrap (once per instance):** GET https://oam.fi/ → scrape CSRF token
-   (<meta name="_csrf" content="…">), the embedded company list (name→integer OAM id),
-   and the category list (label→integer id).
+   (<meta name="_csrf" content="…">) and the embedded company list (name→integer OAM id).
 2. **Resolve name → OAM company id:** exact normalised match against the company list
    (collapse whitespace, casefold, strip diacritics + trailing legal suffixes OYJ/OY/ABP/PLC).
    Strict: 0 or >1 matches → _record_error + return [].
@@ -53,12 +52,6 @@ _CSRF_RE = re.compile(r'<meta[^>]+name="_csrf"[^>]+content="([^"]+)"', re.I)
 # We extract the full tag first, then pull the options attribute value out.
 _COMPANY_SELECT_TAG_RE = re.compile(
     r'<nef-form-select\b[^>]*\bid="company-select"[^>]*>',
-    re.S | re.I,
-)
-
-# Category select: same approach with id="category-select".
-_CATEGORY_SELECT_TAG_RE = re.compile(
-    r'<nef-form-select\b[^>]*\bid="category-select"[^>]*>',
     re.S | re.I,
 )
 
@@ -126,7 +119,7 @@ _DATE_STRIP_TZ_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}(?:\s+\
 # Maps category label substrings (casefolded) → DOC_TYPES member.
 # Order is significant — first match wins. Labels are ENGLISH (from search results).
 _LABEL_TO_DOC_TYPE: list[tuple[tuple[str, ...], str]] = [
-    (("annual financial report", "annual"), "annual_report"),
+    (("annual financial report", "annual report"), "annual_report"),
     (("half year",), "half_year_report"),
     (("interim report", "financial statement release"), "interim_statement"),
     (("inside information",), "inside_information"),
@@ -206,7 +199,7 @@ def _parse_options_json(tag_html: str) -> dict[str, int]:
 class OamFI(OamSource):
     """Finland OAM backend — scrapes Nasdaq Helsinki's oam.fi.
 
-    Bootstrap GET oam.fi/ once per instance to get CSRF + company list + categories.
+    Bootstrap GET oam.fi/ once per instance to get CSRF + company list.
     Resolves entity name → OAM integer company id (exact normalised match).
     Paginates POST / search (1-indexed pages) → hops /view/{view_id} → emits Documents
     with viewAttachment.action file URLs.
@@ -217,8 +210,8 @@ class OamFI(OamSource):
 
     def __init__(self, fetcher=None, config=None):
         super().__init__(fetcher=fetcher, config=config)
-        # Cached bootstrap tuple: (csrf, company_map, categories)
-        self._bootstrap_cache: tuple[str, dict[str, int], dict[str, int]] | None = None
+        # Cached bootstrap tuple: (csrf, company_map)
+        self._bootstrap_cache: tuple[str, dict[str, int]] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -229,7 +222,7 @@ class OamFI(OamSource):
         result = self._bootstrap()
         if result is None:
             return []
-        _, company_map, _ = result
+        _, company_map = result
         return [
             IssuerRef(lei=None, name=name, country="FI", native_id=str(cid))
             for name, cid in company_map.items()
@@ -242,7 +235,7 @@ class OamFI(OamSource):
         bootstrap = self._bootstrap()
         if bootstrap is None:
             return []
-        csrf, company_map, _categories = bootstrap
+        csrf, company_map = bootstrap
 
         company_id = self._resolve_company_id(entity, company_map)
         if company_id is None:
@@ -255,8 +248,8 @@ class OamFI(OamSource):
     # Bootstrap
     # ------------------------------------------------------------------
 
-    def _bootstrap(self) -> tuple[str, dict[str, int], dict[str, int]] | None:
-        """GET oam.fi/ → (csrf, company_map, category_map). Cached after first call."""
+    def _bootstrap(self) -> tuple[str, dict[str, int]] | None:
+        """GET oam.fi/ → (csrf, company_map). Cached after first call."""
         if self._bootstrap_cache is not None:
             return self._bootstrap_cache
 
@@ -289,14 +282,7 @@ class OamFI(OamSource):
             )
             return None
 
-        # Parse category list from nef-form-select#category-select options attribute
-        category_tag_m = _CATEGORY_SELECT_TAG_RE.search(page_html)
-        if category_tag_m:
-            category_map = _parse_options_json(category_tag_m.group(0))
-        else:
-            category_map = {}
-
-        self._bootstrap_cache = (csrf, company_map, category_map)
+        self._bootstrap_cache = (csrf, company_map)
         return self._bootstrap_cache
 
     # ------------------------------------------------------------------
