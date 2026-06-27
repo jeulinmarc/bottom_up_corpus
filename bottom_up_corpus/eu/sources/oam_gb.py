@@ -156,6 +156,18 @@ class NsmGB(OamSource):
                 download_link = src.get("download_link") or ""
                 if not download_link:
                     continue
+                # Defence in depth: download_link is a server-issued relative NSM path
+                # (e.g. "NSM/RNS/<uuid>.html"). Reject anything that could escape the
+                # artefacts base — an absolute URL, a scheme, or a parent-dir traversal —
+                # so the built URL can never point off-host.
+                if (
+                    "://" in download_link
+                    or download_link.startswith("/")
+                    or ".." in download_link
+                ):
+                    self._record_error("download-link", download_link,
+                                       RuntimeError("unexpected/unsafe download_link; skipped"))
+                    continue
 
                 disclosure_id = src.get("disclosure_id") or src.get("seq_id") or ""
                 doc_id = f"gb-{disclosure_id}" if disclosure_id else f"gb-{from_offset}-{len(docs)}"

@@ -243,3 +243,41 @@ def test_search_error_is_recorded():
 
     assert docs == []
     assert any(e["context"] == "search" for e in src.errors)
+
+
+def test_unsafe_download_link_is_skipped_and_recorded():
+    """A download_link that could escape the artefacts base (scheme / leading slash /
+    parent traversal) is skipped and recorded — never turned into an off-host URL."""
+
+    class _BadLinkStub:
+        def __init__(self):
+            self.calls = 0
+
+        def post_json(self, url, body, **_):
+            self.calls += 1
+            if self.calls == 1:
+                hits = [{"_source": {"disclosure_id": f"id-{i}", "type": "Other",
+                                     "publication_date": "2025-01-01T00:00:00Z",
+                                     "download_link": link, "tag_esef": "", "source": "RNS",
+                                     "headline": "H", "isin": "", "company": "X"}}
+                        for i, link in enumerate([
+                            "https://evil.example/x.html",   # scheme
+                            "/etc/passwd",                   # absolute
+                            "NSM/../../secret.html",         # traversal
+                            "NSM/RNS/good.html",             # the only valid one
+                        ])]
+                return {"hits": {"total": {"value": 4}, "hits": hits}}
+            return {"hits": {"total": {"value": 4}, "hits": []}}
+
+    stub = _BadLinkStub()
+    src = NsmGB(fetcher=stub)
+    docs = src.discover(Entity(lei="TESTLEI", name="X", country="GB"))
+    assert len(docs) == 1, "only the safe relative link survives"
+    assert docs[0].files[0]["url"] == "https://data.fca.org.uk/artefacts/NSM/RNS/good.html"
+    assert all(d.files[0]["url"].startswith("https://data.fca.org.uk/artefacts/") for d in docs)
+    assert sum(e["context"] == "download-link" for e in src.errors) == 3
+
+
+def test_doc_type_empty_or_none_is_other():
+    assert _doc_type("") == "other"
+    assert _doc_type(None) == "other"
