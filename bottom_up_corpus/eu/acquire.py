@@ -16,6 +16,7 @@ from .reconcile import reconcile
 from .sources.filings_org import FilingsXbrlOrg
 from .sources.oam_be import StoriBE
 from .sources.oam_de import BundesanzeigerDE
+from .sources.oam_dk import OamDK
 from .sources.oam_es import CnmvES
 from .sources.oam_fr import InfoFinanciereFR
 from .sources.oam_gb import NsmGB
@@ -28,6 +29,7 @@ from .sources.oam_nl import AfmNL
 COUNTRY_BACKENDS = {
     "BE": StoriBE,
     "DE": BundesanzeigerDE,
+    "DK": OamDK,
     "ES": CnmvES,
     "FR": InfoFinanciereFR,
     "GB": NsmGB,
