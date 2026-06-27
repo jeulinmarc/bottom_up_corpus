@@ -58,9 +58,42 @@ def test_unresolvable_is_recorded_not_guessed():
 
 
 def test_resolve_by_isin_uses_gleif_isin_filter():
-    f = _Fetcher({"filter%5Bisin%5D": (FIX / "gleif_isin_sap.json").read_text()})
+    f = _Fetcher({"filter%5Bisin%5D": (FIX / "gleif_isin_sap.json").read_text(),
+                  "/isins": json.dumps({"data": []})})
     [e] = resolve_entities([{"isin": "DE0007164600"}], fetcher=f)
     assert e.lei == "529900D6BF99LW9R2E68"
     assert e.name == "SAP SE"
     assert e.country == "DE"
     assert e.resolution == "isin"
+    # The ISIN we resolved by is always carried (seed), even if GLEIF lists none extra.
+    assert "DE0007164600" in e.isins
+
+
+def test_resolve_by_lei_populates_isins_from_gleif():
+    # Route the LEI record AND the LEI->isins relationship (order matters: /isins first
+    # so it isn't shadowed by the broader lei-records/<lei> route).
+    f = _Fetcher({
+        "/isins": (FIX / "gleif_isins_abinbev.json").read_text(),
+        "lei-records/5493008H3828EMEXB082": (FIX / "gleif_lei_sap.json").read_text(),
+    })
+    [e] = resolve_entities([{"lei": "5493008H3828EMEXB082"}], fetcher=f)
+    assert len(e.isins) == 24, "all of the issuer's ISINs should be carried"
+    assert "BE0974293251" in e.isins, "the equity ISIN (STORI search key) must be present"
+
+
+def test_populate_isins_false_skips_the_extra_call():
+    f = _Fetcher({"lei-records/5493008H3828EMEXB082": (FIX / "gleif_lei_sap.json").read_text()})
+    [e] = resolve_entities([{"lei": "5493008H3828EMEXB082"}], fetcher=f, populate_isins=False)
+    assert e.isins == ()
+    assert not any("/isins" in c for c in f.calls), "no LEI->isins call when disabled"
+
+
+def test_isin_population_caps_the_count(monkeypatch):
+    import bottom_up_corpus.eu.entities as ent
+    monkeypatch.setattr(ent, "_ISIN_CAP", 5)
+    f = _Fetcher({
+        "/isins": (FIX / "gleif_isins_abinbev.json").read_text(),
+        "lei-records/X": (FIX / "gleif_lei_sap.json").read_text(),
+    })
+    [e] = resolve_entities([{"lei": "X"}], fetcher=f)
+    assert len(e.isins) == 5
