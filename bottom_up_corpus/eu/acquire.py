@@ -23,6 +23,7 @@ from .sources.oam_fr import InfoFinanciereFR
 from .sources.oam_gb import NsmGB
 from .sources.oam_it import OneInfoIT
 from .sources.oam_nl import AfmNL
+from .sources.oam_se import OamSE
 from .sources.oam_no import NewsWebNO
 
 # Increment A+B+C backends. Entities whose country has no backend resolve but discover
@@ -38,6 +39,7 @@ COUNTRY_BACKENDS = {
     "GB": NsmGB,
     "IT": OneInfoIT,
     "NL": AfmNL,
+    "SE": OamSE,
     "NO": NewsWebNO,
 }
 
