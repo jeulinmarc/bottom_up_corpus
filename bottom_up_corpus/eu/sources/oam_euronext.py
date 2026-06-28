@@ -47,10 +47,11 @@ EURONEXT_MICS: dict[str, str] = {
 
 _FEED_URL = "https://live.euronext.com/en/ajax/getNoticePublicData/"
 _DOWNLOAD_BASE = "https://live.euronext.com"
-# The public GET feed returns at most the 50 most-recent notices and ignores
-# page parameters (deeper history needs the Views-AJAX POST). An ISIN at the cap
-# is recorded as truncated so the limit is never silent.
-_PAGE_CAP = 50
+# The feed paginates via ``?pageSize=50&alias=1&pageNum=N`` (the pager's own
+# params — ``page``/``items_per_page`` are ignored, and ``pageSize`` is capped at
+# 50 server-side, so only ``pageNum`` advances). Page through to exhaustivity.
+_PAGE_SIZE = 50
+_MAX_PAGES = 200  # 10k notices/issuer — a backstop, recorded if ever hit.
 
 # ---------------------------------------------------------------------------
 # Row parsing
@@ -153,28 +154,37 @@ class EuronextSource(OamSource):
         seen: set[str] = set()
         docs: list[Document] = []
         for isin in isins:
-            url = f"{_FEED_URL}{isin}-{mic}"
-            try:
-                html = self.fetcher.get_text(url)
-            except Exception as exc:  # noqa: BLE001
-                self._record_error("notices", url, exc)
-                continue
-            rows = list(self._rows(html))
-            if len(rows) >= _PAGE_CAP:
-                self._record_error(
-                    "truncated",
-                    url,
-                    RuntimeError(
-                        f"{isin}-{mic}: returned the {_PAGE_CAP}-notice cap; "
-                        "older notices not fetched"
-                    ),
-                )
-            for notice_id, row in rows:
+            for notice_id, row in self._fetch_notices(isin, mic):
                 if notice_id in seen:
                     continue
                 seen.add(notice_id)
                 docs.append(self._to_document(notice_id, row, entity, mic, now))
         return docs
+
+    def _fetch_notices(self, isin: str, mic: str):
+        """Yield ``(notice_id, row_html)`` across all pages for one ``ISIN-MIC``.
+
+        Pages via the feed's own ``pageNum`` param until a short or empty page is
+        returned (the last page), recording truncation only if the page backstop
+        is hit (never a silent cut-off).
+        """
+        base = f"{_FEED_URL}{isin}-{mic}"
+        for page in range(1, _MAX_PAGES + 1):
+            url = f"{base}?pageSize={_PAGE_SIZE}&alias=1&pageNum={page}"
+            try:
+                html = self.fetcher.get_text(url)
+            except Exception as exc:  # noqa: BLE001
+                self._record_error("notices", url, exc)
+                return
+            rows = list(self._rows(html))
+            yield from rows
+            if len(rows) < _PAGE_SIZE:
+                return  # short/empty page = the last one
+        self._record_error(
+            "truncated",
+            base,
+            RuntimeError(f"{isin}-{mic}: hit the {_MAX_PAGES}-page cap; older notices not fetched"),
+        )
 
     # ------------------------------------------------------------------
     # Internals

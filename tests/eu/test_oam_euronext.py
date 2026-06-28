@@ -96,7 +96,11 @@ def test_attachment_becomes_a_file_else_index_only():
 def test_mic_resolved_from_country_and_query_path():
     f = _StubFetcher()
     EuronextSource(fetcher=f).discover(EDP)
-    assert f.urls == [f"https://live.euronext.com/en/ajax/getNoticePublicData/{_EDP_ISIN}-XLIS"]
+    # MIC XLIS resolved from country PT; paginated via the feed's own pageNum param.
+    assert f.urls[0] == (
+        f"https://live.euronext.com/en/ajax/getNoticePublicData/{_EDP_ISIN}-XLIS"
+        "?pageSize=50&alias=1&pageNum=1"
+    )
 
 
 def test_non_euronext_country_yields_nothing():
@@ -126,19 +130,40 @@ def test_dedup_by_notice_id_across_isins():
     assert len(docs) == 3  # not 6 — deduped by notice id
 
 
-def test_truncation_recorded_at_cap():
-    """An ISIN returning the 50-notice cap records a truncation error."""
-    rows = "".join(
+def _rows_html(start: int, n: int) -> str:
+    return "".join(
         f'<tr class="row_{i} "><td class="noticenumber">N{i}</td>'
-        f'<td class="noticedate">01 Jan 2026</td>'
-        f'<td class="noticename">CE - X</td></tr>'
-        for i in range(50)
+        f'<td class="noticedate priority-low">01 Jan 2026</td>'
+        f'<td class="noticename notice-abstract-load">CE - X</td></tr>'
+        for i in range(start, start + n)
     )
-    big = f'<table><tbody>{rows}</tbody></table>'
-    src = EuronextSource(fetcher=_StubFetcher(notices=big))
+
+
+class _PaginatingStub:
+    """Serves distinct pages by the ``pageNum`` query param (last page short)."""
+
+    def __init__(self, page_sizes):
+        self._sizes = page_sizes
+        self.pages_fetched: list[int] = []
+
+    def get_text(self, url, **_):
+        import re
+        pg = int(re.search(r"pageNum=(\d+)", url).group(1))
+        self.pages_fetched.append(pg)
+        if pg > len(self._sizes):
+            return "<table><tbody></tbody></table>"
+        start = sum(self._sizes[: pg - 1])
+        return f"<table><tbody>{_rows_html(start, self._sizes[pg - 1])}</tbody></table>"
+
+
+def test_paginates_all_pages_to_exhaustivity():
+    """A 50+40 history is fully fetched via pageNum, stopping on the short page."""
+    f = _PaginatingStub([50, 40])
+    src = EuronextSource(fetcher=f)
     docs = src.discover(EDP)
-    assert len(docs) == 50
-    assert any(e["context"] == "truncated" for e in src.errors)
+    assert len(docs) == 90               # both pages, no notice lost
+    assert f.pages_fetched == [1, 2]     # stops after the short (40<50) page
+    assert not src.errors                # exhaustive -> no truncation recorded
 
 
 def test_euronext_wired_as_complement_after_national():
