@@ -47,8 +47,8 @@ class FakeSession:
         self.calls = []
         self._i = 0
 
-    def get(self, url, stream=False, timeout=None):
-        self.calls.append({"url": url, "stream": stream, "timeout": timeout})
+    def get(self, url, stream=False, timeout=None, headers=None):
+        self.calls.append({"url": url, "stream": stream, "timeout": timeout, "headers": headers})
         resp = self.responses[min(self._i, len(self.responses) - 1)]
         self._i += 1
         return resp
@@ -279,3 +279,13 @@ def test_post_text_retries_on_429(cfg):
     f = Fetcher(cfg, session=sess)
     assert f.post_text("https://www.cnmv.es/x", {}) == "<html>done</html>"
     assert sess.calls == 2
+
+
+def test_get_json_forwards_per_request_headers(cfg):
+    """headers= must be merged into the single request, NOT the shared session
+    (so one backend's Accept-Language can't contaminate another's requests)."""
+    sess = FakeSession([FakeResponse(json_data={"ok": 1})])
+    f = Fetcher(cfg, session=sess)
+    f.get_json("https://x/y", headers={"Accept-Language": "en"})
+    assert sess.calls[0]["headers"] == {"Accept-Language": "en"}
+    assert "Accept-Language" not in sess.headers, "must not leak onto the session"

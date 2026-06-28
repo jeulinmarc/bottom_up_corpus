@@ -16,12 +16,15 @@ from .reconcile import reconcile
 from .sources.filings_org import FilingsXbrlOrg
 from .sources.oam_be import StoriBE
 from .sources.oam_de import BundesanzeigerDE
+from .sources.oam_dk import OamDK
 from .sources.oam_es import CnmvES
+from .sources.oam_fi import OamFI
 from .sources.oam_fr import InfoFinanciereFR
 from .sources.oam_gb import NsmGB
 from .sources.oam_it import OneInfoIT
 from .sources.oam_nl import AfmNL
 from .sources.oam_se import OamSE
+from .sources.oam_no import NewsWebNO
 
 # Increment A+B+C backends. Entities whose country has no backend resolve but discover
 # 0 docs -> the coverage report flags them as "no-documents" (deliberate: never
@@ -29,12 +32,15 @@ from .sources.oam_se import OamSE
 COUNTRY_BACKENDS = {
     "BE": StoriBE,
     "DE": BundesanzeigerDE,
+    "DK": OamDK,
     "ES": CnmvES,
+    "FI": OamFI,
     "FR": InfoFinanciereFR,
     "GB": NsmGB,
     "IT": OneInfoIT,
     "NL": AfmNL,
     "SE": OamSE,
+    "NO": NewsWebNO,
 }
 
 
