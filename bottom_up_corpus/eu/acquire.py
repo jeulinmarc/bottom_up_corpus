@@ -18,6 +18,7 @@ from .sources.oam_be import StoriBE
 from .sources.oam_de import BundesanzeigerDE
 from .sources.oam_dk import OamDK
 from .sources.oam_es import CnmvES
+from .sources.oam_fi import OamFI
 from .sources.oam_fr import InfoFinanciereFR
 from .sources.oam_gb import NsmGB
 from .sources.oam_it import OneInfoIT
@@ -32,6 +33,7 @@ COUNTRY_BACKENDS = {
     "DE": BundesanzeigerDE,
     "DK": OamDK,
     "ES": CnmvES,
+    "FI": OamFI,
     "FR": InfoFinanciereFR,
     "GB": NsmGB,
     "IT": OneInfoIT,
