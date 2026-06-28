@@ -55,6 +55,9 @@ _HIDDEN_TAG_RE = re.compile(r'<input\b([^>]*/?>)', re.I | re.S)
 _HIDDEN_VALUE_RE = re.compile(r'\bvalue="([^"]*)"', re.I)
 _HIDDEN_NAME_ATTR_RE = re.compile(r'\bname="([^"]*)"', re.I)
 _PROFILE_RE = re.compile(r'action="ViewCompany2\.aspx"', re.I)
+_COMPANY_NAME_RE = re.compile(
+    r'<span\b[^>]*\bid="ctl00_main_lblCompanyName"[^>]*>([^<]*)</span>', re.I
+)
 _TABLE_RE_TMPL = r'(<table\b[^>]*\bid="ctl00_main_{suffix}"[^>]*>.*?</table>)'
 _ROW_RE = re.compile(r'<tr\b[^>]*>.*?</tr>', re.S | re.I)
 _FID_RE = re.compile(r"<a\b[^>]*href='/search/GetFile\.aspx\?fid=(\d+)'[^>]*>([^<]*)</a>", re.I)
@@ -172,6 +175,27 @@ class OamSE(OamSource):
                 RuntimeError(
                     f'search for {entity.name!r} did not return a company profile page '
                     '(ViewCompany2.aspx form action not found)'
+                ),
+            )
+            return []
+
+        # 3b. No-guess identity: the search does a *substring* match and, when a
+        # single company matches, jumps straight to its profile — even if it is
+        # the wrong subsidiary (e.g. "Nordea" -> "Nordea Hypotek Aktiebolag").
+        # GLEIF hands us the full Swedish legal name (e.g. "ATLAS COPCO
+        # AKTIEBOLAG"), so require the profile's own name to be *equal* to the
+        # entity once both are suffix-stripped and normalised. Equality (not
+        # containment) is what rejects a prefix match to a different company.
+        name_m = _COMPANY_NAME_RE.search(profile_html)
+        profile_name = name_m.group(1).strip() if name_m else ''
+        want, got = _normalise(entity.name), _normalise(profile_name)
+        if not got or want != got:
+            self._record_error(
+                'name-mismatch',
+                _SEARCH_URL,
+                RuntimeError(
+                    f'search for {entity.name!r} returned profile {profile_name!r} '
+                    '(name does not match — refusing to bind to a different company)'
                 ),
             )
             return []

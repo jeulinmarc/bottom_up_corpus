@@ -45,6 +45,7 @@ class _StubFetcher:
         self._result = result_html
         self.get_calls: list[str] = []
         self.post_calls: list[str] = []
+        self.post_bodies: list[dict] = []
 
     def get_text(self, url: str, **_) -> str:
         self.get_calls.append(url)
@@ -53,7 +54,12 @@ class _StubFetcher:
         raise RuntimeError(f"Unexpected get_text url: {url}")
 
     def post_text(self, url: str, data=None, **_) -> str:
+        # The backend MUST hand the Fetcher a dict so requests sets the
+        # form Content-Type; a pre-encoded string would silently drop the
+        # search fields (the bug that returned 0 docs live).
+        assert isinstance(data, dict), f"post_text body must be a dict, got {type(data)}"
         self.post_calls.append(url)
+        self.post_bodies.append(data)
         if "search.aspx" in url:
             return self._result
         raise RuntimeError(f"Unexpected post_text url: {url}")
@@ -317,6 +323,30 @@ def test_no_profile_page_records_error():
         "search error must be recorded for non-profile page"
 
 
+def test_search_body_is_dict_carrying_company_name():
+    """The name search must POST a dict with the entity name in the company-name
+    field (a pre-encoded string would silently drop the fields → 0 docs live)."""
+    f = _StubFetcher()
+    src = OamSE(fetcher=f)
+    src.discover(Entity(lei="L1", name="Atlas Copco", country="SE"))
+    assert f.post_bodies, "the name search must POST a body"
+    body = f.post_bodies[0]
+    assert isinstance(body, dict)
+    assert body["ctl00$main$txtCompanyName"] == "Atlas Copco"
+
+
+def test_name_mismatch_returns_empty_and_records_error():
+    """The form silently returns the closest company; if the profile name does not
+    match the requested entity, refuse to bind it (no-guess identity)."""
+    # Ask for "Nordea" but the profile page is Atlas Copco -> reject.
+    f = _StubFetcher()
+    src = OamSE(fetcher=f)
+    docs = src.discover(Entity(lei="L1", name="Nordea", country="SE"))
+    assert docs == []
+    assert any(e["context"] == "name-mismatch" for e in src.errors), \
+        "a name-mismatch error must be recorded when the wrong company is returned"
+
+
 # ---------------------------------------------------------------------------
 # Pagination (ViewCompany2.aspx + Page$Next)
 # ---------------------------------------------------------------------------
@@ -376,10 +406,11 @@ class _PaginatingFetcher:
         return self._search
 
     def post_text(self, url, data=None, **_):
+        # The backend MUST pass a dict (so requests form-encodes it); a string
+        # body would silently drop the postback fields.
+        assert isinstance(data, dict), f"post_text body must be a dict, got {type(data)}"
         if "ViewCompany2.aspx" in url:
-            # The backend sends a urlencoded body string; parse it to a dict.
-            import urllib.parse
-            fields = dict(urllib.parse.parse_qsl(data)) if isinstance(data, str) else dict(data or {})
+            fields = dict(data)
             self.viewcompany_posts.append(fields)
             target = fields.get("__EVENTTARGET", "")
             grid = target.rsplit("$", 1)[-1] if target else ""
