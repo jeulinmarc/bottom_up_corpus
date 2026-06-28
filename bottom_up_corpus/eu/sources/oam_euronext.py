@@ -23,6 +23,7 @@ from __future__ import annotations
 import html as _html
 import re
 from datetime import datetime, timezone
+from urllib.parse import parse_qs
 
 from ..documents import Document
 from ..entities import Entity
@@ -57,13 +58,17 @@ _MAX_PAGES = 200  # 10k notices/issuer — a backstop, recorded if ever hit.
 # Row parsing
 # ---------------------------------------------------------------------------
 
-_ROW_RE = re.compile(r'<tr\b[^>]*\bclass="row_(\d+)\b[\s\S]*?</tr>', re.I)
+# A row STARTS here; each row is sliced from its start to the next row start (or
+# end), so nested markup inside a cell (buttons, expanded abstracts, even a
+# nested table) cannot truncate it at the first inner </tr> — that would silently
+# drop the trailing download cell.
+_ROW_START_RE = re.compile(r'<tr\b[^>]*\bclass="row_(\d+)\b', re.I)
 _NOTICENUMBER_RE = re.compile(r'<td[^>]*\bclass="noticenumber"[^>]*>\s*([^<]+?)\s*</td>', re.I)
 _NOTICEDATE_RE = re.compile(r'<td[^>]*\bclass="noticedate[^"]*"[^>]*>\s*([^<]+?)\s*</td>', re.I)
 _NOTICENAME_TD_RE = re.compile(r'<td[^>]*\bclass="noticename[^"]*"[\s\S]*?</td>', re.I)
-_DOWNLOAD_RE = re.compile(
-    r'notice-download\?id=(\d+)[^"\']*?type=PDF[^"\']*?attachmentId=(\d+)', re.I
-)
+# Capture the whole notice-download query string; params are parsed order-free
+# below (Euronext does not guarantee a fixed param order).
+_DOWNLOAD_HREF_RE = re.compile(r'notice-download\?([^"\'<>\s]+)', re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 # The notice-name / instruments cells embed a collapse button whose screen-reader
@@ -192,9 +197,16 @@ class EuronextSource(OamSource):
 
     @staticmethod
     def _rows(html: str):
-        """Yield ``(notice_id, row_html)`` for each notice row in the feed."""
-        for m in _ROW_RE.finditer(html):
-            yield m.group(1), m.group(0)
+        """Yield ``(notice_id, row_html)`` for each notice row in the feed.
+
+        Each row is sliced from its ``<tr class="row_…">`` start to the next
+        row's start (or the document end), so nested markup in a cell cannot
+        truncate the row at an inner ``</tr>`` and silently drop its tail.
+        """
+        starts = [(m.start(), m.group(1)) for m in _ROW_START_RE.finditer(html)]
+        for i, (pos, notice_id) in enumerate(starts):
+            end = starts[i + 1][0] if i + 1 < len(starts) else len(html)
+            yield notice_id, html[pos:end]
 
     def _to_document(
         self, notice_id: str, row: str, entity: Entity, mic: str, now: str
@@ -212,15 +224,28 @@ class EuronextSource(OamSource):
         notice_number = num_m.group(1).strip() if num_m else notice_id
 
         files: list[dict] = []
-        dl = _DOWNLOAD_RE.search(row_u)
-        if dl:
-            did, aid = dl.groups()
-            files.append({
-                "name": f"euronext-{notice_number}.pdf",
-                "kind": "document",
-                "url": f"{_DOWNLOAD_BASE}/en/listview/notice-download"
-                       f"?id={did}&type=PDF&attachmentId={aid}",
-            })
+        href = _DOWNLOAD_HREF_RE.search(row_u)
+        if href:
+            q = parse_qs(href.group(1))
+            did = (q.get("id") or [""])[0]
+            aid = (q.get("attachmentId") or [""])[0]
+            ftype = (q.get("type") or [""])[0].upper()
+            if did and aid:
+                # Build the canonical PDF download URL (params order-independent).
+                files.append({
+                    "name": f"euronext-{notice_number}.pdf",
+                    "kind": "document",
+                    "url": f"{_DOWNLOAD_BASE}/en/listview/notice-download"
+                           f"?id={did}&type={ftype or 'PDF'}&attachmentId={aid}",
+                })
+            else:
+                # A download link is present but its ids could not be extracted —
+                # surface the parser drift instead of silently losing the file.
+                self._record_error(
+                    "download-parse",
+                    f"{_DOWNLOAD_BASE}/en/listview/notice-download?{href.group(1)}",
+                    RuntimeError(f"notice {notice_number}: unparseable download link"),
+                )
 
         return Document(
             doc_id=f"euronext-{notice_id}",
