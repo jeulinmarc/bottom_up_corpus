@@ -24,6 +24,30 @@ def test_acquire_resolves_dispatches_merges_and_reconciles(monkeypatch, tmp_path
     assert (cfg.data_dir / "reports" / "eu_coverage.jsonl").exists()
 
 
+def test_euronext_appended_after_national_for_its_markets(monkeypatch, tmp_path):
+    """For a Euronext market, acquire runs the national backend BEFORE Euronext
+    (so the national doc wins dedup ties) — asserted behaviorally, not by grep."""
+    cfg = Config(data_dir=tmp_path / "data", contact="t@e.com")
+    ent = Entity("L1", "ASML", "NL", resolution="lei")  # NL has a national backend
+    monkeypatch.setattr(acq, "resolve_entities", lambda specs, *, fetcher: [ent])
+
+    calls = []
+
+    def _mk(tag):
+        class _B:
+            def __init__(self, *a, **k): self.errors = []
+            def discover(self, e): calls.append(tag); return []
+        return _B
+
+    monkeypatch.setattr(acq, "COUNTRY_BACKENDS", {"NL": _mk("national")})
+    monkeypatch.setattr(acq, "FilingsXbrlOrg", _mk("filings"))
+    monkeypatch.setattr(acq, "EuronextSource", _mk("euronext"))
+
+    acq.acquire([{"lei": "L1"}], fetcher=object(), config=cfg, download=False)
+    assert "euronext" in calls, "Euronext must be invoked for an NL (XAMS) entity"
+    assert calls.index("national") < calls.index("euronext"), "national must run first"
+
+
 def test_acquire_dedupes_byte_identical_across_backends(monkeypatch, tmp_path):
     """Two backends emit the same disclosure (same lei/day/type) under different
     file names; once downloaded, the identical sha256 confirms the duplicate and

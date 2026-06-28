@@ -166,9 +166,52 @@ def test_paginates_all_pages_to_exhaustivity():
     assert not src.errors                # exhaustive -> no truncation recorded
 
 
-def test_euronext_wired_as_complement_after_national():
-    """acquire appends Euronext for its markets, after the national backend."""
-    import inspect
-    import bottom_up_corpus.eu.acquire as acq
-    src = inspect.getsource(acq.acquire)
-    assert "EURONEXT_MICS" in src and "EuronextSource" in src
+def test_nested_markup_row_keeps_its_download_link():
+    """A row whose cell contains a nested <table>/<tr> must not be truncated at
+    the inner </tr> — its trailing download cell must survive (regression)."""
+    nested = (
+        '<table><tbody>'
+        '<tr class="row_900 ">'
+        '  <td class="noticenumber">LIS_X</td>'
+        '  <td class="noticedate priority-low">23 Apr 2026</td>'
+        '  <td class="noticename notice-abstract-load">CE - Shares - Dividend'
+        '    <table><tr><td>nested cell</td></tr></table>'  # nested </tr> here
+        '  </td>'
+        '  <td><a href="/en/listview/notice-download?id=77&amp;type=PDF&amp;attachmentId=88">PDF</a></td>'
+        '</tr>'
+        '</tbody></table>'
+    )
+    src = EuronextSource(fetcher=_StubFetcher(notices=nested))
+    docs = src.discover(EDP)
+    assert len(docs) == 1
+    assert docs[0].files and docs[0].files[0]["url"].endswith("id=77&type=PDF&attachmentId=88")
+
+
+def test_download_link_param_order_independent():
+    """The download link is parsed order-free: type before the ids still works."""
+    row = (
+        '<table><tbody><tr class="row_901 ">'
+        '  <td class="noticenumber">LIS_Y</td>'
+        '  <td class="noticedate priority-low">23 Apr 2026</td>'
+        '  <td class="noticename">CE - X</td>'
+        '  <td><a href="/en/listview/notice-download?type=PDF&amp;attachmentId=88&amp;id=77">PDF</a></td>'
+        '</tr></tbody></table>'
+    )
+    docs = EuronextSource(fetcher=_StubFetcher(notices=row)).discover(EDP)
+    assert docs[0].files and docs[0].files[0]["url"].endswith("id=77&type=PDF&attachmentId=88")
+
+
+def test_unparseable_download_link_records_error():
+    """A download link with no extractable ids surfaces a parse error (not silent)."""
+    row = (
+        '<table><tbody><tr class="row_902 ">'
+        '  <td class="noticenumber">LIS_Z</td>'
+        '  <td class="noticedate priority-low">23 Apr 2026</td>'
+        '  <td class="noticename">CE - X</td>'
+        '  <td><a href="/en/listview/notice-download?foo=bar">PDF</a></td>'
+        '</tr></tbody></table>'
+    )
+    src = EuronextSource(fetcher=_StubFetcher(notices=row))
+    docs = src.discover(EDP)
+    assert docs[0].files == []  # no bogus file built
+    assert any(e["context"] == "download-parse" for e in src.errors)
