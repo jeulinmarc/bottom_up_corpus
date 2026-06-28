@@ -79,6 +79,15 @@ def test_irish_issuer_labelled_with_its_own_country():
     assert all(d.source == "oam-gb" for d in docs)  # provenance preserved
 
 
+def test_unknown_issuer_country_falls_back_to_source_jurisdiction():
+    """A LEI-bearing entity with an unknown country is labelled with the
+    mechanism's own jurisdiction (provenance) — not a fabricated third country."""
+    src = NsmGB(fetcher=_make_stub())
+    docs = src.discover(Entity(lei=TESCO_LEI, name="X", country=""))
+    assert docs
+    assert all(d.country == NsmGB.country for d in docs)  # == "GB" (source), honest fallback
+
+
 def test_ireland_wired_to_nsm():
     from bottom_up_corpus.eu.acquire import COUNTRY_BACKENDS
     assert COUNTRY_BACKENDS["IE"] is NsmGB
