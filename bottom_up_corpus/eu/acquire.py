@@ -78,10 +78,32 @@ def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
 
     manifests = 0
     download_errors = 0
+    deduped_by_bytes = 0
+    kept_docs = all_docs
     if download:
+        # Authoritative cross-backend dedup, confirmed by bytes: same company +
+        # same publication-day + a byte-identical file = the same disclosure. The
+        # file-name merge above cannot see this when backends name the file
+        # differently (e.g. a national OAM vs the Euronext complement); the sha256
+        # is the ground truth. doc_type is deliberately NOT in the key — two
+        # backends routinely classify the same file differently (Euronext "other"
+        # vs a national "annual_report"), and identical bytes already prove
+        # identity. First occurrence wins (national backend listed first).
+        kept_docs = []
+        seen_bytes: dict[tuple, str] = {}  # (lei, day, sha256) -> doc_id
         for d in all_docs:
             man = download_document(d, fetcher=fetcher, config=config)
+            day = (d.published_ts or "")[:10]
+            shas = [f["sha256"] for f in man.get("files", []) if f.get("sha256")]
+            sig = (d.lei, day)
+            if day and shas and any((*sig, s) in seen_bytes for s in shas):
+                _discard_download(man, config)
+                deduped_by_bytes += 1
+                continue
+            for s in shas:
+                seen_bytes[(*sig, s)] = d.doc_id
             manifests += 1
+            kept_docs.append(d)
             for f in man.get("files", []):
                 if "error" in f:
                     download_errors += 1
@@ -89,14 +111,38 @@ def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
                                    "doc_id": d.doc_id, "file": f.get("name"),
                                    "error": f["error"]})
 
-    cov = reconcile(entities, all_docs)
+    cov = reconcile(entities, kept_docs)
     cov_path = config.data_dir / "reports" / "eu_coverage.jsonl"
     cov_path.parent.mkdir(parents=True, exist_ok=True)
     cov_path.write_text("\n".join(json.dumps(r, default=str) for r in cov))
 
-    return {"entities": len(entities), "documents": len(all_docs),
-            "manifests": manifests, "download_errors": download_errors,
+    return {"entities": len(entities), "documents": len(kept_docs),
+            "manifests": manifests, "deduped_by_bytes": deduped_by_bytes,
+            "download_errors": download_errors,
             "coverage_path": str(cov_path), "errors": errors}
+
+
+def _discard_download(manifest: dict, config: Config) -> None:
+    """Remove a byte-confirmed duplicate's downloaded files and manifest.
+
+    Best-effort: the duplicate was downloaded only to confirm its bytes, so its
+    artefacts are deleted to avoid storing the same disclosure twice. Different
+    doc_id => its own directory, so this never touches the kept document.
+    """
+    lei = manifest.get("lei") or "UNRESOLVED"
+    doc_id = manifest.get("doc_id")
+    for f in manifest.get("files", []):
+        rel = f.get("path")
+        if rel:
+            try:
+                (config.data_dir / rel).unlink(missing_ok=True)
+            except OSError:
+                pass
+    if doc_id:
+        try:
+            (config.data_dir / "manifest" / lei / f"{doc_id}.json").unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _write_entity_index(entities: list[Entity], config: Config) -> None:
