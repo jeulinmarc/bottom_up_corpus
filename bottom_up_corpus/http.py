@@ -61,12 +61,13 @@ class Fetcher:
         self._last_request[host] = time.monotonic()
 
     def get(self, url: str, *, stream: bool = False, timeout: float | None = None,
-            headers: dict | None = None) -> requests.Response:
+            headers: dict | None = None, params: dict | None = None) -> requests.Response:
         """GET ``url`` with throttling + retries; returns the response.
 
         Raises the last exception (or ``requests.HTTPError``) if all attempts
         fail. 429/503 responses are treated as retryable. ``headers`` are merged
         into this request only (per-request, NOT onto the shared session).
+        ``params`` are URL-encoded onto the query string by ``requests``.
         """
         last_exc: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
@@ -77,6 +78,7 @@ class Fetcher:
                     stream=stream,
                     timeout=timeout or self.config.timeout,
                     headers=headers,
+                    params=params,
                 )
                 if resp.status_code in (429, 500, 502, 503, 504):
                     raise requests.HTTPError(f"{resp.status_code} for {url}", response=resp)
@@ -113,17 +115,19 @@ class Fetcher:
         base = min(2.0 ** attempt, self._BACKOFF_CAP_SECONDS)
         return base * (0.5 + random.random() * 0.5)
 
-    def get_text(self, url: str, *, timeout: float | None = None) -> str:
+    def get_text(self, url: str, *, timeout: float | None = None,
+                 headers: dict | None = None, params: dict | None = None) -> str:
         """Fetch and decode a text body."""
-        resp = self.get(url, timeout=timeout)
+        resp = self.get(url, timeout=timeout, headers=headers, params=params)
         resp.encoding = resp.encoding or "utf-8"
         return resp.text
 
-    def get_json(self, url: str, *, timeout: float | None = None, headers: dict | None = None):
+    def get_json(self, url: str, *, timeout: float | None = None, headers: dict | None = None,
+                 params: dict | None = None):
         """Fetch and parse a JSON body (used by data.sec.gov endpoints).
 
         ``headers`` are merged into this request only (not the shared session)."""
-        return self.get(url, timeout=timeout, headers=headers).json()
+        return self.get(url, timeout=timeout, headers=headers, params=params).json()
 
     def post_json(self, url: str, json_body, *, timeout: float | None = None,
                   headers: dict | None = None):
