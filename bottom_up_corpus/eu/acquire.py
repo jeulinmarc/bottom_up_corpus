@@ -19,6 +19,7 @@ from .sources.oam_ch import DisclosureCH
 from .sources.oam_de import BundesanzeigerDE
 from .sources.oam_dk import OamDK
 from .sources.oam_es import CnmvES
+from .sources.oam_euronext import EURONEXT_MICS, EuronextSource
 from .sources.oam_fi import OamFI
 from .sources.oam_fr import InfoFinanciereFR
 from .sources.oam_gb import NsmGB
@@ -59,6 +60,11 @@ def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
         if cls:
             backends.append(cls(fetcher=fetcher, config=config))
         backends.append(FilingsXbrlOrg(fetcher=fetcher, config=config))
+        # Euronext is a cross-market complement (corporate-event notices). It is
+        # listed AFTER the national backend so that on any genuine overlap the
+        # more-complete national document wins the first-occurrence dedup.
+        if e.country in EURONEXT_MICS:
+            backends.append(EuronextSource(fetcher=fetcher, config=config))
         per_backend = []
         for b in backends:
             try:
