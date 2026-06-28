@@ -47,8 +47,9 @@ class FakeSession:
         self.calls = []
         self._i = 0
 
-    def get(self, url, stream=False, timeout=None, headers=None):
-        self.calls.append({"url": url, "stream": stream, "timeout": timeout, "headers": headers})
+    def get(self, url, stream=False, timeout=None, headers=None, params=None):
+        self.calls.append({"url": url, "stream": stream, "timeout": timeout,
+                           "headers": headers, "params": params})
         resp = self.responses[min(self._i, len(self.responses) - 1)]
         self._i += 1
         return resp
@@ -101,6 +102,16 @@ def test_get_json_parses(cfg):
     sess = FakeSession([FakeResponse(json_data={"a": 1})])
     f = Fetcher(cfg, session=sess)
     assert f.get_json("https://data.sec.gov/x")["a"] == 1
+
+
+def test_get_text_and_json_forward_query_params(cfg):
+    """params are passed through to session.get (used by the EQS admin-ajax feed)."""
+    sess = FakeSession([FakeResponse(text="ok"), FakeResponse(json_data={"ok": 1})])
+    f = Fetcher(cfg, session=sess)
+    f.get_text("https://www.eqs-news.com/x", params={"filter[search]": "ABB", "pageNo": 1})
+    f.get_json("https://www.eqs-news.com/y", params={"companyId": "abc"})
+    assert sess.calls[0]["params"] == {"filter[search]": "ABB", "pageNo": 1}
+    assert sess.calls[1]["params"] == {"companyId": "abc"}
 
 
 def test_download_streams_with_download_timeout(cfg, tmp_path):

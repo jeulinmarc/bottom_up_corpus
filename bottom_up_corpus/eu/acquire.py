@@ -15,6 +15,7 @@ from .entities import Entity, resolve_entities
 from .reconcile import reconcile
 from .sources.filings_org import FilingsXbrlOrg
 from .sources.oam_be import StoriBE
+from .sources.oam_ch import DisclosureCH
 from .sources.oam_de import BundesanzeigerDE
 from .sources.oam_dk import OamDK
 from .sources.oam_es import CnmvES
@@ -31,6 +32,7 @@ from .sources.oam_no import NewsWebNO
 # silently partial).
 COUNTRY_BACKENDS = {
     "BE": StoriBE,
+    "CH": DisclosureCH,
     "DE": BundesanzeigerDE,
     "DK": OamDK,
     "ES": CnmvES,
