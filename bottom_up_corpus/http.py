@@ -60,11 +60,13 @@ class Fetcher:
                 time.sleep(wait)
         self._last_request[host] = time.monotonic()
 
-    def get(self, url: str, *, stream: bool = False, timeout: float | None = None) -> requests.Response:
+    def get(self, url: str, *, stream: bool = False, timeout: float | None = None,
+            headers: dict | None = None) -> requests.Response:
         """GET ``url`` with throttling + retries; returns the response.
 
         Raises the last exception (or ``requests.HTTPError``) if all attempts
-        fail. 429/503 responses are treated as retryable.
+        fail. 429/503 responses are treated as retryable. ``headers`` are merged
+        into this request only (per-request, NOT onto the shared session).
         """
         last_exc: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
@@ -74,6 +76,7 @@ class Fetcher:
                     url,
                     stream=stream,
                     timeout=timeout or self.config.timeout,
+                    headers=headers,
                 )
                 if resp.status_code in (429, 500, 502, 503, 504):
                     raise requests.HTTPError(f"{resp.status_code} for {url}", response=resp)
@@ -116,15 +119,19 @@ class Fetcher:
         resp.encoding = resp.encoding or "utf-8"
         return resp.text
 
-    def get_json(self, url: str, *, timeout: float | None = None):
-        """Fetch and parse a JSON body (used by data.sec.gov endpoints)."""
-        return self.get(url, timeout=timeout).json()
+    def get_json(self, url: str, *, timeout: float | None = None, headers: dict | None = None):
+        """Fetch and parse a JSON body (used by data.sec.gov endpoints).
 
-    def post_json(self, url: str, json_body, *, timeout: float | None = None):
+        ``headers`` are merged into this request only (not the shared session)."""
+        return self.get(url, timeout=timeout, headers=headers).json()
+
+    def post_json(self, url: str, json_body, *, timeout: float | None = None,
+                  headers: dict | None = None):
         """POST ``url`` with a JSON body; returns the parsed JSON response.
 
         Applies the same throttle, retry, and raise-for-status policy as
-        :meth:`get`.  429 / 5xx responses are treated as retryable.
+        :meth:`get`.  429 / 5xx responses are treated as retryable. ``headers``
+        are merged into this request only (not onto the shared session).
         """
         last_exc: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
@@ -134,6 +141,7 @@ class Fetcher:
                     url,
                     json=json_body,
                     timeout=timeout or self.config.timeout,
+                    headers=headers,
                 )
                 if resp.status_code in (429, 500, 502, 503, 504):
                     raise requests.HTTPError(f"{resp.status_code} for {url}", response=resp)
