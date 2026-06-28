@@ -33,17 +33,15 @@ from ..oam_base import IssuerRef, OamSource
 # Country -> Euronext market MIC
 # ---------------------------------------------------------------------------
 
-# Ireland (XMSM) currently returns an empty notices feed — Euronext Dublin's
-# regulated information is published through a separate route. It is kept here so
-# the backend is wired for it; it simply yields no documents until that route is
-# found (surfaced as no-documents, never a silent gap).
+# Ireland is intentionally absent: Euronext Dublin's per-issuer notices feed is
+# empty (verified live), and Irish issuers' regulated information is held by the
+# FCA NSM — so they resolve through the GB (NsmGB) backend by LEI instead.
 EURONEXT_MICS: dict[str, str] = {
     "NL": "XAMS",
     "BE": "XBRU",
     "FR": "XPAR",
     "PT": "XLIS",
     "NO": "XOSL",
-    "IE": "XMSM",
 }
 
 _FEED_URL = "https://live.euronext.com/en/ajax/getNoticePublicData/"

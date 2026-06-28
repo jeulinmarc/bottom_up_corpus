@@ -178,8 +178,12 @@ class NsmGB(OamSource):
 
                 doc = Document(
                     doc_id=doc_id,
+                    # The NSM is also the de-facto OAM for Irish issuers (this
+                    # backend is wired for IE too); label the document with the
+                    # issuer's own country, while ``source`` keeps the NSM
+                    # provenance.
                     lei=entity.lei,
-                    country="GB",
+                    country=entity.country or "GB",
                     doc_type=_doc_type(src.get("type") or ""),
                     period_end=None,
                     published_ts=src.get("publication_date"),

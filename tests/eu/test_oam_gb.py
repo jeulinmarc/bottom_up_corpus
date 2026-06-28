@@ -65,7 +65,23 @@ def test_discover_by_lei_parses_hits():
     assert all(d.source == "oam-gb" for d in docs)
     assert all(d.language == "en" for d in docs)
     assert all(d.lei == TESCO_LEI for d in docs)
+    assert all(d.country == "GB" for d in docs), "GB entity -> GB-labelled docs"
     assert all(d.files for d in docs), "every Document must have at least one file"
+
+
+def test_irish_issuer_labelled_with_its_own_country():
+    """NSM is the de-facto OAM for Irish issuers; a doc for an IE entity is
+    labelled country=IE (issuer jurisdiction) while source stays oam-gb."""
+    src = NsmGB(fetcher=_make_stub())
+    docs = src.discover(Entity(lei=TESCO_LEI, name="Glanbia plc", country="IE"))
+    assert docs
+    assert all(d.country == "IE" for d in docs)
+    assert all(d.source == "oam-gb" for d in docs)  # provenance preserved
+
+
+def test_ireland_wired_to_nsm():
+    from bottom_up_corpus.eu.acquire import COUNTRY_BACKENDS
+    assert COUNTRY_BACKENDS["IE"] is NsmGB
 
 
 # ---------------------------------------------------------------------------

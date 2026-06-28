@@ -40,6 +40,11 @@ COUNTRY_BACKENDS = {
     "FI": OamFI,
     "FR": InfoFinanciereFR,
     "GB": NsmGB,
+    # Ireland: the FCA NSM is the de-facto OAM for Irish issuers (verified live —
+    # it holds even small Euronext-Growth-Dublin names by LEI), and the Euronext
+    # Dublin per-issuer feed is empty. So Irish issuers resolve through the same
+    # LEI-keyed NSM backend.
+    "IE": NsmGB,
     "IT": OneInfoIT,
     "NL": AfmNL,
     "SE": OamSE,
