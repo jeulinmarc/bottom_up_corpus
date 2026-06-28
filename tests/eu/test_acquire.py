@@ -24,6 +24,45 @@ def test_acquire_resolves_dispatches_merges_and_reconciles(monkeypatch, tmp_path
     assert (cfg.data_dir / "reports" / "eu_coverage.jsonl").exists()
 
 
+def test_acquire_dedupes_byte_identical_across_backends(monkeypatch, tmp_path):
+    """Two backends emit the same disclosure (same lei/day/type) under different
+    file names; once downloaded, the identical sha256 confirms the duplicate and
+    the second (lower-priority) copy is dropped from the corpus."""
+    cfg = Config(data_dir=tmp_path / "data", contact="t@e.com")
+    ent = Entity("L1", "EDP", "PT", resolution="lei")
+    monkeypatch.setattr(acq, "resolve_entities", lambda specs, *, fetcher: [ent])
+
+    # Same content, different file names + doc_type -> survives the file-name merge.
+    nat = Document("nat-1", "L1", "PT", "annual_report", None, "2026-04-23", "x", "en",
+                   "oam-pt", [{"name": "afm.pdf", "url": "u1", "kind": "document"}], {})
+    eur = Document("eur-9", "L1", "PT", "other", None, "2026-04-23", "x", "en",
+                   "euronext", [{"name": "euronext-9.pdf", "url": "u2", "kind": "document"}], {})
+
+    class _NatBackend:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): return [nat]
+
+    class _EurBackend:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): return [eur]
+
+    monkeypatch.setattr(acq, "COUNTRY_BACKENDS", {"PT": _NatBackend})
+    monkeypatch.setattr(acq, "FilingsXbrlOrg", _EurBackend)
+
+    # Both files download to the SAME bytes (identical sha256).
+    def _fake_download(doc, *, fetcher, config):
+        f = doc.files[0]
+        return {"doc_id": doc.doc_id, "lei": doc.lei,
+                "files": [{"name": f["name"], "sha256": "IDENTICAL",
+                           "path": f"raw/{doc.doc_id}/{f['name']}"}]}
+    monkeypatch.setattr(acq, "download_document", _fake_download)
+
+    summary = acq.acquire([{"lei": "L1"}], fetcher=object(), config=cfg, download=True)
+    assert summary["deduped_by_bytes"] == 1
+    assert summary["documents"] == 1        # only the first (national) doc kept
+    assert summary["manifests"] == 1
+
+
 def test_acquire_surfaces_download_errors(monkeypatch, tmp_path):
     """acquire() must record per-file download failures in summary['errors']
     and expose them via download_errors count — never silently drop them."""
