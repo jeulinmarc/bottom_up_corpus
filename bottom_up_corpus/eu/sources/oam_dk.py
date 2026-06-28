@@ -37,6 +37,10 @@ from ..oam_base import IssuerRef, OamSource
 # ---------------------------------------------------------------------------
 
 _BASE = "https://weappegressprod.azurewebsites.net"
+# Per-request header so /details carries ENGLISH category labels ("Own shares", not
+# "Egne aktier"). Passed per-call (NOT on the shared session) so other backends in the
+# same acquire() run keep their own language.
+_EN_HEADERS = {"Accept-Language": "en"}
 _BLOB_HOST = "https://saegressprod.blob.core.windows.net"
 _MAX_PAGES = 100
 _PAGE_SIZE = 100
@@ -142,11 +146,6 @@ class OamDK(OamSource):
     def __init__(self, fetcher=None, config=None):
         super().__init__(fetcher=fetcher, config=config)
         self._cvr_map: dict[str, list[str]] | None = None  # normalised_name -> [cvr, ...]
-        # Ask the API for English so /details carries English category labels
-        # ("Own shares", not "Egne aktier") — the doc_type map keys on English.
-        session = getattr(self.fetcher, "session", None)
-        if session is not None and hasattr(session, "headers"):
-            session.headers["Accept-Language"] = "en"
 
     # ------------------------------------------------------------------
     # Public API
@@ -190,7 +189,7 @@ class OamDK(OamSource):
                 },
             }
             try:
-                resp = self.fetcher.post_json(f"{_BASE}/search", body)
+                resp = self.fetcher.post_json(f"{_BASE}/search", body, headers=_EN_HEADERS)
             except Exception as exc:  # noqa: BLE001
                 self._record_error("search", f"{_BASE}/search", exc)
                 break
@@ -220,7 +219,7 @@ class OamDK(OamSource):
 
                 # Fetch detail to get the blob URLs
                 try:
-                    detail = self.fetcher.get_json(f"{_BASE}/details/{row_id}")
+                    detail = self.fetcher.get_json(f"{_BASE}/details/{row_id}", headers=_EN_HEADERS)
                 except Exception as exc:  # noqa: BLE001
                     self._record_error("details", f"{_BASE}/details/{row_id}", exc)
                     continue
@@ -281,7 +280,7 @@ class OamDK(OamSource):
 
         if self._cvr_map is None:
             try:
-                config = self.fetcher.get_json(f"{_BASE}/config")
+                config = self.fetcher.get_json(f"{_BASE}/config", headers=_EN_HEADERS)
             except Exception as exc:  # noqa: BLE001
                 self._record_error("config", f"{_BASE}/config", exc)
                 return None
@@ -312,7 +311,7 @@ def _build_cvr_map(config: dict) -> dict[str, list[str]]:
     try:
         filters = (config or {}).get("components", {}).get("filters", [])
         for f in filters:
-            if f.get("key") == "IssuerFilter" or f.get("type") == "dropdown":
+            if f.get("key") == "IssuerFilter":
                 for opt in f.get("options", []):
                     cvr = str(opt.get("id") or "").strip()
                     label = opt.get("label") or ""
