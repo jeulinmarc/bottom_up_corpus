@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -58,9 +59,21 @@ class _StubFetcher:
         self._list_resp = list_resp if list_resp is not None else _LIST_FIX
         self._message = message if message is not None else _MESSAGE_FIX
         self._list_calls = 0
+        # Faithful-stub bookkeeping: a backend that resolves the wrong
+        # issuerSign, or requests an unexpected endpoint, must be observable.
+        self.get_urls: list[str] = []
+        self.post_urls: list[str] = []
+        self.list_issuers_seen: set[str] = set()
 
     def get_json(self, url: str, **_):
+        self.get_urls.append(url)
         if "/list" in url:
+            # Only serve filings for the issuerSign the fixture describes; a
+            # wrong sign yields nothing, so a mis-resolve fails the test.
+            issuer = parse_qs(urlsplit(url).query).get("issuer", [""])[0]
+            self.list_issuers_seen.add(issuer)
+            if issuer != "EQNR":
+                return _EMPTY_LIST
             self._list_calls += 1
             if self._list_calls == 1:
                 return self._list_resp
@@ -68,9 +81,12 @@ class _StubFetcher:
         raise RuntimeError(f"Unexpected get_json url: {url}")
 
     def post_json(self, url: str, body: dict, **_):
+        self.post_urls.append(url)
         if "/issuers" in url:
             return self._issuers
         if "/message" in url:
+            # The attachment lookup must target a concrete messageId.
+            assert "messageId=" in url, f"/message call missing messageId: {url}"
             return self._message
         raise RuntimeError(f"Unexpected post_json url: {url}")
 
@@ -104,6 +120,12 @@ def test_resolve_name_to_issuersign_and_discover():
     # Messages with 0 attachments in the fixture must be skipped
     # (3 out of 8 fixture messages have numbAttachments=0 and the rest ≥1)
     assert len(docs) >= 1
+    # Faithful-stub check: the backend resolved 'Equinor ASA' -> EQNR and drove
+    # /list with exactly that issuerSign (a mis-resolve would have hit the stub
+    # with a different sign and returned no filings).
+    assert stub.list_issuers_seen == {"EQNR"}, (
+        f"/list must be called with issuer=EQNR, saw {stub.list_issuers_seen}"
+    )
 
 
 def test_discover_skips_zero_attachment_messages():
