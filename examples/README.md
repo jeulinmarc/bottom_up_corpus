@@ -12,10 +12,11 @@ export BOTTOM_UP_CORPUS_CONTACT="you@example.com"
 
 Scripts that hit SEC EDGAR are bounded (one issuer, a filing or two) and write any
 artifacts to a temporary directory, so they leave the repo's `data/` untouched.
-Several run **fully offline** (no network): `06`, `08`, `11`, `15`.
+Several run **fully offline** (no network): `06`, `08`, `11`, `15`, `23`, `24`.
 
-There is one runnable example per capability. See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)
-for how the pieces fit together.
+Scripts `01`–`15` cover the 🇺🇸 **SEC** pillar; `16`–`24` cover the 🇪🇺 **EU**
+pillar. See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for how the pieces
+fit together, and [`../docs/EU_PILLAR.md`](../docs/EU_PILLAR.md) for the EU design.
 
 **Core pipeline**
 
@@ -46,3 +47,22 @@ for how the pieces fit together.
 | `13_discover_index.py` | Exhaustive discovery via the quarterly full-index, incl. delisted *(downloads a large index)* |
 | `14_completeness_report.py` | Audit coverage with the completeness matrix (ok / partial / missing) |
 | `15_name_resolution.py` | Resolve company names → CIKs via the SEC name index (former names, collision detection) *(offline)* |
+
+## 🇪🇺 EU pillar — the "European EDGAR"
+
+Federates national OAMs (AMF, FCA NSM, CONSOB, …) + Euronext + filings.xbrl.org
+behind one `acquire()` call, keyed on the GLEIF LEI/ISIN. See
+[`../docs/EU_PILLAR.md`](../docs/EU_PILLAR.md) and
+[`../docs/EU_BACKENDS.md`](../docs/EU_BACKENDS.md).
+
+| Script | Shows |
+|---|---|
+| `16_eu_acquire.py` | Bounded multi-country acquisition (FR + ES), with download |
+| `17_eu_resolve_identity.py` | Resolve issuers → GLEIF LEI by ISIN and by name; the no-guess `resolution` tier |
+| `18_eu_openfigi_bridge.py` | The OpenFIGI ISIN→LEI bridge — resolve issuers GLEIF's ISIN filter misses (`isin-figi`) |
+| `19_eu_discover_one_backend.py` | Run one national backend directly (AMF/France) — `discover()` + recorded errors |
+| `20_eu_acquire_discovery.py` | End-to-end `acquire()` in discovery mode (dispatch + dedup, no download) |
+| `21_eu_coverage_report.py` | Read the per-entity coverage report (`doc_count`, `doc_types`, `gap`) across 3 jurisdictions |
+| `22_eu_listing_dispatch.py` | Dispatch by **listing** not home country — cover an issuer with no national OAM via Euronext |
+| `23_eu_dedup.py` | Cross-backend dedup — the same ESEF report from two backends collapses to one *(offline)* |
+| `24_eu_backends_catalog.py` | The coverage catalog — backends, Euronext markets, doc-type taxonomy *(offline)* |
