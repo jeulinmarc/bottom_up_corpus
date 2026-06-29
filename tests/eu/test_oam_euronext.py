@@ -58,6 +58,57 @@ def test_published_ts():
     assert _published_ts("not a date") is None
 
 
+def _instr_row(nid, instrument, *, with_pdf=False):
+    pdf = ('<td><a href="/en/listview/notice-download?id=1&amp;type=PDF&amp;attachmentId=2">PDF</a></td>'
+           if with_pdf else "<td></td>")
+    return (
+        f'<tr class="row_{nid} ">'
+        f'<td class="noticenumber">OSL_{nid}</td>'
+        f'<td class="noticedate priority-low">23 Apr 2026</td><td class="effect"></td>'
+        f'<td class="noticename notice-abstract-load">CE - Dividend</td>'
+        f'<td class="instruments notice-detail-load"><span><div class="d-flex">'
+        f'<button class="btn"><span class="sr-only">Toggle Visibility</span></button>'
+        f'{instrument}</div></span></td>{pdf}</tr>'
+    )
+
+
+class _ListingStub:
+    def __init__(self, html):
+        self._html = html
+        self.urls = []
+
+    def get_text(self, url, **_):
+        import re
+        self.urls.append(url)
+        pg = int(re.search(r"pageNum=(\d+)", url).group(1))
+        return self._html if pg == 1 else "<table><tbody></tbody></table>"
+
+
+def test_listing_mode_verifies_issuer_and_drops_market_noise():
+    """force_mic = listing mode: keep only notices whose issuer cell matches the
+    entity; the feed's market-wide 'Multiple' and a wrong issuer are rejected."""
+    feed = ("<table><tbody>"
+            + _instr_row("1", "2020 BULKERS", with_pdf=True)
+            + _instr_row("2", "Multiple")
+            + _instr_row("3", "SOME OTHER CO")
+            + "</tbody></table>")
+    e = Entity(lei="L", name="2020 BULKERS LTD.", country="BM", isins=("BMG9156K1018",))
+    stub = _ListingStub(feed)
+    docs = EuronextSource(fetcher=stub, force_mic="XPAR").discover(e)
+    assert len(docs) == 1
+    assert docs[0].native_meta["notice_number"] == "OSL_1"
+    assert docs[0].country == "BM"  # issuer jurisdiction, listing-sourced
+    # query went out under the listing MIC, keyed by the entity's ISIN
+    assert "BMG9156K1018-XPAR" in stub.urls[0]
+
+
+def test_listing_mode_no_match_yields_nothing():
+    feed = "<table><tbody>" + _instr_row("9", "Multiple") + "</tbody></table>"
+    e = Entity(lei="L", name="2020 Bulkers Ltd", country="BM", isins=("BMG9156K1018",))
+    docs = EuronextSource(fetcher=_ListingStub(feed), force_mic="XPAR").discover(e)
+    assert docs == []
+
+
 def test_country_to_mic_map_covers_euronext_markets():
     # Ireland is excluded: Euronext Dublin's per-issuer feed is empty, so Irish
     # issuers resolve through the FCA NSM (GB backend) by LEI instead.
