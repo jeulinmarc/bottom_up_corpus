@@ -55,3 +55,17 @@ def test_discover_404_returns_empty_and_records_error():
     result = src.discover(Entity(lei="NOTININDEX", name="Ghost Corp", country="EU"))
     assert result == []
     assert src.errors, "a fetch error must be recorded — errors list must be non-empty"
+
+
+def test_full_page_records_truncation():
+    """A full page (>= _PAGE rows) means there may be more -> never silently
+    partial: a 'truncated' error is recorded (the page cap is far above any real
+    issuer's ESEF report count, so this never fires in practice)."""
+    from bottom_up_corpus.eu.sources.filings_org import _PAGE
+    rows = {"data": [{"id": str(i), "attributes": {"package_url": f"/p/{i}.zip",
+                                                   "period_end": "2024-12-31"}}
+                     for i in range(_PAGE)]}
+    src = FilingsXbrlOrg(fetcher=_Fetcher({"/filings": rows}))
+    docs = src.discover(Entity(lei="L1", name="X", country="DE"))
+    assert len(docs) == _PAGE
+    assert any(e["context"] == "truncated" for e in src.errors)

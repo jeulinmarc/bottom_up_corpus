@@ -20,6 +20,13 @@ _SAFE_ID_RE = re.compile(r'^[A-Z0-9]+$')
 BASE = "https://www.info-financiere.gouv.fr/api/explore/v2.1/catalog/datasets"
 DATASET = "flux-amf-new-prod"
 
+# Opendatasoft caps ``limit`` at 100 per request, so page with ``offset`` (most
+# recent first) until ``total_count`` is reached. ODS also caps deep paging at
+# offset+limit <= 10000; hitting it is recorded as truncation (never silent).
+_PAGE = 100
+_MAX_OFFSET = 10_000
+_ORDER = "informationdeposee_inf_dat_emt desc"
+
 # Recon-confirmed real fields: the download URL is `url_de_recuperation` (an
 # ftp.opendatasoft.com PDF, HTTP 200), NOT a constructed path; the document type is
 # `subtype_of_information` (specific) falling back to `type_of_information`.
@@ -64,17 +71,37 @@ class InfoFinanciereFR(OamSource):
         if not clauses:
             return []
         where = quote(" OR ".join(f"({c})" if len(clauses) > 1 else c for c in clauses))
-        q = f"{BASE}/{DATASET}/records?where={where}&limit=100"
-        try:
-            resp = self.fetcher.get_json(q)
-            results = resp.get("results") or []
-            total_count = resp.get("total_count", len(results))
-        except Exception as exc:  # noqa: BLE001
-            self._record_error("discover", q, exc)
-            return []
-        if total_count > len(results):
-            self._record_error("truncated", q,
-                               f"{len(results)}/{total_count} records")
+        base_q = f"{BASE}/{DATASET}/records?where={where}&order_by={quote(_ORDER)}&limit={_PAGE}"
+
+        # Page through every record (ODS limit is 100/request).
+        results: list[dict] = []
+        seen_uin: set = set()
+        total_count: int | None = None
+        offset = 0
+        while offset < _MAX_OFFSET:
+            q = f"{base_q}&offset={offset}"
+            try:
+                resp = self.fetcher.get_json(q)
+            except Exception as exc:  # noqa: BLE001
+                self._record_error("discover", q, exc)
+                break
+            batch = resp.get("results") or []
+            if total_count is None:
+                total_count = resp.get("total_count", 0)
+            for rec in batch:  # defend against any offset overlap
+                uin = rec.get("uin_idt_uin")
+                if uin not in seen_uin:
+                    seen_uin.add(uin)
+                    results.append(rec)
+            offset += _PAGE
+            if not batch or len(results) >= (total_count or 0):
+                break
+        else:
+            # Loop exhausted by the ODS deep-paging cap with records still missing.
+            if total_count and len(results) < total_count:
+                self._record_error(
+                    "truncated", base_q,
+                    f"{len(results)}/{total_count} records (ODS offset cap {_MAX_OFFSET})")
         now = datetime.now(timezone.utc).isoformat()
         out: list[Document] = []
         skipped = 0
