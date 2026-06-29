@@ -449,11 +449,39 @@ def test_list_issuers_returns_empty():
 def test_normalise():
     assert _normalise("Equinor ASA") == "equinor"
     assert _normalise("  Yara International ASA  ") == "yara international"
-    assert _normalise("DNB Bank ASA.") == "dnb bank"  # " asa." is a legal suffix → stripped
+    assert _normalise("DNB Bank ASA.") == "dnb bank"  # period removed → " asa" stripped
     assert _normalise("DNB Bank ASA") == "dnb bank"   # " asa" → stripped
     assert _normalise("Orkla ASA") == "orkla"
     assert _normalise("Mowi ASA") == "mowi"
     assert _normalise("Some Corp AS") == "some corp"  # " as" → stripped
+
+
+def test_normalise_foreign_legal_forms():
+    """Oslo's foreign tail (shipping/offshore) uses Limited/Ltd/plc/Inc — and
+    GLEIF often spells the form differently, so both must collapse to one core."""
+    # GLEIF spelling vs Oslo spelling -> same core
+    assert _normalise("Golden Ocean Group Limited") == _normalise("Golden Ocean Group Ltd")
+    assert _normalise("2020 Bulkers Ltd.") == _normalise("2020 BULKERS LTD.") == "2020 bulkers"
+    assert _normalise("Frontline plc") == _normalise("FRONTLINE PLC") == "frontline"
+    assert _normalise("Borr Drilling Limited") == "borr drilling"
+    assert _normalise("Stolt-Nielsen Limited") == "stolt-nielsen"
+    # distinctive words are kept (no over-stripping) -> still distinguishes issuers
+    assert _normalise("Golden Ocean Group Ltd") != _normalise("Golden Energy Group Ltd")
+    # German/Swedish forms that actually occur in the live list are handled too
+    assert _normalise("Mutares SE & Co. KGaA") != ""  # not over-stripped to empty
+    assert _normalise("Siemens AG") == "siemens" and _normalise("Volvo AB") == "volvo"
+
+
+def test_normalise_empty_and_collapse_safety():
+    """Empty/whitespace -> empty (and the resolver's exactly-one-match rule means
+    a same-core collision declines rather than mis-binds — never a guessed bind)."""
+    assert _normalise("") == ""
+    assert _normalise("   ") == ""
+    assert _normalise(None) == ""  # None-guarded
+    # An AS and an ASA of the same name collapse to one core *by design*; the
+    # no-guess resolver then sees >1 active match and declines (tested elsewhere),
+    # so this is a conservative miss, not a wrong bind.
+    assert _normalise("Atea AS") == _normalise("Atea ASA") == "atea"
 
 
 def test_esef_kind():
