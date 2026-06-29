@@ -13,6 +13,9 @@ from ..entities import Entity
 from ..oam_base import IssuerRef, OamSource
 
 
+_PAGE = 100  # JSON:API page size; an issuer's ESEF reports are far under this.
+
+
 class FilingsXbrlOrg(OamSource):
     name = "filings.xbrl.org"
     country = "EU"
@@ -27,12 +30,17 @@ class FilingsXbrlOrg(OamSource):
         # Recon-confirmed: filter[entity_api_id] is INVALID (400); the working query
         # is the entity's own filings collection. Many entities return [] or 404
         # (erratic coverage) -> treat both as "no filings", never an error abort.
-        url = f"{self.BASE}/api/entities/{entity.lei}/filings?page[size]=100"
+        url = f"{self.BASE}/api/entities/{entity.lei}/filings?page[size]={_PAGE}"
         try:
             rows = self.fetcher.get_json(url).get("data") or []
         except Exception as exc:  # noqa: BLE001  (404 = not indexed -> no filings)
             self._record_error("discover", url, exc)
             return []
+        # Single page (an issuer's ESEF reports are a handful — far under the cap).
+        # Still never silently partial: a full page means there may be more.
+        if len(rows) >= _PAGE:
+            self._record_error("truncated", url,
+                               f"{len(rows)} filings at the {_PAGE}-page cap; more may exist")
         now = datetime.now(timezone.utc).isoformat()
         out: list[Document] = []
         for row in rows:

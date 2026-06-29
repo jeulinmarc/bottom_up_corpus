@@ -35,6 +35,35 @@ def test_fr_discover_records_truncation_when_total_count_exceeds_results():
     assert any(e.get("context") == "truncated" for e in src.errors)
 
 
+def test_fr_paginates_all_records_recent_first():
+    """ODS caps limit at 100, so the backend pages by offset until total_count,
+    requesting a recent-first order and de-duplicating any overlap."""
+    def _page(start, n, total):
+        return {"total_count": total, "results": [
+            {"uin_idt_uin": i, "url_de_recuperation": f"http://x/{i}.pdf",
+             "type_of_information": "Inside information",
+             "informationdeposee_inf_dat_emt": "2025-01-01T00:00:00+00:00"}
+            for i in range(start, start + n)]}
+
+    class _Paged:
+        def __init__(self): self.offsets = []
+        def get_json(self, url, **_):
+            import re
+            off = int(re.search(r"offset=(\d+)", url).group(1))
+            self.offsets.append(off)
+            assert "order_by=" in url  # recent-first ordering is requested
+            return {0: _page(0, 100, 154), 100: _page(100, 54, 154)}.get(
+                off, {"total_count": 154, "results": []})
+
+    f = _Paged()
+    src = InfoFinanciereFR(fetcher=f)
+    docs = src.discover(Entity(lei="L1", name="X", country="FR"))
+    assert len(docs) == 154            # both pages, nothing lost
+    assert f.offsets[:2] == [0, 100]   # paged by offset
+    assert len({d.doc_id for d in docs}) == 154
+    assert not src.errors              # fully fetched -> no truncation
+
+
 def test_fr_discover_queries_lei_and_isins():
     """When entity has ISINs, the where clause must include ISIN predicates (OR).
     Ensures pre-LEI-era records are not silently dropped."""
