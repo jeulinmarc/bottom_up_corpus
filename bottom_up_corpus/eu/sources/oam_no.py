@@ -8,9 +8,10 @@ Resolution:
 
 * ``POST /issuers`` → list of all issuers (fetched once, lazily cached).
 * Resolve ``entity.name`` → ``issuerSign`` by **exact normalised name match**:
-  collapse whitespace, casefold, strip diacritics, strip trailing legal forms
-  (`` asa``, `` as``, `` asa.``).  Strict: 0 or >1 active matches → record error
-  and return ``[]``.
+  strip diacritics, casefold, remove periods (``Ltd.`` → ``ltd``), collapse
+  whitespace, then strip ONE trailing legal form from the set actually present in
+  the live list (asa/as/ltd/limited/plc/inc/sa/nv/se/ab/bv/gmbh/ag/a-s).  Strict:
+  0 or >1 active matches → record error and return ``[]`` (never a guessed bind).
 
 Pagination:
 * ``GET /list?issuer=…&fromDate=…&toDate=…`` returns ``data.messages[]`` and
@@ -87,14 +88,18 @@ def _doc_type(category_ids: list[int]) -> str:
 # ---------------------------------------------------------------------------
 
 # Trailing legal forms, sorted longest-first so the most specific wins. Oslo Børs
-# lists Norwegian issuers (ASA/AS) and a large foreign tail (shipping/offshore)
-# under "Limited"/"Ltd"/"plc"/"Inc"; GLEIF and Oslo often spell the form
-# differently ("Golden Ocean Group Limited" vs "… Ltd"), so both must collapse to
-# the same core for the exact match to hold.
+# lists Norwegian issuers (ASA/AS) and a foreign tail under Limited/Ltd/plc/Inc/
+# AB/SA/SE/NV/BV/GmbH/AG/A-S; GLEIF and Oslo often spell the form differently
+# ("Golden Ocean Group Limited" vs "… Ltd"), so both must collapse to the same
+# core for the exact match to hold. The set is exactly the forms that actually
+# occur as a trailing token in the live /issuers list (after period removal):
+# oyj/incorporated never appear and were dropped; gmbh/ag do appear and were
+# added. A collision (e.g. an "AS" and an "ASA" issuer sharing a core) is safe:
+# _resolve_issuer_sign requires exactly one active match, so it declines rather
+# than mis-binds.
 _LEGAL_SUFFIXES = sorted((
-    " incorporated", " limited",
-    " asa", " plc", " ltd", " inc", " sa", " nv", " se",
-    " a/s", " as", " ab", " oyj", " bv",
+    " limited", " gmbh",
+    " asa", " plc", " ltd", " inc", " sa", " nv", " se", " ab", " bv", " a/s", " as", " ag",
 ), key=len, reverse=True)
 
 
