@@ -456,6 +456,19 @@ def test_normalise():
     assert _normalise("Some Corp AS") == "some corp"  # " as" → stripped
 
 
+def test_normalise_foreign_legal_forms():
+    """Oslo's foreign tail (shipping/offshore) uses Limited/Ltd/plc/Inc — and
+    GLEIF often spells the form differently, so both must collapse to one core."""
+    # GLEIF spelling vs Oslo spelling -> same core
+    assert _normalise("Golden Ocean Group Limited") == _normalise("Golden Ocean Group Ltd")
+    assert _normalise("2020 Bulkers Ltd.") == _normalise("2020 BULKERS LTD.") == "2020 bulkers"
+    assert _normalise("Frontline plc") == _normalise("FRONTLINE PLC") == "frontline"
+    assert _normalise("Borr Drilling Limited") == "borr drilling"
+    assert _normalise("Stolt-Nielsen Limited") == "stolt-nielsen"
+    # distinctive words are kept (no over-stripping) -> still distinguishes issuers
+    assert _normalise("Golden Ocean Group Ltd") != _normalise("Golden Energy Group Ltd")
+
+
 def test_esef_kind():
     """Files with .zip or .xhtml extension must get kind='esef'."""
     stub = _make_stub()

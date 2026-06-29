@@ -86,21 +86,32 @@ def _doc_type(category_ids: list[int]) -> str:
 # Name normalisation helpers
 # ---------------------------------------------------------------------------
 
-_LEGAL_SUFFIXES = (" asa.", " asa", " as")   # order matters: longer first
+# Trailing legal forms, sorted longest-first so the most specific wins. Oslo Børs
+# lists Norwegian issuers (ASA/AS) and a large foreign tail (shipping/offshore)
+# under "Limited"/"Ltd"/"plc"/"Inc"; GLEIF and Oslo often spell the form
+# differently ("Golden Ocean Group Limited" vs "… Ltd"), so both must collapse to
+# the same core for the exact match to hold.
+_LEGAL_SUFFIXES = sorted((
+    " incorporated", " limited",
+    " asa", " plc", " ltd", " inc", " sa", " nv", " se",
+    " a/s", " as", " ab", " oyj", " bv",
+), key=len, reverse=True)
 
 
 def _normalise(name: str) -> str:
-    """Casefold + collapse whitespace + strip diacritics + strip legal suffixes."""
+    """Casefold + collapse whitespace + strip diacritics + strip legal suffixes.
+
+    Periods are dropped first ("Ltd." -> "ltd", "S.A." -> "sa") so the suffix
+    set needs no dotted variants.
+    """
     # NFD decomposition → drop combining characters (diacritics)
-    nfd = unicodedata.normalize("NFD", name)
+    nfd = unicodedata.normalize("NFD", name or "")
     ascii_approx = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-    folded = ascii_approx.casefold().strip()
-    # Collapse internal whitespace
-    folded = " ".join(folded.split())
-    # Strip trailing legal forms (longest first so "asa." is caught before "asa")
+    folded = " ".join(ascii_approx.casefold().replace(".", "").split())
+    # Strip ONE trailing legal form (longest first).
     for suffix in _LEGAL_SUFFIXES:
         if folded.endswith(suffix):
-            folded = folded[: -len(suffix)].rstrip()
+            folded = folded[: -len(suffix)].strip()
             break
     return folded
 
