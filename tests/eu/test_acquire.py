@@ -48,6 +48,60 @@ def test_euronext_appended_after_national_for_its_markets(monkeypatch, tmp_path)
     assert calls.index("national") < calls.index("euronext"), "national must run first"
 
 
+def test_has_oslo_notice_signal():
+    from bottom_up_corpus.eu.acquire import _has_oslo_notice
+    osl = Document("e1", "L", "CY", "other", None, "x", "x", "en", "euronext", [],
+                   {"notice_number": "OSL_20260101_1_EUR"})
+    ams = Document("e2", "L", "NL", "other", None, "x", "x", "en", "euronext", [],
+                   {"notice_number": "AMS_20260101_1_EUR"})
+    assert _has_oslo_notice([[osl]]) is True
+    assert _has_oslo_notice([[ams]]) is False
+    assert _has_oslo_notice([[]]) is False
+
+
+def test_oslo_corroboration_invokes_newsweb_only_when_listed(monkeypatch, tmp_path):
+    """A non-NO uncovered issuer gets the rich Oslo NewsWeb pass ONLY when the
+    Euronext probe returned an Oslo (OSL_) notice — corroboration, no name guess."""
+    cfg = Config(data_dir=tmp_path / "data", contact="t@e.com")
+    ent = Entity("L1", "Frontline plc", "CY", resolution="isin")  # CY: no backend
+    monkeypatch.setattr(acq, "resolve_entities", lambda specs, *, fetcher: [ent])
+    monkeypatch.setattr(acq, "COUNTRY_BACKENDS", {})
+
+    class _Noop:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): return []
+    monkeypatch.setattr(acq, "FilingsXbrlOrg", _Noop)
+
+    osl_doc = Document("euronext-1", "L1", "CY", "other", None, "2026-01-01", "x",
+                       "en", "euronext", [], {"notice_number": "OSL_20260101_1_EUR"})
+    called = {}
+
+    class _NewsWeb:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): called["name"] = e.name; return []
+    monkeypatch.setattr(acq, "NewsWebNO", _NewsWeb)
+
+    # 1. Euronext returns an Oslo notice -> NewsWeb invoked.
+    class _EurOslo:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): return [osl_doc]
+    monkeypatch.setattr(acq, "EuronextSource", _EurOslo)
+    acq.acquire([{"isin": "X"}], fetcher=object(), config=cfg, download=False)
+    assert called.get("name") == "Frontline plc"
+
+    # 2. Euronext returns a non-Oslo (Amsterdam) notice -> NewsWeb NOT invoked.
+    called.clear()
+    ams_doc = Document("euronext-2", "L1", "CY", "other", None, "2026-01-01", "x",
+                       "en", "euronext", [], {"notice_number": "AMS_20260101_1_EUR"})
+
+    class _EurAms:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): return [ams_doc]
+    monkeypatch.setattr(acq, "EuronextSource", _EurAms)
+    acq.acquire([{"isin": "X"}], fetcher=object(), config=cfg, download=False)
+    assert "name" not in called
+
+
 def test_uncovered_country_gets_euronext_listing_fallback(monkeypatch, tmp_path):
     """An entity whose home country has no backend (e.g. Bermuda) gets the
     Euronext listing fallback (force_mic set), so a venue-listed offshore issuer

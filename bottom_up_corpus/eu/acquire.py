@@ -59,6 +59,18 @@ COUNTRY_BACKENDS = {
 }
 
 
+def _has_oslo_notice(per_backend) -> bool:
+    """True if the Euronext listing probe returned an Oslo (``OSL_``) notice for
+    the entity — i.e. it is confirmed admitted to Oslo Børs. The notice number is
+    exchange-prefixed (``OSL_…``/``AMS_…``/``LIS_…``), so this is an exchange
+    signal, not a name guess."""
+    return any(
+        d.source == "euronext"
+        and str(d.native_meta.get("notice_number", "")).upper().startswith("OSL")
+        for docs in per_backend for d in docs
+    )
+
+
 def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
     entities = resolve_entities(specs, fetcher=fetcher)
     _write_entity_index(entities, config)
@@ -93,6 +105,20 @@ def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
                 errors.append({"source": "acquire", "context": "discover",
                                "entity": e.lei, "error": str(exc)})
             errors.extend(getattr(b, "errors", []))
+        # Corroborated rich Oslo coverage: when the Euronext probe returned an
+        # Oslo (OSL_) notice for a non-Norwegian issuer, it is confirmed listed on
+        # Oslo Børs — so a name match to Oslo NewsWeb is backed by a second,
+        # independent Oslo signal and is safe from a coincidental same-name bind
+        # (NewsWeb has no ISIN to key on, so name alone would otherwise be a guess).
+        if e.country != "NO" and _has_oslo_notice(per_backend):
+            no_b = NewsWebNO(fetcher=fetcher, config=config)
+            try:
+                per_backend.append(no_b.discover(e))
+            except Exception as exc:  # noqa: BLE001
+                per_backend.append([])
+                errors.append({"source": "acquire", "context": "discover",
+                               "entity": e.lei, "error": str(exc)})
+            errors.extend(no_b.errors)
         all_docs.extend(merge_documents(per_backend))
 
     manifests = 0
