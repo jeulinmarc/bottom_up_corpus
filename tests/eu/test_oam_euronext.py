@@ -58,9 +58,12 @@ def test_published_ts():
     assert _published_ts("not a date") is None
 
 
-def test_country_to_mic_map_covers_six_markets():
-    assert set(EURONEXT_MICS) == {"NL", "BE", "FR", "PT", "NO", "IE"}
-    assert EURONEXT_MICS["PT"] == "XLIS" and EURONEXT_MICS["IE"] == "XMSM"
+def test_country_to_mic_map_covers_euronext_markets():
+    # Ireland is excluded: Euronext Dublin's per-issuer feed is empty, so Irish
+    # issuers resolve through the FCA NSM (GB backend) by LEI instead.
+    assert set(EURONEXT_MICS) == {"NL", "BE", "FR", "PT", "NO"}
+    assert EURONEXT_MICS["PT"] == "XLIS"
+    assert "IE" not in EURONEXT_MICS
 
 
 # ---------------------------------------------------------------------------
