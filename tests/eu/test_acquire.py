@@ -48,6 +48,33 @@ def test_euronext_appended_after_national_for_its_markets(monkeypatch, tmp_path)
     assert calls.index("national") < calls.index("euronext"), "national must run first"
 
 
+def test_uncovered_country_gets_euronext_listing_fallback(monkeypatch, tmp_path):
+    """An entity whose home country has no backend (e.g. Bermuda) gets the
+    Euronext listing fallback (force_mic set), so a venue-listed offshore issuer
+    is still covered."""
+    cfg = Config(data_dir=tmp_path / "data", contact="t@e.com")
+    ent = Entity("L1", "2020 Bulkers Ltd", "BM", resolution="isin")  # BM: no backend
+    monkeypatch.setattr(acq, "resolve_entities", lambda specs, *, fetcher: [ent])
+    monkeypatch.setattr(acq, "COUNTRY_BACKENDS", {})  # nothing for BM
+
+    class _Noop:
+        def __init__(self, *a, **k): self.errors = []
+        def discover(self, e): return []
+    monkeypatch.setattr(acq, "FilingsXbrlOrg", _Noop)
+
+    captured = {}
+
+    class _Euronext:
+        def __init__(self, *a, force_mic=None, **k):
+            captured["force_mic"] = force_mic
+            self.errors = []
+        def discover(self, e): return []
+    monkeypatch.setattr(acq, "EuronextSource", _Euronext)
+
+    acq.acquire([{"isin": "BMG9156K1018"}], fetcher=object(), config=cfg, download=False)
+    assert captured.get("force_mic") == acq._LISTING_MIC  # listing mode engaged
+
+
 def test_acquire_dedupes_byte_identical_across_backends(monkeypatch, tmp_path):
     """Two backends emit the same disclosure (same lei/day/type) under different
     file names; once downloaded, the identical sha256 confirms the duplicate and

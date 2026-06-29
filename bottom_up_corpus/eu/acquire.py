@@ -19,7 +19,7 @@ from .sources.oam_ch import DisclosureCH
 from .sources.oam_de import BundesanzeigerDE
 from .sources.oam_dk import OamDK
 from .sources.oam_es import CnmvES
-from .sources.oam_euronext import EURONEXT_MICS, EuronextSource
+from .sources.oam_euronext import EURONEXT_MICS, EuronextSource, _LISTING_MIC
 from .sources.oam_fi import OamFI
 from .sources.oam_fr import InfoFinanciereFR
 from .sources.oam_gb import NsmGB
@@ -77,6 +77,13 @@ def acquire(specs, *, fetcher, config: Config, download: bool = True) -> dict:
         # more-complete national document wins the first-occurrence dedup.
         if e.country in EURONEXT_MICS:
             backends.append(EuronextSource(fetcher=fetcher, config=config))
+        elif COUNTRY_BACKENDS.get(e.country) is None:
+            # The home country has no backend, but the issuer may be LISTED on a
+            # Euronext venue (e.g. a Bermuda/Luxembourg issuer on Oslo/Amsterdam).
+            # The notices feed is ISIN-keyed, so query by the entity's ISINs and
+            # verify the issuer name per notice (rejects market-wide noise).
+            backends.append(EuronextSource(fetcher=fetcher, config=config,
+                                           force_mic=_LISTING_MIC))
         per_backend = []
         for b in backends:
             try:

@@ -44,6 +44,11 @@ EURONEXT_MICS: dict[str, str] = {
     "NO": "XOSL",
 }
 
+# Any MIC works for a listing lookup — the notices feed keys on the ISIN and
+# ignores the MIC in the URL (verified: ASML's ISIN under XOSL returns ASML's
+# Amsterdam notices). Used by the listing fallback for non-Euronext-home issuers.
+_LISTING_MIC = "XPAR"
+
 _FEED_URL = "https://live.euronext.com/en/ajax/getNoticePublicData/"
 _DOWNLOAD_BASE = "https://live.euronext.com"
 # The feed paginates via ``?pageSize=50&alias=1&pageNum=N`` (the pager's own
@@ -64,6 +69,11 @@ _ROW_START_RE = re.compile(r'<tr\b[^>]*\bclass="row_(\d+)\b', re.I)
 _NOTICENUMBER_RE = re.compile(r'<td[^>]*\bclass="noticenumber"[^>]*>\s*([^<]+?)\s*</td>', re.I)
 _NOTICEDATE_RE = re.compile(r'<td[^>]*\bclass="noticedate[^"]*"[^>]*>\s*([^<]+?)\s*</td>', re.I)
 _NOTICENAME_TD_RE = re.compile(r'<td[^>]*\bclass="noticename[^"]*"[\s\S]*?</td>', re.I)
+# The 'instruments' cell carries the issuer name — used to verify a notice really
+# belongs to the entity when querying by listing (the feed is ISIN-keyed but can
+# return market-wide "Multiple" notices for an ISIN it does not list).
+_INSTRUMENTS_TD_RE = re.compile(r'<td[^>]*\bclass="instruments[^"]*"[\s\S]*?</td>', re.I)
+_NAME_NORM_RE = re.compile(r'[^a-z0-9]+')
 # Capture the whole notice-download query string; params are parsed order-free
 # below (Euronext does not guarantee a fixed param order).
 _DOWNLOAD_HREF_RE = re.compile(r'notice-download\?([^"\'<>\s]+)', re.I)
@@ -116,6 +126,21 @@ def _cell_text(html_fragment: str) -> str:
     return _WS_RE.sub(" ", _TAG_RE.sub(" ", cleaned)).strip()
 
 
+def _norm(s: str) -> str:
+    """Lower-case, drop non-alphanumerics, collapse — for issuer-name matching."""
+    return _NAME_NORM_RE.sub(" ", (s or "").lower()).strip()
+
+
+def _instrument_matches(row: str, want_norm: str) -> bool:
+    """True when a notice row's issuer cell matches the entity (suffix-stripped
+    containment), rejecting the feed's market-wide ``Multiple`` notices."""
+    m = _INSTRUMENTS_TD_RE.search(row)
+    instr = _norm(_cell_text(m.group(0))) if m else ""
+    if not instr or instr == "multiple" or not want_norm:
+        return False
+    return instr in want_norm or want_norm in instr
+
+
 class EuronextSource(OamSource):
     """Euronext exchange-notices backend, shared across all Euronext markets.
 
@@ -126,19 +151,30 @@ class EuronextSource(OamSource):
     name = "euronext"
     country = "EU"  # multi-market; each Document carries the entity's own country.
 
+    def __init__(self, fetcher=None, config=None, *, force_mic: str | None = None):
+        """``force_mic`` enables *listing* mode: the entity's home country has no
+        backend, but it may be LISTED on a Euronext venue. The notices feed is
+        ISIN-keyed (the MIC in the URL is ignored — any value works), so we query
+        by the entity's ISINs and **verify each notice's issuer name** matches the
+        entity, rejecting the market-wide "Multiple" notices the feed returns for
+        ISINs it does not actually list (no-guess)."""
+        super().__init__(fetcher, config)
+        self._force_mic = force_mic
+
     def list_issuers(self) -> list[IssuerRef]:
         """Return empty — full enumeration is a scale-up concern."""
         return []
 
     def discover(self, entity: Entity) -> list[Document]:
-        """Return the issuer's Euronext notices for its market.
+        """Return the issuer's Euronext notices.
 
-        Resolves the market MIC from the entity's country, queries the notices
-        feed for each of the entity's ISINs and de-duplicates by notice id. An
-        entity outside the Euronext markets returns ``[]`` (no error: the backend
-        simply does not apply there).
+        Home-market mode: the MIC is the entity-country's Euronext venue. Listing
+        mode (``force_mic``): query by ISIN regardless of home country, keeping
+        only notices whose issuer name matches the entity. De-duplicates by notice
+        id. An entity outside Euronext (home mode, no venue) returns ``[]``.
         """
-        mic = EURONEXT_MICS.get(entity.country)
+        listing = self._force_mic is not None
+        mic = self._force_mic or EURONEXT_MICS.get(entity.country)
         if not mic:
             return []
         isins = [i for i in (entity.isins or ()) if i]
@@ -154,6 +190,7 @@ class EuronextSource(OamSource):
             return []
 
         now = datetime.now(timezone.utc).isoformat()
+        want = _norm(entity.name)
         seen: set[str] = set()
         docs: list[Document] = []
         for isin in isins:
@@ -161,6 +198,8 @@ class EuronextSource(OamSource):
                 if notice_id in seen:
                     continue
                 seen.add(notice_id)
+                if listing and not _instrument_matches(row, want):
+                    continue  # market-wide noise / wrong issuer — never bind
                 docs.append(self._to_document(notice_id, row, entity, mic, now))
         return docs
 
