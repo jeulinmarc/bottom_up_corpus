@@ -97,3 +97,78 @@ def test_isin_population_caps_the_count(monkeypatch):
     })
     [e] = resolve_entities([{"lei": "X"}], fetcher=f)
     assert len(e.isins) == 5
+
+
+# ---------------------------------------------------------------------------
+# OpenFIGI bridge: GLEIF ISIN->LEI mapping misses the ISIN
+# ---------------------------------------------------------------------------
+
+from bottom_up_corpus.openfigi import OPENFIGI_URL  # noqa: E402
+
+
+def _gleif_rec(lei, name, country):
+    return {"attributes": {"lei": lei, "entity": {
+        "legalName": {"name": name}, "legalAddress": {"country": country}}}}
+
+
+class _BridgeFetcher:
+    """GLEIF ISIN filter is empty; OpenFIGI returns a name; GLEIF fulltext returns
+    a noise record plus the real one. Records the OpenFIGI call + fulltext query."""
+
+    def __init__(self, *, figi_name, fulltext_rows):
+        self._name = figi_name
+        self._rows = fulltext_rows
+        self.figi_called = False
+        self.fulltext_url = None
+
+    def get_json(self, url, **_):
+        if "filter%5Bisin%5D" in url:
+            return {"data": []}             # GLEIF has no ISIN->LEI mapping
+        if "fulltext" in url:
+            self.fulltext_url = url
+            return {"data": self._rows}
+        if "/isins" in url:
+            return {"data": []}
+        raise RuntimeError(f"unexpected get_json {url}")
+
+    def post_json(self, url, body, **_):
+        self.figi_called = True
+        assert url == OPENFIGI_URL
+        assert body == [{"idType": "ID_ISIN", "idValue": "IE00BF2NR112"}]
+        return [{"data": [{"name": self._name}]}] if self._name else [{"data": []}]
+
+
+def test_isin_miss_bridges_via_openfigi_to_single_gleif_match():
+    """GLEIF ISIN miss -> OpenFIGI name -> GLEIF fulltext; the one record whose
+    normalised legal name matches binds the LEI (resolution='isin-figi')."""
+    f = _BridgeFetcher(
+        figi_name="GREENCOAT RENEWABLES PLC",
+        fulltext_rows=[
+            _gleif_rec("NOISE", "Greencoat Capital LLP", "GB"),               # != normalised
+            _gleif_rec("GREENLEI", "Greencoat Renewables Public Limited Company", "IE"),
+        ],
+    )
+    [e] = resolve_entities([{"isin": "IE00BF2NR112"}], fetcher=f, populate_isins=False)
+    assert f.figi_called
+    assert e.lei == "GREENLEI" and e.resolution == "isin-figi" and e.country == "IE"
+    assert "IE00BF2NR112" in e.isins  # the queried ISIN is seeded
+    assert "PLC" not in f.fulltext_url  # GLEIF queried by the *core* name
+
+
+def test_bridge_is_no_guess_on_ambiguous_normalised_match():
+    """Two records normalising to the same core -> never bind."""
+    f = _BridgeFetcher(
+        figi_name="GREENCOAT RENEWABLES PLC",
+        fulltext_rows=[
+            _gleif_rec("A", "Greencoat Renewables PLC", "IE"),
+            _gleif_rec("B", "Greencoat Renewables Limited", "GB"),  # also -> 'greencoat renewables'
+        ],
+    )
+    [e] = resolve_entities([{"isin": "IE00BF2NR112"}], fetcher=f, populate_isins=False)
+    assert e.lei is None and e.resolution == "unresolved"
+
+
+def test_bridge_unresolved_when_openfigi_has_no_name():
+    f = _BridgeFetcher(figi_name=None, fulltext_rows=[])
+    [e] = resolve_entities([{"isin": "IE00BF2NR112"}], fetcher=f, populate_isins=False)
+    assert e.lei is None and e.resolution == "unresolved"
