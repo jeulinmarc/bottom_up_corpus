@@ -6,10 +6,39 @@ ambiguous match.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from ..openfigi import OPENFIGI_URL
+
 GLEIF = "https://api.gleif.org/api/v1/lei-records"
+
+# Name normalisation for the OpenFIGI->GLEIF bridge (below): GLEIF and OpenFIGI
+# spell legal forms differently ("PLC" vs "Public Limited Company"), so collapse
+# both to a comparable core before matching.
+_NORM_DROP = re.compile(
+    r"\b(?:plc|ltd|limited|sa|nv|se|ag|inc|oyj|asa|ab|group|holdings?|co|company|the)\b"
+)
+# Trailing legal form, stripped from the GLEIF *fulltext* query (GLEIF fulltext
+# ANDs the tokens, and a trailing "PLC" matches no record -> 0 hits).
+_LEGAL_TAIL = re.compile(
+    r"[\s,]+(?:p\.?l\.?c\.?|ltd\.?|limited|s\.?a\.?|n\.?v\.?|se|ag|inc\.?|oyj|asa|ab)\.?$", re.I
+)
+
+
+def _norm_name(name: str) -> str:
+    s = (name or "").lower().replace("public limited company", "plc")
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = _NORM_DROP.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _core_query(name: str) -> str:
+    s = name or ""
+    for _ in range(2):  # peel stacked forms, e.g. "… Holding AG"
+        s = _LEGAL_TAIL.sub("", s).strip()
+    return s
 
 # Cap on ISINs fetched per entity. One ISIN is enough to key the ISIN-search OAM
 # backends (BE/…); a few add robustness. The cap bounds both the GLEIF page and the
@@ -24,7 +53,7 @@ class Entity:
     country: str
     isins: tuple[str, ...] = ()
     tickers: tuple[str, ...] = ()
-    resolution: str = ""  # "lei" | "isin" | "ticker" | "name" | "unresolved"
+    resolution: str = ""  # "lei" | "isin" | "isin-figi" | "ticker" | "name" | "unresolved"
 
 
 def _from_gleif_record(attrs: dict) -> tuple[str, str, str]:
@@ -66,6 +95,45 @@ def _lookup_lei(lei: str, fetcher, *, with_isins: bool) -> Entity | None:
     return Entity(lei=lei_v or lei, name=name, country=country, isins=isins, resolution="lei")
 
 
+def _openfigi_name(isin: str, fetcher) -> str | None:
+    """Map an ISIN to its issuer name via OpenFIGI (broader ISIN coverage than
+    GLEIF's ISIN->LEI mapping). Best-effort: ``None`` on any failure/miss."""
+    try:
+        res = fetcher.post_json(OPENFIGI_URL, [{"idType": "ID_ISIN", "idValue": isin}])
+    except Exception:
+        return None
+    if isinstance(res, list) and res and isinstance(res[0], dict):
+        data = res[0].get("data") or []
+        if data:
+            return data[0].get("name")
+    return None
+
+
+def _resolve_via_openfigi(isin: str, fetcher, *, with_isins: bool) -> Entity | None:
+    """Fallback when GLEIF's ISIN->LEI mapping misses the ISIN: bridge through the
+    issuer name (OpenFIGI) to a GLEIF LEI.
+
+    No-guess: GLEIF is queried by the *core* name (legal form stripped, so its
+    token-AND fulltext returns the issuer) and bound ONLY if exactly one record's
+    normalised legal name equals the normalised OpenFIGI name.
+    """
+    name = _openfigi_name(isin, fetcher)
+    want = _norm_name(name) if name else ""
+    if not want:
+        return None
+    url = f"{GLEIF}?filter%5Bfulltext%5D={quote(_core_query(name))}&page%5Bsize%5D=50"
+    try:
+        rows = fetcher.get_json(url).get("data") or []
+    except Exception:
+        return None
+    matches = [r for r in rows if _norm_name(_from_gleif_record(r["attributes"])[1]) == want]
+    if len(matches) != 1:
+        return None  # zero or ambiguous -> never bind
+    lei_v, nm, ctry = _from_gleif_record(matches[0]["attributes"])
+    isins = _fetch_isins(lei_v, fetcher, seed=isin) if with_isins else (isin,)
+    return Entity(lei=lei_v, name=nm, country=ctry, isins=isins, resolution="isin-figi")
+
+
 def _lookup_isin(isin: str, fetcher, *, with_isins: bool) -> Entity:
     url = f"{GLEIF}?filter%5Bisin%5D={quote(isin)}&page%5Bsize%5D=1"
     try:
@@ -76,6 +144,11 @@ def _lookup_isin(isin: str, fetcher, *, with_isins: bool) -> Entity:
         lei_v, nm, ctry = _from_gleif_record(rows[0]["attributes"])
         isins = _fetch_isins(lei_v, fetcher, seed=isin) if with_isins else (isin,)
         return Entity(lei=lei_v, name=nm, country=ctry, isins=isins, resolution="isin")
+    # GLEIF's ISIN->LEI mapping is incomplete (it can hold an issuer's LEI yet not
+    # its equity ISIN); bridge through OpenFIGI before giving up.
+    bridged = _resolve_via_openfigi(isin, fetcher, with_isins=with_isins)
+    if bridged is not None:
+        return bridged
     return Entity(lei=None, name="", country="", resolution="unresolved")
 
 
