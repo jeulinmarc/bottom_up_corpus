@@ -1,10 +1,11 @@
 # bottom_up_corpus — Roadmap & next steps
 
-> Working notes, **not** committed. Living plan for what's done and what's next.
+> Living plan for what's done and what's next.
 
-## Status — SEC-EDGAR pillar complete
+## Status — both pillars built
 
-All merged to `main`; 170 tests pass.
+🇺🇸 **SEC** pillar complete + 🇪🇺 **EU** pillar built (14 jurisdictions). All merged
+to `main`. See [`SEC_PILLAR.md`](SEC_PILLAR.md) and [`EU_PILLAR.md`](EU_PILLAR.md).
 
 | Area | Status |
 |---|---|
@@ -18,8 +19,11 @@ All merged to `main`; 170 tests pass.
 | Cross-CIK entities; S&P 500 historical universe; CODEOWNERS | ✅ |
 | Hardening (PRs #15–18) + docs reconciliation (#19) | ✅ |
 
-Not started: **Phase 5 (international sources)**. Unbuilt SEC niceties:
-`edgar_fts` (full-text search), `wayback` (dead-doc recovery), `adapters/` layer.
+**Phase 5 (international) — EU pillar built.** The `bottom_up_corpus/eu/` package
+federates 13 national OAMs + Euronext + filings.xbrl.org behind a pluggable
+`OamSource` interface, keyed on GLEIF LEI/ISIN (a parallel pillar to the SEC one,
+with its own `Document`/`acquire` model). See [`EU_PILLAR.md`](EU_PILLAR.md) +
+[`EU_BACKENDS.md`](EU_BACKENDS.md). Unbuilt SEC niceties: `edgar_fts`, `wayback`.
 
 ## Immediate operational task — S&P 500 family-A download
 
@@ -36,22 +40,28 @@ Notes: family A = A1 10-K, A2 10-Q, A3 20-F, A4 40-F. Default discovery window i
 last 20 years; full-history A-forms for ~500 issuers is large (tens of thousands of
 multi-MB submissions) — bound by `--years`/`--since` and/or `--limit` as needed.
 
-## Phase 5 — first international source (next major work)
+## EU pillar — done, with follow-ups
 
-Add a non-US open EDGAR-equivalent behind the same `FilingRecord` schema + pipeline.
+The European pillar (`bottom_up_corpus/eu/`) is built and live-validated across 14
+jurisdictions ([`EU_PILLAR.md`](EU_PILLAR.md)). Remaining EU follow-ups:
 
-1. **Prep:** add `language` (default `en`) + `jurisdiction` fields to
-   `models.FilingRecord`; thread into `rag._payload` + ingestion doc; add a free-API-key
-   config knob (mirroring `BOTTOM_UP_CORPUS_CONTACT`). Confirm `sources/base.Source`
-   is jurisdiction-agnostic (it is).
-2. **Adapter:** new `sources/edinet.py` (Japan) or `dart.py` (Korea) — document-list
-   endpoint → `FilingRecord`; map their form families to A–F (or a scoped set). Reuse
-   `storage`, `pipeline`, `completeness`, `rag`.
-3. **Universe + CLI:** committed issuer list (or all-filers-in-window) + a `--source`
-   selector / subcommand mirroring `discover`/`download`.
-4. **Tests:** fixture-driven parser + fake-fetcher pipeline tests (as `test_edgar_*`).
+- **Pillar B — structured ESEF/IFRS extraction.** Pillar A (download every file)
+  is done; parse the ESEF/iXBRL packages into structured financials (an EU analog
+  of the SEC F1 layer) via Arelle.
+- **Euronext `company-news`** — issuer press releases (results, incl. PDFs) on top
+  of the corporate-event *notices* the Euronext backend already captures.
+- **CMVM Portugal-direct** — only if an authenticated route to its OutSystems
+  portal becomes available (PT is covered via Euronext today).
+- **Richer Oslo coverage** — a reliable ISIN→issuerSign mapping (OpenFIGI's Oslo
+  ticker coverage is spotty); foreign-domiciled Oslo issuers are covered today via
+  the corroborated name path.
 
-Lead adapter: **TBD (EDINET vs DART)** — both open APIs with XBRL; free API key each.
+## Other jurisdictions (future)
+
+Beyond the EU/UK, the same approach extends to other open disclosure systems —
+**Japan EDINET**, **Korea DART** (both open XBRL APIs) — as further `OamSource`
+backends (or, for the US-style `FilingRecord` pipeline, dedicated `Source`
+adapters). Not started.
 
 ## Backlog (optional, in-scope SEC)
 - `sources/edgar_fts.py` — efts.sec.gov full-text search discovery (targeted, 2001+).

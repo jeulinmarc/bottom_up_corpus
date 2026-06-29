@@ -388,10 +388,16 @@ sequenceDiagram
 
 ## 9. Extending to new jurisdictions (Phase 5)
 
-The architecture is deliberately source-pluggable: a new jurisdiction is a new
-`Source` subclass that maps its endpoint to the same `FilingRecord` schema, plus
-(optionally) entries in `taxonomy.py`. The storage, manifest, RAG, and
-completeness layers are jurisdiction-agnostic and need no change. `openfigi.py`'s
-triage (`registry_candidate` / `private_placement`) is already jurisdiction-neutral
-to support identifying non-EDGAR issuers. Candidate sources: Japan EDINET, Korea
-DART, EU ESEF / filings.xbrl.org, UK Companies House, France INPI, Brazil CVM.
+This is realized for Europe: the **EU pillar** (`bottom_up_corpus/eu/`) federates
+13 national OAMs + Euronext + filings.xbrl.org behind a pluggable `OamSource`
+interface, keyed on the GLEIF **LEI/ISIN** instead of the CIK — a parallel pillar
+with its own `Document`/`acquire` model (it does **not** reuse the SEC
+`Source`/`FilingRecord` pipeline, because EU identity and storage differ). See
+[`EU_PILLAR.md`](EU_PILLAR.md) and [`EU_BACKENDS.md`](EU_BACKENDS.md). `openfigi.py`'s
+triage (`registry_candidate` / `private_placement`) is jurisdiction-neutral and is
+reused there (the ISIN→LEI bridge).
+
+For US-shaped sources, the SEC pillar itself stays source-pluggable: a new
+`Source` subclass maps its endpoint to the same `FilingRecord` schema; the storage,
+manifest, RAG and completeness layers need no change. Candidate future sources:
+Japan EDINET, Korea DART, Brazil CVM.
