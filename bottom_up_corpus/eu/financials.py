@@ -30,6 +30,8 @@ def facts_for_entity(entity: Entity, *, fetcher) -> dict[str, list[dict]]:
             report = fetcher.get_json(jf["url"])
         except Exception:        # noqa: BLE001 — a bad/absent report is skipped, never fatal
             continue
+        if not report:           # a None/empty body is skipped, never fatal
+            continue
         part = flatten_oim_json(
             report,
             filed=str(meta.get("date_added") or doc.published_ts or ""),
