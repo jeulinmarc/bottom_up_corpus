@@ -285,3 +285,178 @@ def test_register_financials_cli(monkeypatch, tmp_path):
     args = cli.build_parser().parse_args(["register-financials", "--orgnrs", "1,2", "--write"])
     assert args.func(args) == 0
     assert captured["specs"] == [{"orgnr": "1"}, {"orgnr": "2"}] and captured["write"] is True
+
+
+# --- Review fixes I1/I2/I3 ----------------------------------------------------
+# Real Brreg entries captured live for small AS filers that report NO non-current
+# liabilities: `langsiktigGjeld` is an EMPTY dict, so the `sumLangsiktigGjeld` leaf is
+# ABSENT — exactly the case I2 must synthesize so gearing still computes.
+_NO_LTDEBT_POS = {  # orgnr 936133711, SELSKAP 2025, POSITIVE equity 13_858_635
+    "id": 6590397,
+    "regnskapstype": "SELSKAP",
+    "regnskapsperiode": {"fraDato": "2025-08-22", "tilDato": "2025-12-31"},
+    "valuta": "NOK",
+    "egenkapitalGjeld": {
+        "sumEgenkapitalGjeld": 13865135.0,
+        "egenkapital": {
+            "sumEgenkapital": 13858635.0,
+            "opptjentEgenkapital": {"sumOpptjentEgenkapital": 13400197.0},
+            "innskuttEgenkapital": {"sumInnskuttEgenkaptial": 458439.0},
+        },
+        "gjeldOversikt": {
+            "sumGjeld": 6500.0,
+            "kortsiktigGjeld": {"sumKortsiktigGjeld": 6500.0},
+            "langsiktigGjeld": {},                 # <- no sumLangsiktigGjeld leaf
+        },
+    },
+    "eiendeler": {
+        "sumFordringer": 0.0,
+        "sumInvesteringer": 10874020.0,
+        "sumBankinnskuddOgKontanter": 201489.0,
+        "sumEiendeler": 13865135.0,
+        "omloepsmidler": {"sumOmloepsmidler": 11075509.0},
+        "anleggsmidler": {"sumAnleggsmidler": 2789627.0},
+    },
+    "resultatregnskapResultat": {
+        "ordinaertResultatFoerSkattekostnad": 176255.0,
+        "aarsresultat": 176255.0,
+        "finansresultat": {
+            "nettoFinans": 184005.0,
+            "finansinntekt": {"sumFinansinntekter": 184005.0},
+            "finanskostnad": {"sumFinanskostnad": 0.0},
+        },
+        "driftsresultat": {
+            "driftsresultat": -7750.0,
+            "driftsinntekter": {"sumDriftsinntekter": 0.0},
+            "driftskostnad": {"sumDriftskostnad": 7750.0},
+        },
+    },
+}
+
+_NO_LTDEBT_NEG = {  # orgnr 935211026, SELSKAP 2025, NEGATIVE equity -168_967
+    "id": 6409129,
+    "regnskapstype": "SELSKAP",
+    "regnskapsperiode": {"fraDato": "2025-03-04", "tilDato": "2025-12-31"},
+    "valuta": "NOK",
+    "egenkapitalGjeld": {
+        "sumEgenkapitalGjeld": 124869.0,
+        "egenkapital": {
+            "sumEgenkapital": -168967.0,
+            "opptjentEgenkapital": {"sumOpptjentEgenkapital": -198967.0},
+            "innskuttEgenkapital": {"sumInnskuttEgenkaptial": 30000.0},
+        },
+        "gjeldOversikt": {
+            "sumGjeld": 293836.0,
+            "kortsiktigGjeld": {"sumKortsiktigGjeld": 293836.0},
+            "langsiktigGjeld": {},                 # <- no sumLangsiktigGjeld leaf
+        },
+    },
+    "eiendeler": {
+        "sumFordringer": 100000.0,
+        "sumInvesteringer": 0.0,
+        "sumBankinnskuddOgKontanter": 24869.0,
+        "sumEiendeler": 124869.0,
+        "omloepsmidler": {"sumOmloepsmidler": 124869.0},
+        "anleggsmidler": {"sumAnleggsmidler": 0.0},
+    },
+    "resultatregnskapResultat": {
+        "ordinaertResultatFoerSkattekostnad": -198967.0,
+        "aarsresultat": -198967.0,
+        "finansresultat": {
+            "nettoFinans": 0.0,
+            "finansinntekt": {"sumFinansinntekter": 0.0},
+            "finanskostnad": {"sumFinanskostnad": 0.0},
+        },
+        "driftsresultat": {
+            "driftsresultat": -198967.0,
+            "driftsinntekter": {"sumDriftsinntekter": 100000.0},
+            "driftskostnad": {"loennskostnad": 99180.0, "sumDriftskostnad": 298967.0},
+        },
+    },
+}
+
+
+class _MultiBrregFetcher:
+    """Brreg accounts fetcher that dispatches by the orgnr embedded in the URL."""
+    def __init__(self, by_orgnr): self._by = by_orgnr
+    def get_json(self, url, **kw):
+        orgnr = url.rstrip("/").rsplit("/", 1)[-1]
+        return self._by.get(orgnr, [])
+
+
+# --- I1: tangible_book_value is structurally unprovable -> never emitted ------
+def test_i1_tangible_book_value_suppressed(tmp_path):
+    # Equinor is a complete filer for which the engine WOULD compute tangible_book_value
+    # (it collapses to equity); the producer must suppress it (and its per-share form).
+    _, rows = _run(tmp_path, [_KONSERN_2022, _SELSKAP_2022])
+    assert rows  # sanity: rows were emitted
+    assert not any(r["concept"] == "tangible_book_value" for r in rows)
+    assert not any(r["concept"] == "tangible_book_value_per_share" for r in rows)
+    # control: a normal derived metric is still present
+    assert any(r["kind"] == "derived" and r["concept"] == "debt_to_equity" for r in rows)
+
+
+# --- I2: synthesize long_term_debt so gearing computes for no-LT-debt filers --
+def test_i2_synthesizes_long_term_debt_when_leaf_absent():
+    m = map_brreg_entry(_NO_LTDEBT_POS)
+    ltd = m["values"]["long_term_debt"]
+    assert ltd["value"] == 0                        # 6500 (sumGjeld) - 6500 (sumKortsiktigGjeld)
+    assert "derived" in ltd["tag"]                  # marked as synthesized, not a real leaf
+
+
+def test_i2a_gearing_for_no_lt_debt_positive_equity(tmp_path):
+    _, rows = _run(tmp_path, [_NO_LTDEBT_POS], orgnr="936133711")
+    td = next(r for r in rows if r["kind"] == "derived" and r["concept"] == "total_debt")
+    assert td["value"] == 6500                       # = sumGjeld, via synth LTD(0)+short(6500)
+    # positive equity -> debt_to_equity IS emitted (engine's div_pos passes)
+    assert any(r["kind"] == "derived" and r["concept"] == "debt_to_equity" for r in rows)
+
+
+def test_i2b_gearing_for_no_lt_debt_negative_equity(tmp_path):
+    _, rows = _run(tmp_path, [_NO_LTDEBT_NEG], orgnr="935211026")
+    td = next(r for r in rows if r["kind"] == "derived" and r["concept"] == "total_debt")
+    assert td["value"] == 293836
+    # debt_to_assets present; debt_to_equity may be suppressed (non-positive equity) -> not required
+    assert any(r["kind"] == "derived" and r["concept"] == "debt_to_assets" for r in rows)
+
+
+def test_i2_noop_when_sum_langsiktig_present():
+    # Equinor KONSERN has a REAL sumLangsiktigGjeld leaf -> synthesis is skipped and
+    # long_term_debt keeps the real tag (confirms the no-op path).
+    m = map_brreg_entry(_KONSERN_2022)
+    ltd = m["values"]["long_term_debt"]
+    assert ltd["value"] == 60226000000
+    assert ltd["tag"] == "sumLangsiktigGjeld"
+    assert "derived" not in ltd["tag"]
+
+
+# --- I3: one malformed record must not abort the batch (nor lose coverage) ----
+def test_i3_malformed_record_does_not_abort_batch(tmp_path):
+    from bottom_up_corpus.registers.financials import build_register_financials
+    # `regnskapsperiode` as a string -> AttributeError in dedupe/map for the first orgnr;
+    # the second orgnr is well-formed and must still be processed.
+    bad = {**_KONSERN_2022, "regnskapsperiode": "not-a-dict"}
+    cfg = Config(data_dir=tmp_path)
+    fetcher = _MultiBrregFetcher({"100000000": [bad], "923609016": [_KONSERN_2022]})
+    rep = build_register_financials(
+        [{"orgnr": "100000000"}, {"orgnr": "923609016"}],
+        fetcher=fetcher, config=cfg, write=True)
+    assert rep["errors"] == 1                         # counted separately, not as no_financials
+    assert rep["no_financials"] == 0
+    assert rep["with_financials"] == 1
+    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    assert cov_path.exists()                          # coverage write still ran post-loop
+    cov = {c["orgnr"]: c for c in (json.loads(x) for x in cov_path.read_text().splitlines())}
+    assert cov["100000000"]["status"] == "error" and "error" in cov["100000000"]
+    assert cov["923609016"]["status"] == "ok"
+    assert (tmp_path / "financials_register" / "923609016.jsonl").exists()
+
+
+def test_i3b_heterogeneous_ids_do_not_crash_dedup(tmp_path):
+    # Two entries for the SAME (period, type) with heterogeneous ids (str vs int): the old
+    # `e_id >= cur_id` raised TypeError; the type-safe guard keeps last-seen instead.
+    a = copy.deepcopy(_KONSERN_2022); a["id"] = "x"   # non-int id
+    b = copy.deepcopy(_KONSERN_2022); b["id"] = 5
+    rep, rows = _run(tmp_path, [a, b])
+    assert rep["errors"] == 0 and rep["with_financials"] == 1 and rep["periods"] == 1
+    assert any(r["concept"] == "revenue" and r["value"] == 150806000000 for r in rows)

@@ -86,7 +86,7 @@ engine emits a strict *subset* of its full derived block — for a complete file
 (e.g. Equinor) exactly these:
 
 - **Aggregates:** `total_debt`, `net_debt`, `net_cash`, `working_capital`,
-  `tangible_book_value`, `nopat`, `invested_capital`
+  `nopat`, `invested_capital`
 - **Margins:** `operating_margin`, `net_margin`
 - **Returns / tax:** `roe`, `roa`, `roic`, `effective_tax_rate`
 - **Leverage / coverage:** `debt_to_equity`, `debt_to_assets`, `interest_coverage`
@@ -98,6 +98,12 @@ A metric whose specific inputs are missing for a given period is simply omitted 
 particular **no `ebitda`** (no D&A), **no `free_cash_flow`, `cfo_to_debt` or
 `fcf_to_debt`** (no cash-flow statement) and **no `net_debt_to_ebitda`** — these are
 never produced for register rows.
+
+There is also **no `tangible_book_value`**: Brreg aggregates intangibles into
+`sumAnleggsmidler` and exposes no goodwill/intangibles breakdown, so true tangible book
+value cannot be derived — the engine's TBV would collapse to `equity` and silently
+overstate it for any obligor carrying intangibles. Plain book value remains available as
+the reported `equity` line.
 
 A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
 processed: `status="ok"` with a period count, or `"no-financials"` / `"unresolved"`.
@@ -139,6 +145,14 @@ short_term_debt  ← sumKortsiktigGjeld  (all current liabilities)
 long_term_debt   ← sumLangsiktigGjeld  (all non-current liabilities)
 total_debt       ≈ total liabilities   (not pure financial debt)
 ```
+
+When a filer has no non-current liabilities, Brreg omits the `sumLangsiktigGjeld` leaf
+entirely (`langsiktigGjeld: {}`). Because the engine gates `total_debt` — and therefore
+every gearing metric — on `long_term_debt` being present, `long_term_debt` is in that
+case **synthesized** as total − current liabilities (`sumGjeld − sumKortsiktigGjeld`,
+recorded with a `derived` tag) so that gearing stays available for the small/private
+filers this pillar targets. When the leaf is present it is used directly, with no
+synthesis.
 
 As a result, **every derived metric built on `total_debt` inherits this
 total-liabilities basis**:

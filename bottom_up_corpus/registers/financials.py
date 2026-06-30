@@ -12,6 +12,14 @@ from .concepts_no import map_brreg_entry
 from .identity import resolve_register_specs
 from .no_brreg import fetch_brreg_accounts
 
+# Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
+# never breaks out goodwill / intangibles, so the engine's tangible_book_value
+# (= common equity − goodwill − intangibles, both defaulting to 0) collapses to `equity`
+# and would silently OVERSTATE true TBV for any obligor carrying intangibles. We
+# structurally cannot compute it from the register, so we suppress it (and its per-share
+# form, already absent for want of a share count) rather than emit a misleading figure.
+_SUPPRESSED_CONCEPTS = {"tangible_book_value", "tangible_book_value_per_share"}
+
 
 def _dedupe_latest(entries: list[dict]) -> list[dict]:
     """Collapse raw Brreg entries so each (regnskapsperiode.tilDato, regnskapstype)
@@ -27,7 +35,9 @@ def _dedupe_latest(entries: list[dict]) -> list[dict]:
             best[key] = e
             continue
         e_id, cur_id = e.get("id"), cur.get("id")
-        if e_id is None or cur_id is None or e_id >= cur_id:
+        # Type-safe: a heterogeneous / non-int `id` would make `e_id >= cur_id` raise
+        # TypeError and abort the batch; treat any non-int id as "keep last-seen".
+        if not isinstance(e_id, int) or not isinstance(cur_id, int) or e_id >= cur_id:
             best[key] = e
     return list(best.values())
 
@@ -51,31 +61,40 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out = {"entities": 0, "with_financials": 0, "no_financials": 0, "periods": 0, "paths": []}
+    out = {"entities": 0, "with_financials": 0, "no_financials": 0, "periods": 0,
+           "errors": 0, "paths": []}
     for r in resolved:
         out["entities"] += 1
         if not r.get("orgnr"):
             coverage.append({"orgnr": None, "lei": r.get("lei"), "status": "unresolved"})
             out["no_financials"] += 1
             continue
-        rows: list[dict] = []
-        n = 0
-        for entry in _dedupe_latest(fetch_brreg_accounts(r["orgnr"], fetcher=fetcher)):
-            mapped = map_brreg_entry(entry)
-            if not mapped:
+        try:  # one malformed record must not abort the whole batch (nor the coverage write)
+            rows: list[dict] = []
+            n = 0
+            for entry in _dedupe_latest(fetch_brreg_accounts(r["orgnr"], fetcher=fetcher)):
+                mapped = map_brreg_entry(entry)
+                if not mapped:
+                    continue
+                s = _summary(mapped, r.get("name") or r["orgnr"])
+                # I1: drop tangible_book_value (unprovable from the register) per-row.
+                rows.extend(row for row in rows_from_base(_base(r["orgnr"], r.get("lei"), mapped, s), s)
+                            if row.get("concept") not in _SUPPRESSED_CONCEPTS)
+                n += 1
+            if not rows:
+                coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "no-financials"})
+                out["no_financials"] += 1
                 continue
-            s = _summary(mapped, r.get("name") or r["orgnr"])
-            rows.extend(rows_from_base(_base(r["orgnr"], r.get("lei"), mapped, s), s))
-            n += 1
-        if not rows:
-            coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "no-financials"})
-            out["no_financials"] += 1
+            out["periods"] += n
+            out["with_financials"] += 1
+            if write:
+                out["paths"].append(storage.write_register_financials_table(r["orgnr"], rows))
+            coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "ok", "periods": n})
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"),
+                             "status": "error", "error": str(exc)})
+            out["errors"] += 1
             continue
-        out["periods"] += n
-        out["with_financials"] += 1
-        if write:
-            out["paths"].append(storage.write_register_financials_table(r["orgnr"], rows))
-        coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "ok", "periods": n})
     if write:
         cov = config.data_dir / "reports" / "register_coverage.jsonl"
         _atomic_write_text(cov, "\n".join(json.dumps(c, default=str) for c in coverage))

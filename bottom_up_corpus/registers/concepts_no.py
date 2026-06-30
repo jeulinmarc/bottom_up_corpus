@@ -77,6 +77,16 @@ def map_brreg_entry(entry: dict) -> dict | None:
             if fld in flat:
                 values[key] = {"value": flat[fld], "unit": currency, "label": key, "tag": fld}
                 break
+    # Brreg omits sumLangsiktigGjeld when a filer has no non-current liabilities
+    # (langsiktigGjeld: {}), but the engine gates total_debt — and every gearing metric —
+    # on long_term_debt being present. Synthesize it from total − current liabilities so
+    # gearing computes for the small/private filers this pillar targets. No-op when
+    # sumLangsiktigGjeld is present (long_term_debt already set; there Lang == total − current).
+    if "long_term_debt" not in values and "liabilities" in values:
+        cur = (values.get("liabilities_current") or {}).get("value", 0) or 0
+        values["long_term_debt"] = {
+            "value": values["liabilities"]["value"] - cur, "unit": currency,
+            "label": "long_term_debt", "tag": "sumGjeld−sumKortsiktigGjeld (derived)"}
     if not values:
         return None
     return {"period_end": period, "basis": basis, "currency": currency, "values": values}
