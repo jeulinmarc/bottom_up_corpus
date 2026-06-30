@@ -92,7 +92,7 @@ def _eu_base(lei: str, summary) -> dict:
     }
 
 
-def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -> dict:
+def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, use_arelle: bool = False) -> dict:
     """Resolve specs -> IFRS financials -> data/financials_eu/<LEI>.jsonl (SEC schema).
 
     Coverage (with/without financials) is written to reports/eu_financials_coverage.jsonl;
@@ -110,6 +110,9 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -
             out["no_financials"] += 1
             continue
         flat = facts_for_entity(ent, fetcher=fetcher)
+        if use_arelle:
+            for tag, pts in arelle_facts_for_entity(ent, config=config).items():
+                flat.setdefault(tag, []).extend(pts)
         summaries = summaries_from_flat(flat, concepts=IFRS_CONCEPTS, company=ent.name,
                                         company_current=ent.name, sic=None)
         attach_ttm_from_flat(flat, summaries, concepts_by_key=IFRS_CONCEPTS_BY_KEY)
@@ -125,7 +128,8 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -
         if write:
             out["paths"].append(storage.write_eu_financials_table(ent.lei, rows))
         coverage.append({"lei": ent.lei, "name": ent.name, "status": "ok",
-                         "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy]})
+                         "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy],
+                         "arelle": bool(use_arelle)})
     cov_path = config.data_dir / "reports" / "eu_financials_coverage.jsonl"
     if write:
         cov_path.parent.mkdir(parents=True, exist_ok=True)

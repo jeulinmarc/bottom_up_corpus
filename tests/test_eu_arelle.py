@@ -34,6 +34,22 @@ def test_arelle_facts_for_entity_discovers_esef_and_unions(tmp_path, monkeypatch
     assert flat["Revenue"][0]["filed"] == "2025-04-01"               # published_ts truncated [:10]
 
 
+def test_build_eu_financials_use_arelle_fills_the_gap(tmp_path, monkeypatch):
+    from bottom_up_corpus.eu.financials import build_eu_financials
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.resolve_entities",
+                        lambda specs, **kw: [Entity(lei="LEI1", name="X", country="IT")])
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.facts_for_entity", lambda e, **kw: {})  # Tier A empty
+    pt = {"val": 100, "end": "2024-12-31", "start": "2024-01-01", "unit": "EUR",
+          "tag": "Revenue", "label": "Revenue", "filed": "2025-04-01", "form": "annual_report", "accn": "d1"}
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.arelle_facts_for_entity",
+                        lambda e, **kw: {"Revenue": [pt]})
+    cfg = Config(data_dir=tmp_path)
+    rep = build_eu_financials([{"lei": "LEI1"}], fetcher=None, config=cfg, write=True, use_arelle=True)
+    assert rep["with_financials"] == 1
+    rows = [json.loads(x) for x in (tmp_path / "financials_eu" / "LEI1.jsonl").read_text().splitlines()]
+    assert any(r["kind"] == "reported" and r["concept"] == "revenue" and r["value"] == 100 for r in rows)
+
+
 def test_oim_from_esef_zip_raises_clear_error_when_arelle_missing(monkeypatch, tmp_path):
     # Simulate Arelle not installed: make `import arelle...` fail inside the function.
     real_import = builtins.__import__
