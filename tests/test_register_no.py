@@ -85,3 +85,16 @@ def test_dry_run_writes_nothing(tmp_path):
     cfg = Config(data_dir=tmp_path)
     rep = build_register_financials([{"orgnr": "999"}], fetcher=_BrregFetcher([_ENTRY]), config=cfg, write=False)
     assert rep["coverage_path"] is None and not (tmp_path / "financials_register").exists()
+
+
+from bottom_up_corpus import cli
+
+def test_register_financials_cli(monkeypatch, tmp_path):
+    captured = {}
+    def fake(specs, *, fetcher, config, write):
+        captured.update(specs=specs, write=write)
+        return {"entities": 1, "with_financials": 1, "periods": 3, "coverage_path": None, "paths": []}
+    monkeypatch.setattr(cli, "build_register_financials", fake)
+    args = cli.build_parser().parse_args(["register-financials", "--orgnrs", "1,2", "--write"])
+    assert args.func(args) == 0
+    assert captured["specs"] == [{"orgnr": "1"}, {"orgnr": "2"}] and captured["write"] is True
