@@ -113,17 +113,93 @@ published annual report. Pick a large, clean ifrs-full filer indexed on
 filings.xbrl.org (check the `json_url` presence in its filings.xbrl.org record
 first).
 
+## Tier B — Arelle (optional)
+
+Tier B is an **optional** extension that parses the **local ESEF `.zip` packages**
+the national OAM backends download (stored on disk as `kind="esef"` files in the
+acquisition manifests) with **Arelle's iXBRL processor** into the same OIM-JSON
+facts Tier A uses. The rest of the pipeline — `flatten_oim_json`, `summaries_from_flat`,
+`compute_derived`, `attach_ttm_from_flat` — runs identically; Tier B facts are
+unioned with Tier A facts before the shared engine runs.
+
+The primary motivation is to **close filings.xbrl.org's coverage gaps**. For
+issuers whose ESEF zip is on disk but whose filing is not indexed on
+filings.xbrl.org (or whose `json_url` is absent / broken), Arelle can parse the
+package directly and recover the IFRS facts.
+
+### Optional dependency
+
+Arelle is **not** installed by the core package. The stdlib-only core is unchanged;
+without Arelle, Tier A works normally and calling Tier B raises a clear `ImportError`
+with an install hint.
+
+```
+pip install ".[eu-financials]"   # adds Arelle
+```
+
+### Usage
+
+Tier B is opt-in via the `--arelle` flag. When present, its facts are **unioned**
+with Tier A (not a replacement): issuers already indexed on filings.xbrl.org get
+the json_url facts (faster); issuers only on disk get the Arelle-parsed facts.
+
+```
+# dry-run — prints entity/period summary, nothing written
+bottom_up_corpus eu-financials --leis <LEI,...> --arelle
+
+# write data/financials_eu/<LEI>.jsonl (Tier A + Tier B unioned)
+bottom_up_corpus eu-financials --leis <LEI,...> --arelle --write
+```
+
+For one-off cross-checks the calibration script parses a single ESEF zip and
+optionally compares it to Tier A for the same issuer:
+
+```
+./venv/bin/python scripts/calibrate_arelle.py --zip path/to/report.zip [--lei <LEI>] \
+    --contact you@example.com
+```
+
+### Honest scope — what Tier B covers (and what it does not)
+
+Tier B's **marginal coverage** is issuers whose ESEF zip is already on disk from
+ESEF-rich backends but whose filing filings.xbrl.org does not index well. The
+backends that download ESEF packages and therefore benefit most are:
+**IT, ES, NL, BE, GB, IE, DK, FI, NO** — with Italy being the primary motivation
+(CONSOB coverage on filings.xbrl.org is partial; the local zips are more complete).
+
+Tier B does **not** by itself cover Germany, France, or Sweden:
+
+- **DE:** the Bundesanzeiger backend does not download ESEF zip packages; there
+  are no local zips to parse. Closing DE requires an acquisition-side fix —
+  fetching the ESEF packages from the Bundesanzeiger or a third-party aggregator —
+  which is a **separate future PR**.
+- **FR:** the AMF backend similarly does not flag `kind="esef"` files in its
+  manifests as of this writing; the same acquisition-side fix is needed.
+- **SE:** same situation; no ESEF zips in the acquisition manifests.
+
+The coverage report (`data/reports/eu_financials_coverage.jsonl`) records each
+entity's `"arelle": true/false` flag so it is always clear which path was used.
+
+### Performance note
+
+Arelle loads the IFRS taxonomy on its **first** call; that download is cached under
+Arelle's local cache directory and is not repeated. Subsequent runs start immediately.
+Parsing a typical large iXBRL annual report takes tens of seconds. Where a
+`json_url` is available on filings.xbrl.org, Tier A's fetch is faster — use
+`--arelle` selectively for issuers you know are missing from the aggregator.
+
+---
+
 ## Deferred follow-up PRs
 
-Three known gaps are recorded as out-of-scope for the current implementation and
-are earmarked for dedicated follow-up PRs:
+Three known gaps remain out-of-scope for the current implementation and are
+earmarked for dedicated follow-up PRs:
 
-**1. Arelle Tier B — close the DE (and other) coverage gap.**
-Parse the structured ESEF `.xhtml`/`.zip` packages directly using Arelle's
-iXBRL processor, rather than relying on the pre-extracted OIM JSON from
-filings.xbrl.org. This would recover German issuers (and any others the aggregator
-misses) from the raw ESEF packages that the `FilingsXbrlOrg` backend already
-discovers.
+**1. Acquisition-side fix for DE / FR / SE — enable Tier B for the missing backends.**
+The Bundesanzeiger (DE), AMF (FR), and Swedish backend do not currently download
+ESEF zip packages into the manifests; without on-disk zips Tier B has nothing to
+parse. A dedicated PR would wire the zip acquisition into those backends' fetch
+logic, after which Tier B would automatically recover those issuers.
 
 **2. Phase 2 OCR — half-year reports, Switzerland, and pre-2020 financials.**
 Half-year reports (PDF) and pre-ESEF filings (pre-2020) are not structured data;
