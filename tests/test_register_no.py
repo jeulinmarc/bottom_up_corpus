@@ -51,3 +51,10 @@ def test_lei_resolves_via_gleif_registeredas():
 def test_non_norwegian_lei_is_unresolved():
     r = resolve_register_specs([{"lei": "L2"}], fetcher=_GleifFetcher("SE", "5560000000"))[0]
     assert r["orgnr"] is None and r["status"] == "unresolved"
+
+def test_gleif_exception_is_unresolved():
+    class _Bad:
+        def get_json(self, url, **kw):
+            raise OSError("timeout")
+    r = resolve_register_specs([{"lei": "L3"}], fetcher=_Bad())[0]
+    assert r["orgnr"] is None and r["status"] == "unresolved"
