@@ -1,6 +1,37 @@
 import builtins
+import json
 import pytest
+from bottom_up_corpus.config import Config
+from bottom_up_corpus.eu.entities import Entity
 from bottom_up_corpus.eu import arelle_esef
+from bottom_up_corpus.eu import financials as eufin
+
+
+def _write_manifest(cfg, lei, doc_id, files):
+    p = cfg.data_dir / "manifest" / lei / f"{doc_id}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"doc_id": doc_id, "lei": lei, "doc_type": "annual_report",
+                             "period_end": "2024-12-31", "published_ts": "2025-04-01 00:00:00",
+                             "source": "oam-it", "files": files}))
+
+
+def test_arelle_facts_for_entity_discovers_esef_and_unions(tmp_path, monkeypatch):
+    cfg = Config(data_dir=tmp_path)
+    # one ESEF file + one non-ESEF (must be ignored)
+    _write_manifest(cfg, "LEI1", "d1", [
+        {"name": "r.zip", "kind": "esef", "path": "raw/LEI1/ESEF-AR/2024/d1/r.zip"},
+        {"name": "r.pdf", "kind": "document", "path": "raw/LEI1/ESEF-AR/2024/d1/r.pdf"}])
+    seen = {}
+    def fake_bridge(zip_path, **kw):
+        seen["zip"] = zip_path
+        return {"facts": {"f": {"value": "100", "dimensions": {
+            "concept": "ifrs-full:Revenue", "entity": "x", "unit": "iso4217:EUR",
+            "period": "2024-01-01T00:00:00/2025-01-01T00:00:00"}}}}
+    monkeypatch.setattr(eufin, "oim_from_esef_zip", fake_bridge)
+    flat = eufin.arelle_facts_for_entity(Entity(lei="LEI1", name="X", country="IT"), config=cfg)
+    assert seen["zip"].endswith("raw/LEI1/ESEF-AR/2024/d1/r.zip")    # only the esef file
+    assert flat["Revenue"][0]["val"] == 100
+    assert flat["Revenue"][0]["filed"] == "2025-04-01"               # published_ts truncated [:10]
 
 
 def test_oim_from_esef_zip_raises_clear_error_when_arelle_missing(monkeypatch, tmp_path):

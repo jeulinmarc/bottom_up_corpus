@@ -13,6 +13,7 @@ from ..financials import attach_ttm_from_flat, rows_from_base, summaries_from_fl
 from ..storage import Storage
 from .entities import Entity, resolve_entities
 from .ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
+from .arelle_esef import oim_from_esef_zip
 from .oim import flatten_oim_json
 from .sources.filings_org import FilingsXbrlOrg
 
@@ -46,6 +47,37 @@ def facts_for_entity(entity: Entity, *, fetcher) -> dict[str, list[dict]]:
         )
         for tag, pts in part.items():
             flat.setdefault(tag, []).extend(pts)
+    return flat
+
+
+def arelle_facts_for_entity(entity: "Entity", *, config) -> dict[str, list[dict]]:
+    """Union the facts from an entity's LOCAL ESEF .zip packages (acquisition
+    manifests, kind="esef"), parsed with Arelle. Mirrors facts_for_entity but
+    offline. A zip that fails to parse is skipped, never fatal."""
+    flat: dict[str, list[dict]] = {}
+    if not entity.lei:
+        return flat
+    mdir = config.data_dir / "manifest" / entity.lei
+    if not mdir.is_dir():
+        return flat
+    for mpath in sorted(mdir.glob("*.json")):
+        try:
+            man = json.loads(mpath.read_text())
+        except Exception:        # noqa: BLE001
+            continue
+        filed = str(man.get("published_ts") or "")[:10]
+        form = man.get("doc_type") or "annual_report"
+        for fmeta in man.get("files", []):
+            if fmeta.get("kind") != "esef" or not fmeta.get("path"):
+                continue
+            zip_path = config.data_dir / fmeta["path"]
+            try:
+                report = oim_from_esef_zip(str(zip_path))
+                part = flatten_oim_json(report, filed=filed, form=form, accn=man.get("doc_id") or mpath.stem)
+            except Exception:    # noqa: BLE001  (bad/unparseable package skipped)
+                continue
+            for tag, pts in part.items():
+                flat.setdefault(tag, []).extend(pts)
     return flat
 
 
