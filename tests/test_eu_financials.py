@@ -32,7 +32,7 @@ def test_facts_for_entity_unions_filings():
     flat = facts_for_entity(ent, fetcher=fetcher)
     assert "Revenue" in flat
     assert flat["Revenue"][0]["val"] == 100
-    assert flat["Revenue"][0]["filed"] == "2021-05-01 00:00:00"
+    assert flat["Revenue"][0]["filed"] == "2021-05-01"
 
 
 def test_build_eu_financials_writes_unified_rows(tmp_path, monkeypatch):
@@ -51,6 +51,7 @@ def test_build_eu_financials_writes_unified_rows(tmp_path, monkeypatch):
     rev = next(r for r in rows if r["kind"] == "reported" and r["concept"] == "revenue")
     assert rev["value"] == 100 and rev["lei"] == "LEI123" and rev["currency"] == "EUR"
     assert rev["doc_type"] == "annual_report" and rev["is_financial"] is None
+    assert rev["publication_date"] == "2021-05-01"
     assert (tmp_path / "reports" / "eu_financials_coverage.jsonl").exists()
 
 

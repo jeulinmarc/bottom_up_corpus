@@ -40,7 +40,7 @@ def facts_for_entity(entity: Entity, *, fetcher) -> dict[str, list[dict]]:
             continue
         part = flatten_oim_json(
             report,
-            filed=str(meta.get("date_added") or doc.published_ts or ""),
+            filed=str(meta.get("date_added") or doc.published_ts or "")[:10],
             form=doc.doc_type,
             accn=str(meta.get("fxo_id") or doc.doc_id),
         )
