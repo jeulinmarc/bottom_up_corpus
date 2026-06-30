@@ -58,3 +58,30 @@ def test_gleif_exception_is_unresolved():
             raise OSError("timeout")
     r = resolve_register_specs([{"lei": "L3"}], fetcher=_Bad())[0]
     assert r["orgnr"] is None and r["status"] == "unresolved"
+
+
+import json
+from bottom_up_corpus.config import Config
+
+class _BrregFetcher:
+    def __init__(self, entries): self._e = entries
+    def get_json(self, url, **kw): return self._e   # the brreg accounts list
+
+def test_build_register_financials_writes_rows(tmp_path):
+    from bottom_up_corpus.registers.financials import build_register_financials
+    fetcher = _BrregFetcher([_ENTRY])
+    cfg = Config(data_dir=tmp_path)
+    rep = build_register_financials([{"orgnr": "999"}], fetcher=fetcher, config=cfg, write=True)
+    assert rep["with_financials"] == 1 and rep["periods"] == 1
+    rows = [json.loads(x) for x in (tmp_path / "financials_register" / "999.jsonl").read_text().splitlines()]
+    rev = next(r for r in rows if r["kind"] == "reported" and r["concept"] == "revenue")
+    assert rev["value"] == 1000 and rev["entity_id"] == "999" and rev["source"] == "brreg"
+    assert rev["basis"] == "consolidated" and rev["currency"] == "NOK"
+    d2e = next(r for r in rows if r["kind"] == "derived" and r["concept"] == "debt_to_equity")
+    assert abs(d2e["value"] - (3500 / 1500)) < 1e-6   # total liabilities / equity (NGAAP gearing)
+
+def test_dry_run_writes_nothing(tmp_path):
+    from bottom_up_corpus.registers.financials import build_register_financials
+    cfg = Config(data_dir=tmp_path)
+    rep = build_register_financials([{"orgnr": "999"}], fetcher=_BrregFetcher([_ENTRY]), config=cfg, write=False)
+    assert rep["coverage_path"] is None and not (tmp_path / "financials_register").exists()
