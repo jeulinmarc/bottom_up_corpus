@@ -13,6 +13,25 @@ from .identity import resolve_register_specs
 from .no_brreg import fetch_brreg_accounts
 
 
+def _dedupe_latest(entries: list[dict]) -> list[dict]:
+    """Collapse raw Brreg entries so each (regnskapsperiode.tilDato, regnskapstype)
+    appears once, keeping the highest submission `id` — Brreg can return corrected /
+    resubmitted accounts for the same period, which would otherwise double-count. When
+    an `id` is missing on either side, the last-seen entry for that key wins. Operates
+    on RAW entries (which still carry `id`), so `map_brreg_entry` stays unchanged."""
+    best: dict[tuple, dict] = {}
+    for e in entries:
+        key = ((e.get("regnskapsperiode") or {}).get("tilDato"), e.get("regnskapstype"))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = e
+            continue
+        e_id, cur_id = e.get("id"), cur.get("id")
+        if e_id is None or cur_id is None or e_id >= cur_id:
+            best[key] = e
+    return list(best.values())
+
+
 def _summary(mapped: dict, name: str) -> PeriodSummary:
     pe = date.fromisoformat(mapped["period_end"])
     return PeriodSummary(
@@ -41,7 +60,7 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
             continue
         rows: list[dict] = []
         n = 0
-        for entry in fetch_brreg_accounts(r["orgnr"], fetcher=fetcher):
+        for entry in _dedupe_latest(fetch_brreg_accounts(r["orgnr"], fetcher=fetcher)):
             mapped = map_brreg_entry(entry)
             if not mapped:
                 continue

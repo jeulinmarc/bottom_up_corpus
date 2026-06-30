@@ -75,11 +75,29 @@ derived metrics). Each row carries:
 | `period_end` | ISO-8601 date string |
 | `publication_date` | `null` (Brreg does not expose a filing date) |
 
-Beyond the identity/period columns, each row is one of the three standard row kinds:
-`kind="reported"` (the mapped curated concepts with their source Brreg field name as
-`tag`), `kind="derived"` (single-period metrics), and `kind="derived_ttm"` (TTM ratios
-— annual-only, so equivalent to `derived` here). The same shared engine
-(`rows_from_base` → `compute_derived`) runs verbatim.
+Beyond the identity/period columns, each row is one of **two** kinds: `kind="reported"`
+(the mapped curated concepts, each carrying its source Brreg field name as `tag`) and
+`kind="derived"` (single-period metrics from the shared `compute_derived` engine). **No
+`derived_ttm` rows are written**: Brreg holds annual accounts only, so the
+trailing-twelve-month block is inert and never attached for register inputs.
+
+Register inputs carry **no depreciation/amortization and no cash-flow statement**, so the
+engine emits a strict *subset* of its full derived block — for a complete filer
+(e.g. Equinor) exactly these:
+
+- **Aggregates:** `total_debt`, `net_debt`, `net_cash`, `working_capital`,
+  `tangible_book_value`, `nopat`, `invested_capital`
+- **Margins:** `operating_margin`, `net_margin`
+- **Returns / tax:** `roe`, `roa`, `roic`, `effective_tax_rate`
+- **Leverage / coverage:** `debt_to_equity`, `debt_to_assets`, `interest_coverage`
+- **Liquidity:** `current_ratio`, `quick_ratio`, `cash_ratio`
+- **Efficiency:** `asset_turnover`, `dso`
+
+A metric whose specific inputs are missing for a given period is simply omitted (e.g.
+`interest_coverage` needs `annenRentekostnad`; `dso` needs `sumFordringer`). There is in
+particular **no `ebitda`** (no D&A), **no `free_cash_flow`, `cfo_to_debt` or
+`fcf_to_debt`** (no cash-flow statement) and **no `net_debt_to_ebitda`** — these are
+never produced for register rows.
 
 A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
 processed: `status="ok"` with a period count, or `"no-financials"` / `"unresolved"`.
@@ -122,10 +140,22 @@ long_term_debt   ← sumLangsiktigGjeld  (all non-current liabilities)
 total_debt       ≈ total liabilities   (not pure financial debt)
 ```
 
-As a result:
+As a result, **every derived metric built on `total_debt` inherits this
+total-liabilities basis**:
 
-- `debt_to_equity`, `net_debt_to_ebitda`, `cfo_to_debt` and other leverage metrics are
-  **liabilities-based approximations**, not pure-borrowings ratios.
+- `debt_to_equity` and `debt_to_assets` are **liabilities-based gearing**, not
+  pure-borrowings ratios.
+- `net_debt` here is **total liabilities − cash** (NOT financial net debt), and
+  `net_cash` is its mirror. `invested_capital` (= total liabilities + equity) and
+  `roic` (NOPAT / invested capital) therefore also rest on the total-liabilities basis.
+  Read these as liabilities-based, not borrowings-based, figures.
+- `interest_coverage` (operating income / interest) is an **approximation**: Brreg's
+  only gross-interest field is `annenRentekostnad`, and intra-group interest
+  (`rentekostnadSammeKonsern`) is not added in, so coverage **excludes intra-group
+  interest**. (The net `sumFinanskostnad` is deliberately *not* used — it is a net
+  financial figure, not gross interest.)
+- The `net_debt_to_ebitda`, `cfo_to_debt` and `fcf_to_debt` ratios are **not emitted at
+  all** for register rows (no EBITDA and no cash-flow statement — see the schema section).
 - This is coarser than the ESEF/SEC pillars (which map tagged debt line items from XBRL)
   but is the best available from the register's structured data.
 - The source field `tag` in each reported row records which Brreg field was used, so

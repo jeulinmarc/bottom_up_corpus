@@ -7,6 +7,8 @@ liabilities, not pure borrowings) — see docs/REGISTER_FINANCIALS.md.
 """
 from __future__ import annotations
 
+from datetime import date
+
 # curated key -> Brreg leaf field name(s), highest priority first.
 NO_FIELDS: dict[str, tuple[str, ...]] = {
     "revenue": ("sumDriftsinntekter", "salgsinntekter"),
@@ -14,7 +16,13 @@ NO_FIELDS: dict[str, tuple[str, ...]] = {
     "pretax_income": ("ordinaertResultatFoerSkattekostnad",),
     "income_tax": ("ordinaertResultatSkattekostnad",),
     "net_income": ("aarsresultat",),
-    "interest_expense": ("annenRentekostnad", "sumFinanskostnad"),
+    # Gross "other" interest only. NOT `sumFinanskostnad` as a fallback: that is a
+    # NET/aggregate financial figure (207M in the real data — *smaller* than
+    # annenRentekostnad's 1379M, and equal to |nettoFinans|), not gross interest
+    # expense, so it would corrupt interest_coverage. Intra-group interest
+    # (`rentekostnadSammeKonsern`) is not summed in either, so interest_coverage is an
+    # approximation that excludes intra-group interest.
+    "interest_expense": ("annenRentekostnad",),
     "assets": ("sumEiendeler",),
     "assets_current": ("sumOmloepsmidler",),
     "cash": ("sumBankinnskuddOgKontanter",),
@@ -53,6 +61,10 @@ def map_brreg_entry(entry: dict) -> dict | None:
     """One Brreg regnskap entry -> {period_end, basis, currency, values}; None if unusable."""
     period = (entry.get("regnskapsperiode") or {}).get("tilDato")
     if not period:
+        return None
+    try:  # a non-ISO tilDato (e.g. "31.12.2024") skips THIS entry, not the whole batch
+        date.fromisoformat(period)
+    except ValueError:
         return None
     flat: dict[str, float] = {}
     for block in _BLOCKS:
