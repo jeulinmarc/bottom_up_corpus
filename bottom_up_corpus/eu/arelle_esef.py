@@ -15,6 +15,10 @@ def oim_from_esef_zip(zip_path: str, *, cntlr=None) -> dict:
     Pass a shared Arelle ``cntlr`` to amortize the one-time IFRS-taxonomy load
     across many zips. Raises ImportError (with an install hint) if Arelle is
     absent; ValueError if the package has no inline-XBRL report or yields no facts.
+
+    NB the input must be the report-package zip (which bundles the issuer's
+    extension taxonomy), not a bare ``.xhtml`` report — a standalone inline-XBRL
+    document can't resolve its extension concepts, so Arelle yields no facts.
     """
     try:
         from arelle import Cntlr

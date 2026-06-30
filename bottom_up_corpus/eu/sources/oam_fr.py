@@ -47,6 +47,18 @@ def _doc_type(subtype: str | None, typ: str | None) -> str:
                          _TYPE_MAP.get((typ or "").strip().lower(), "other"))
 
 
+# The AMF feed serves machine-readable ESEF annual reports as a report-package (.zip)
+# that bundles the report + its extension taxonomy. Tag those "esef" so the EU
+# financials Tier B (Arelle) can find and parse them. (Bare .xhtml reports also appear
+# on the feed but aren't self-contained — without the bundled taxonomy Arelle resolves
+# no facts — so they stay "document".) Everything else is "document".
+_ESEF_EXTS = (".zip",)
+
+
+def _file_kind(url: str) -> str:
+    return "esef" if (url or "").lower().split("?")[0].endswith(_ESEF_EXTS) else "document"
+
+
 class InfoFinanciereFR(OamSource):
     name = "oam-fr"
     country = "FR"
@@ -117,7 +129,7 @@ class InfoFinanciereFR(OamSource):
                 period_end=None,  # FR records are publication-dated, not period-keyed
                 published_ts=f.get("informationdeposee_inf_dat_emt") or f.get("uin_dat_amf"),
                 discovered_ts=now, language="fr", source=self.name,
-                files=[{"name": url.rsplit("/", 1)[-1], "url": url, "kind": "document"}],
+                files=[{"name": url.rsplit("/", 1)[-1], "url": url, "kind": _file_kind(url)}],
                 native_meta=f))
         if skipped:
             self._record_error("no-url", q, f"{skipped} records had no url_de_recuperation")

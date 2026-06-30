@@ -85,8 +85,9 @@ Coverage equals what **filings.xbrl.org** indexes. The main known gaps:
   incomplete relative to the CONSOB register.
 
 Both gaps are **visible** in the coverage report (`data/reports/eu_financials_coverage.jsonl`),
-never silent. The deferred Arelle Tier B PR (see below) is the intended path to
-closing DE.
+never silent. **Tier B** (Arelle, below) is the path to closing them — it parses the
+local ESEF zips for the ESEF-rich backends (Italy especially) and, with this PR,
+**France**. Germany still needs an acquisition-side fix.
 
 ## CLI usage
 
@@ -167,15 +168,20 @@ backends that download ESEF packages and therefore benefit most are:
 **IT, ES, NL, BE, GB, IE, DK, FI, NO** — with Italy being the primary motivation
 (CONSOB coverage on filings.xbrl.org is partial; the local zips are more complete).
 
-Tier B does **not** by itself cover Germany, France, or Sweden:
+**France IS covered** (added in this PR): the AMF backend (`oam_fr`) now flags its
+ESEF report-package `.zip` files as `kind="esef"`, so Tier B parses French annual
+reports directly (validated live — e.g. AB Science). The AMF also serves a minority
+of **bare `.xhtml`** reports; those stay `document`, because a standalone inline-XBRL
+file lacks the bundled extension taxonomy and Arelle resolves no facts from it.
 
-- **DE:** the Bundesanzeiger backend does not download ESEF zip packages; there
-  are no local zips to parse. Closing DE requires an acquisition-side fix —
-  fetching the ESEF packages from the Bundesanzeiger or a third-party aggregator —
-  which is a **separate future PR**.
-- **FR:** the AMF backend similarly does not flag `kind="esef"` files in its
-  manifests as of this writing; the same acquisition-side fix is needed.
-- **SE:** same situation; no ESEF zips in the acquisition manifests.
+Tier B does **not** yet cover Germany or Sweden:
+
+- **DE:** the Bundesanzeiger backend captures HTML, not ESEF zip packages; there are
+  no local zips to parse. Closing DE requires an acquisition-side fix — fetching the
+  ESEF packages from the Bundesanzeiger or a third-party aggregator — a **separate
+  future PR**.
+- **SE:** the Finanscentralen backend tags files `document`; the same
+  flag-by-extension fix as FR would likely apply, pending a recon of the SE source.
 
 The coverage report (`data/reports/eu_financials_coverage.jsonl`) records each
 entity's `"arelle": true/false` flag so it is always clear which path was used.
