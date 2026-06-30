@@ -28,6 +28,7 @@ from .pipeline import (
     process_ownership,
     render_universe,
 )
+from .eu.financials import build_eu_financials
 from .openfigi import coverage_hint, map_identifiers
 from .rag import iter_items
 from .sources.cik_lookup import fetch_cik_lookup, parse_cik_lookup
@@ -483,6 +484,25 @@ def _cmd_xbrl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _eu_specs(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "leis", None):
+        return [{"lei": x.strip()} for x in args.leis.split(",") if x.strip()]
+    if getattr(args, "isins", None):
+        return [{"isin": x.strip()} for x in args.isins.split(",") if x.strip()]
+    return []
+
+
+def _cmd_eu_financials(args: argparse.Namespace) -> int:
+    cfg = _config(args)
+    fetcher = Fetcher(cfg)
+    rep = build_eu_financials(_eu_specs(args), fetcher=fetcher, config=cfg, write=args.write)
+    mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+    print(f"eu-financials [{mode}] — {rep['entities']} entities, "
+          f"{rep['with_financials']} with financials, {rep['periods']} period summaries")
+    print(f"  coverage: {rep['coverage_path']}")
+    return 0
+
+
 def _cmd_ownership(args: argparse.Namespace) -> int:
     cfg = _config(args)
     ciks = _ciks_for(args, cfg)
@@ -736,6 +756,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="keep periods whose fiscal year is in this range, e.g. 2015-2025 or 2024")
     xb.add_argument("--write", action="store_true", help="persist summaries+facts (else dry-run)")
     xb.set_defaults(func=_cmd_xbrl)
+
+    euf = sub.add_parser("eu-financials",
+                         help="build per-period IFRS financial summaries from ESEF (filings.xbrl.org)")
+    eufsrc = euf.add_mutually_exclusive_group(required=True)
+    eufsrc.add_argument("--leis", help="comma-separated LEIs")
+    eufsrc.add_argument("--isins", help="comma-separated ISINs")
+    euf.add_argument("--write", action="store_true", help="persist tables (else dry-run)")
+    euf.set_defaults(func=_cmd_eu_financials)
 
     ow = sub.add_parser("ownership", help="download+structure ownership filings (family E)")
     owsrc = ow.add_mutually_exclusive_group(required=True)
