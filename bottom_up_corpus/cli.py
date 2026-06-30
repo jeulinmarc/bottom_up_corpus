@@ -495,7 +495,8 @@ def _eu_specs(args: argparse.Namespace) -> list[dict]:
 def _cmd_eu_financials(args: argparse.Namespace) -> int:
     cfg = _config(args)
     fetcher = Fetcher(cfg)
-    rep = build_eu_financials(_eu_specs(args), fetcher=fetcher, config=cfg, write=args.write)
+    rep = build_eu_financials(_eu_specs(args), fetcher=fetcher, config=cfg, write=args.write,
+                              use_arelle=args.arelle)
     mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
     print(f"eu-financials [{mode}] — {rep['entities']} entities, "
           f"{rep['with_financials']} with financials, {rep['periods']} period summaries")
@@ -764,6 +765,8 @@ def build_parser() -> argparse.ArgumentParser:
     eufsrc.add_argument("--leis", help="comma-separated LEIs")
     eufsrc.add_argument("--isins", help="comma-separated ISINs")
     euf.add_argument("--write", action="store_true", help="persist tables (else dry-run)")
+    euf.add_argument("--arelle", action="store_true",
+                     help="also parse local ESEF .zip packages with Arelle (Tier B; needs the eu-financials extra)")
     euf.set_defaults(func=_cmd_eu_financials)
 
     ow = sub.add_parser("ownership", help="download+structure ownership filings (family E)")

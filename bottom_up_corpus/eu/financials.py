@@ -11,6 +11,7 @@ import json
 from ..config import Config
 from ..financials import attach_ttm_from_flat, rows_from_base, summaries_from_flat
 from ..storage import Storage
+from .arelle_esef import oim_from_esef_zip
 from .entities import Entity, resolve_entities
 from .ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
 from .oim import flatten_oim_json
@@ -49,6 +50,37 @@ def facts_for_entity(entity: Entity, *, fetcher) -> dict[str, list[dict]]:
     return flat
 
 
+def arelle_facts_for_entity(entity: "Entity", *, config) -> dict[str, list[dict]]:
+    """Union the facts from an entity's LOCAL ESEF .zip packages (acquisition
+    manifests, kind="esef"), parsed with Arelle. Mirrors facts_for_entity but
+    offline. A zip that fails to parse is skipped, never fatal."""
+    flat: dict[str, list[dict]] = {}
+    if not entity.lei:
+        return flat
+    mdir = config.data_dir / "manifest" / entity.lei
+    if not mdir.is_dir():
+        return flat
+    for mpath in sorted(mdir.glob("*.json")):
+        try:
+            man = json.loads(mpath.read_text())
+        except Exception:        # noqa: BLE001
+            continue
+        filed = str(man.get("published_ts") or "")[:10]
+        form = man.get("doc_type") or "annual_report"
+        for fmeta in man.get("files", []):
+            if fmeta.get("kind") != "esef" or not fmeta.get("path"):
+                continue
+            zip_path = config.data_dir / fmeta["path"]
+            try:
+                report = oim_from_esef_zip(str(zip_path))
+                part = flatten_oim_json(report, filed=filed, form=form, accn=man.get("doc_id") or mpath.stem)
+            except Exception:    # noqa: BLE001  (bad/unparseable package skipped)
+                continue
+            for tag, pts in part.items():
+                flat.setdefault(tag, []).extend(pts)
+    return flat
+
+
 def _eu_base(lei: str, summary) -> dict:
     """The SEC-unified identity + period columns, EU-mapped (cik->lei, no sic, etc.)."""
     return {
@@ -60,7 +92,7 @@ def _eu_base(lei: str, summary) -> dict:
     }
 
 
-def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -> dict:
+def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, use_arelle: bool = False) -> dict:
     """Resolve specs -> IFRS financials -> data/financials_eu/<LEI>.jsonl (SEC schema).
 
     Coverage (with/without financials) is written to reports/eu_financials_coverage.jsonl;
@@ -78,6 +110,9 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -
             out["no_financials"] += 1
             continue
         flat = facts_for_entity(ent, fetcher=fetcher)
+        arelle_flat = arelle_facts_for_entity(ent, config=config) if use_arelle else {}
+        for tag, pts in arelle_flat.items():
+            flat.setdefault(tag, []).extend(pts)
         summaries = summaries_from_flat(flat, concepts=IFRS_CONCEPTS, company=ent.name,
                                         company_current=ent.name, sic=None)
         attach_ttm_from_flat(flat, summaries, concepts_by_key=IFRS_CONCEPTS_BY_KEY)
@@ -92,8 +127,11 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -
         out["with_financials"] += 1
         if write:
             out["paths"].append(storage.write_eu_financials_table(ent.lei, rows))
-        coverage.append({"lei": ent.lei, "name": ent.name, "status": "ok",
-                         "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy]})
+        cov_ok = {"lei": ent.lei, "name": ent.name, "status": "ok",
+                  "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy]}
+        if use_arelle:
+            cov_ok["arelle"] = bool(arelle_flat)
+        coverage.append(cov_ok)
     cov_path = config.data_dir / "reports" / "eu_financials_coverage.jsonl"
     if write:
         cov_path.parent.mkdir(parents=True, exist_ok=True)
