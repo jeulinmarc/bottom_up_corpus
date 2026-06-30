@@ -1,4 +1,5 @@
 from bottom_up_corpus.registers.concepts_no import map_brreg_entry
+from bottom_up_corpus.registers.identity import resolve_register_specs
 
 _ENTRY = {
     "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"},
@@ -29,3 +30,24 @@ def test_selskap_is_company_basis():
 
 def test_no_period_returns_none():
     assert map_brreg_entry({"regnskapstype": "KONSERN"}) is None
+
+
+class _GleifFetcher:
+    def __init__(self, country, registered_as):
+        self._c, self._r = country, registered_as
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": "ACME NORGE AS"},
+            "legalAddress": {"country": self._c}, "registeredAs": self._r}}}}
+
+def test_orgnr_passes_through():
+    r = resolve_register_specs([{"orgnr": "923609016"}], fetcher=None)[0]
+    assert r["orgnr"] == "923609016" and r["status"] == "ok" and r["country"] == "NO"
+
+def test_lei_resolves_via_gleif_registeredas():
+    r = resolve_register_specs([{"lei": "L1"}], fetcher=_GleifFetcher("NO", "NO 923 609 016"))[0]
+    assert r["orgnr"] == "923609016" and r["lei"] == "L1" and r["status"] == "ok"
+
+def test_non_norwegian_lei_is_unresolved():
+    r = resolve_register_specs([{"lei": "L2"}], fetcher=_GleifFetcher("SE", "5560000000"))[0]
+    assert r["orgnr"] is None and r["status"] == "unresolved"
