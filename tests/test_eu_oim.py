@@ -38,3 +38,20 @@ def test_flatten_drops_dimensioned_and_normalizes():
     assert rev["start"] == "2020-01-01" and rev["end"] == "2020-12-31"
     assert rev["filed"] == "2023-04-01" and rev["form"] == "annual_report" and rev["tag"] == "Revenue"
     assert "start" not in flat["Assets"][0] and flat["Assets"][0]["end"] == "2020-12-31"
+
+
+def test_flatten_coerces_string_values_to_numbers():
+    report = {"facts": {
+        "rev": {"value": "16297000000", "dimensions": {
+            "concept": "ifrs-full:Revenue", "entity": "x", "unit": "iso4217:EUR",
+            "period": "2020-01-01T00:00:00/2021-01-01T00:00:00"}},
+        "eps": {"value": "0.85", "dimensions": {
+            "concept": "ifrs-full:BasicEarningsLossPerShare", "entity": "x",
+            "unit": "iso4217:EUR/xbrli:shares",
+            "period": "2020-01-01T00:00:00/2021-01-01T00:00:00"}},
+    }}
+    flat = flatten_oim_json(report, filed="2023-04-01", form="annual_report", accn="fxo-1")
+    rev = flat["Revenue"][0]["val"]
+    assert rev == 16297000000 and isinstance(rev, int)
+    eps = flat["BasicEarningsLossPerShare"][0]["val"]
+    assert eps == 0.85 and isinstance(eps, float)

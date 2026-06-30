@@ -18,6 +18,23 @@ from datetime import date, timedelta
 _NON_AXIS_DIMS = frozenset({"concept", "period", "unit", "entity", "language"})
 
 
+def _coerce_value(v):
+    """OIM fact values are strings (to preserve precision). Coerce numeric ones to
+    int/float so the engine can do arithmetic; leave non-numeric text values as-is."""
+    if isinstance(v, bool) or isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        try:
+            return int(s)          # exact for large integers (no float precision loss)
+        except ValueError:
+            try:
+                return float(s)
+            except ValueError:
+                return v            # non-numeric text fact — leave as string
+    return v
+
+
 def normalize_unit(unit: str | None) -> str | None:
     """``iso4217:EUR`` -> ``EUR``; share / per-share ratios -> ``shares`` / ``<ccy>/shares``;
     anything else (``xbrli:pure``, missing) -> None (non-monetary)."""
@@ -75,7 +92,7 @@ def flatten_oim_json(report: dict, *, filed: str, form: str, accn: str) -> dict[
         local = concept.split(":", 1)[-1]                # "ifrs-full:Revenue" -> "Revenue"
         unit = normalize_unit(dims.get("unit"))
         point: dict = {
-            "val": fv.get("value"), "end": end.isoformat(),
+            "val": _coerce_value(fv.get("value")), "end": end.isoformat(),
             "unit": unit if unit is not None else "",
             "tag": local, "label": local,
             "filed": filed, "form": form, "accn": accn,
