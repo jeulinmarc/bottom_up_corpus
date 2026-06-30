@@ -499,7 +499,8 @@ def _cmd_eu_financials(args: argparse.Namespace) -> int:
     mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
     print(f"eu-financials [{mode}] — {rep['entities']} entities, "
           f"{rep['with_financials']} with financials, {rep['periods']} period summaries")
-    print(f"  coverage: {rep['coverage_path']}")
+    if rep.get("coverage_path"):
+        print(f"  coverage: {rep['coverage_path']}")
     return 0
 
 

@@ -76,3 +76,17 @@ def test_build_eu_financials_no_filings_records_coverage(tmp_path, monkeypatch):
     cov = [json.loads(x) for x in
            (tmp_path / "reports" / "eu_financials_coverage.jsonl").read_text().splitlines()]
     assert cov[0]["status"] == "no-financials" and cov[0]["lei"] == "LEI999"
+
+
+def test_build_eu_financials_dry_run_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.resolve_entities",
+                        lambda specs, **kw: [Entity(lei="LEI123", name="X", country="FR")])
+    filings = [{"fxo_id": "1", "country": "FR", "period_end": "2020-12-31",
+                "date_added": "2021-05-01 00:00:00",
+                "json_url": "/r/2020.json", "package_url": "/r/2020.zip", "report_url": "/r/2020.html"}]
+    fetcher = FakeFetcher(filings, {"/r/2020.json": _report(100)})
+    cfg = Config(data_dir=tmp_path)
+    rep = build_eu_financials([{"lei": "LEI123"}], fetcher=fetcher, config=cfg, write=False)
+    assert rep["with_financials"] == 1 and rep["coverage_path"] is None
+    assert not (tmp_path / "financials_eu").exists()
+    assert not (tmp_path / "reports").exists()

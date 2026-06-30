@@ -95,7 +95,10 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True) -
         coverage.append({"lei": ent.lei, "name": ent.name, "status": "ok",
                          "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy]})
     cov_path = config.data_dir / "reports" / "eu_financials_coverage.jsonl"
-    cov_path.parent.mkdir(parents=True, exist_ok=True)
-    cov_path.write_text("\n".join(json.dumps(r, default=str) for r in coverage))
-    out["coverage_path"] = str(cov_path)
+    if write:
+        cov_path.parent.mkdir(parents=True, exist_ok=True)
+        cov_path.write_text("\n".join(json.dumps(r, default=str) for r in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
     return out
