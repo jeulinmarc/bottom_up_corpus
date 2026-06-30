@@ -1,5 +1,8 @@
+import json
+
+from bottom_up_corpus.config import Config
 from bottom_up_corpus.eu.entities import Entity
-from bottom_up_corpus.eu.financials import facts_for_entity
+from bottom_up_corpus.eu.financials import build_eu_financials, facts_for_entity
 
 
 class FakeFetcher:
@@ -30,3 +33,22 @@ def test_facts_for_entity_unions_filings():
     assert "Revenue" in flat
     assert flat["Revenue"][0]["val"] == 100
     assert flat["Revenue"][0]["filed"] == "2021-05-01 00:00:00"
+
+
+def test_build_eu_financials_writes_unified_rows(tmp_path, monkeypatch):
+    filings = [{"fxo_id": "1", "country": "FR", "period_end": "2020-12-31",
+                "date_added": "2021-05-01 00:00:00",
+                "json_url": "/r/2020.json", "package_url": "/r/2020.zip", "report_url": "/r/2020.html"}]
+    fetcher = FakeFetcher(filings, {"/r/2020.json": _report(100)})
+    # resolve_entities hits GLEIF; stub it to a fixed entity for this unit test.
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.resolve_entities",
+                        lambda specs, **kw: [Entity(lei="LEI123", name="X", country="FR")])
+    cfg = Config(data_dir=tmp_path)
+    rep = build_eu_financials([{"lei": "LEI123"}], fetcher=fetcher, config=cfg, write=True)
+    assert rep["entities"] == 1 and rep["with_financials"] == 1 and rep["periods"] == 1
+    out = (tmp_path / "financials_eu" / "LEI123.jsonl").read_text().splitlines()
+    rows = [json.loads(x) for x in out]
+    rev = next(r for r in rows if r["kind"] == "reported" and r["concept"] == "revenue")
+    assert rev["value"] == 100 and rev["lei"] == "LEI123" and rev["currency"] == "EUR"
+    assert rev["doc_type"] == "annual_report" and rev["is_financial"] is None
+    assert (tmp_path / "reports" / "eu_financials_coverage.jsonl").exists()

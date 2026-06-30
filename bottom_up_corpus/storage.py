@@ -273,6 +273,12 @@ class Storage:
         _atomic_write_text(path, _jsonl(rows))
         return self._rel(path)
 
+    def write_eu_financials_table(self, lei: str, rows: "Iterable[dict]") -> str:
+        """Write the normalized EU IFRS facts table data/financials_eu/<lei>.jsonl."""
+        path = self.config.data_dir / "financials_eu" / f"{lei}.jsonl"
+        _atomic_write_text(path, _jsonl(rows))
+        return self._rel(path)
+
     def write_financial_summary(self, record: FilingRecord, html: str, text: str) -> None:
         """Write a period summary's HTML (primary) + clean text; mutate record paths."""
         dest_dir = self.raw_dir_for(record)
