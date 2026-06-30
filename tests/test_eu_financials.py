@@ -52,3 +52,27 @@ def test_build_eu_financials_writes_unified_rows(tmp_path, monkeypatch):
     assert rev["value"] == 100 and rev["lei"] == "LEI123" and rev["currency"] == "EUR"
     assert rev["doc_type"] == "annual_report" and rev["is_financial"] is None
     assert (tmp_path / "reports" / "eu_financials_coverage.jsonl").exists()
+
+
+def test_build_eu_financials_no_lei_records_coverage(tmp_path, monkeypatch):
+    # An unresolved entity (no LEI) must be recorded in coverage, never dropped.
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.resolve_entities",
+                        lambda specs, **kw: [Entity(lei=None, name="Unknown", country="FR")])
+    cfg = Config(data_dir=tmp_path)
+    rep = build_eu_financials([{"name": "Unknown"}], fetcher=FakeFetcher([], {}), config=cfg)
+    assert rep["entities"] == 1 and rep["no_financials"] == 1 and rep["with_financials"] == 0
+    cov = [json.loads(x) for x in
+           (tmp_path / "reports" / "eu_financials_coverage.jsonl").read_text().splitlines()]
+    assert cov[0]["status"] == "unresolved" and cov[0]["lei"] is None
+
+
+def test_build_eu_financials_no_filings_records_coverage(tmp_path, monkeypatch):
+    # An entity with a LEI but no indexed filings -> no-financials, still recorded.
+    monkeypatch.setattr("bottom_up_corpus.eu.financials.resolve_entities",
+                        lambda specs, **kw: [Entity(lei="LEI999", name="NoFilings", country="FR")])
+    cfg = Config(data_dir=tmp_path)
+    rep = build_eu_financials([{"lei": "LEI999"}], fetcher=FakeFetcher([], {}), config=cfg)
+    assert rep["entities"] == 1 and rep["no_financials"] == 1 and rep["with_financials"] == 0
+    cov = [json.loads(x) for x in
+           (tmp_path / "reports" / "eu_financials_coverage.jsonl").read_text().splitlines()]
+    assert cov[0]["status"] == "no-financials" and cov[0]["lei"] == "LEI999"
