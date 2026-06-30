@@ -1,3 +1,6 @@
+import json
+
+from bottom_up_corpus.config import Config
 from bottom_up_corpus.registers.concepts_no import map_brreg_entry
 from bottom_up_corpus.registers.identity import resolve_register_specs
 
@@ -59,9 +62,6 @@ def test_gleif_exception_is_unresolved():
     r = resolve_register_specs([{"lei": "L3"}], fetcher=_Bad())[0]
     assert r["orgnr"] is None and r["status"] == "unresolved"
 
-
-import json
-from bottom_up_corpus.config import Config
 
 class _BrregFetcher:
     def __init__(self, entries): self._e = entries

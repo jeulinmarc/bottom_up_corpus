@@ -7,7 +7,7 @@ from datetime import date
 
 from ..config import Config
 from ..financials import PeriodSummary, rows_from_base
-from ..storage import Storage
+from ..storage import Storage, _atomic_write_text
 from .concepts_no import map_brreg_entry
 from .identity import resolve_register_specs
 from .no_brreg import fetch_brreg_accounts
@@ -59,8 +59,7 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
         coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "ok", "periods": n})
     if write:
         cov = config.data_dir / "reports" / "register_coverage.jsonl"
-        cov.parent.mkdir(parents=True, exist_ok=True)
-        cov.write_text("\n".join(json.dumps(c, default=str) for c in coverage))
+        _atomic_write_text(cov, "\n".join(json.dumps(c, default=str) for c in coverage))
         out["coverage_path"] = str(cov)
     else:
         out["coverage_path"] = None
