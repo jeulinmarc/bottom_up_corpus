@@ -754,11 +754,11 @@ def reporting_currency(flat: dict[str, list[dict]]) -> str | None:
 def _currency_filtered(points: list[dict], concept: Concept, currency: str | None) -> list[dict]:
     """Drop monetary points not in the issuer's reporting currency.
 
-    Without this, a EUR fact (or a stray convenience translation) would be summed
-    and divided alongside USD facts as if it were USD. Non-monetary concepts
-    (per-share, share counts) and currency-less feeds pass through untouched.
+    A concept is monetary unless its unit is a share count or a per-share ratio.
+    (Previously this was gated on ``unit == "USD"``, which excluded non-USD packs.)
     """
-    if currency is None or concept.unit != "USD":
+    is_monetary = concept.unit != "shares" and not concept.unit.endswith("/shares")
+    if currency is None or not is_monetary:
         return points
     return [p for p in points if p.get("unit") == currency]
 
@@ -792,18 +792,15 @@ def _classify_duration_days(days: int) -> str | None:
     return None
 
 
-def _build_flow_series(flat: dict[str, list[dict]], currency: str | None) -> FlowSeries:
+def _build_flow_series(flat, currency, *, concepts_by_key=CONCEPTS_BY_KEY, ttm_keys=_TTM_FLOW_KEYS) -> FlowSeries:
     quarterly: dict[str, dict[date, float]] = {}
     annual: dict[str, dict[date, float]] = {}
     ytd9: dict[str, dict[date, float]] = {}
     buckets = {"quarterly": quarterly, "annual": annual, "ytd9": ytd9}
-    for key in _TTM_FLOW_KEYS:
-        concept = CONCEPTS_BY_KEY[key]
-        # Priority-aware union across the concept's fallback tags: a filer may tag a
-        # concept differently across vintages, and TTM reconstruction needs every
-        # period regardless of which tag carried it -- while still preferring the
-        # higher-priority tag per period (avoids mixing e.g. excluding- vs
-        # including-assessed-tax revenue when both are present for one period).
+    for key in ttm_keys:
+        concept = concepts_by_key.get(key)
+        if concept is None:
+            continue
         grouped: dict[tuple[str, date], list[dict]] = {}
         for p in _currency_filtered(_points_by_priority(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
@@ -872,34 +869,20 @@ def _ttm_flow(series: FlowSeries, key: str, end: date, frequency: str) -> float 
     return total
 
 
-def build_period_summaries(
-    facts: dict,
-    *,
-    company: str,
-    company_current: str,
-    name_for_date=None,
-    since_year: int | None = None,
-    until_year: int | None = None,
+def summaries_from_flat(
+    flat: dict[str, list[dict]], *, concepts: tuple[Concept, ...],
+    company: str, company_current: str, name_for_date=None,
+    since_year: int | None = None, until_year: int | None = None,
     sic: str | None = None,
 ) -> list[PeriodSummary]:
-    """Group curated concepts into one summary per actual reporting period.
-
-    Periods are keyed by the value's own **period end + frequency** (derived from
-    each fact's ``start``/``end``), so prior-year comparatives carried in a filing
-    land in their own period rather than the report's fiscal year. Duration facts
-    define the periods; instant (balance-sheet) facts attach by matching end date.
-    ``name_for_date(d)`` optionally supplies the point-in-time issuer name.
-    """
-    flat = flatten_points(facts)
+    """Group curated concepts into one summary per reporting period, from a
+    pre-flattened ``{tag: [points]}`` dict and an injectable concept pack."""
+    cbk = {c.key: c for c in concepts}
     currency = reporting_currency(flat)
-
-    # Duration facts -> (period_end, frequency) -> concept -> [points]
     duration: dict[tuple[date, str], dict[str, list[dict]]] = {}
-    # Instant facts -> period_end -> concept -> [points]
     instant: dict[date, dict[str, list[dict]]] = {}
     freqs_seen: set[str] = set()
-
-    for concept in CONCEPTS:
+    for concept in concepts:
         for p in _currency_filtered(_points_by_priority(concept, flat), concept, currency):
             end = _to_date(p.get("end"))
             if not end:
@@ -915,14 +898,11 @@ def build_period_summaries(
                     continue
                 freqs_seen.add(freq)
                 duration.setdefault((end, freq), {}).setdefault(concept.key, []).append(p)
-
-    # A quarterly filer's 6-month YTD points are not a separate reporting period.
     allowed = {"annual"}
     if "quarterly" in freqs_seen:
         allowed.add("quarterly")
     elif "semi-annual" in freqs_seen:
         allowed.add("semi-annual")
-
     summaries: list[PeriodSummary] = []
     for (end, freq), per_concept in duration.items():
         if freq not in allowed:
@@ -931,25 +911,20 @@ def build_period_summaries(
             continue
         if until_year is not None and end.year > until_year:
             continue
-
         values: dict[str, dict] = {}
         all_points: list[dict] = []
         for key, cands in per_concept.items():
-            chosen = _choose(cands)  # highest-priority tag for this period, restatements win
-            values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
-                           "label": CONCEPTS_BY_KEY[key].label,
-                           "tag": chosen.get("tag")}
+            chosen = _choose(cands)
+            values[key] = {"value": chosen["val"], "unit": chosen.get("unit", cbk[key].unit),
+                           "label": cbk[key].label, "tag": chosen.get("tag")}
             all_points.extend(cands)
         for key, cands in instant.get(end, {}).items():
             chosen = _choose(cands)
-            values[key] = {"value": chosen["val"], "unit": chosen.get("unit", CONCEPTS_BY_KEY[key].unit),
-                           "label": CONCEPTS_BY_KEY[key].label,
-                           "tag": chosen.get("tag")}
+            values[key] = {"value": chosen["val"], "unit": chosen.get("unit", cbk[key].unit),
+                           "label": cbk[key].label, "tag": chosen.get("tag")}
             all_points.extend(cands)
         if not values:
             continue
-
-        # First report of this period = earliest filed among its points.
         first = min(all_points, key=lambda p: p.get("filed", ""))
         pub = _to_date(first.get("filed"))
         pit = name_for_date(pub) if (name_for_date and pub) else company
@@ -960,9 +935,20 @@ def build_period_summaries(
             company=pit or company, company_current=company_current, values=values,
             currency=currency or "USD", sic=sic,
         ))
-
     summaries.sort(key=lambda s: (s.period_end or date.min, s.frequency), reverse=True)
     return summaries
+
+
+def build_period_summaries(
+    facts: dict, *, company: str, company_current: str, name_for_date=None,
+    since_year: int | None = None, until_year: int | None = None,
+    sic: str | None = None, concepts: tuple[Concept, ...] = CONCEPTS,
+) -> list[PeriodSummary]:
+    """SEC entry point: flatten companyfacts, then group (behavior unchanged)."""
+    flat = flatten_points(facts)
+    return summaries_from_flat(
+        flat, concepts=concepts, company=company, company_current=company_current,
+        name_for_date=name_for_date, since_year=since_year, until_year=until_year, sic=sic)
 
 
 def _prior_year(by_end: dict[tuple[str, date], "PeriodSummary"], freq: str,
@@ -974,22 +960,14 @@ def _prior_year(by_end: dict[tuple[str, date], "PeriodSummary"], freq: str,
     return None
 
 
-def attach_ttm_metrics(facts: dict, summaries: list[PeriodSummary]) -> None:
-    """Compute and attach Bloomberg-style TTM ratios to each summary in place.
-
-    TTM flows come from a trailing-4-quarter reconstruction; ROA/ROE/asset-turnover
-    denominators use the average of the current and year-ago period-end balance.
-    Issuers flagged financial carry sector_relevant=False on sensitive metrics.
-    """
-    flat = flatten_points(facts)
+def attach_ttm_from_flat(flat, summaries, *, concepts_by_key, ttm_keys=_TTM_FLOW_KEYS) -> None:
     currency = reporting_currency(flat)
-    series = _build_flow_series(flat, currency)
+    series = _build_flow_series(flat, currency, concepts_by_key=concepts_by_key, ttm_keys=ttm_keys)
     by_end = {(s.frequency, s.period_end): s for s in summaries if s.period_end}
-
     for s in summaries:
         if not s.period_end:
             continue
-        t12 = {k: _ttm_flow(series, k, s.period_end, s.frequency) for k in _TTM_FLOW_KEYS}
+        t12 = {k: _ttm_flow(series, k, s.period_end, s.frequency) for k in ttm_keys}
         prior = _prior_year(by_end, s.frequency, s.period_end)
 
         def avg(key: str, _s=s, _prior=prior) -> float | None:
@@ -998,13 +976,17 @@ def attach_ttm_metrics(facts: dict, summaries: list[PeriodSummary]) -> None:
             return (cur + old) / 2 if (cur is not None and old is not None) else None
 
         pit_net_debt = compute_derived(
-            s.values, s.frequency, s.currency, s.is_financial
-        ).get("net_debt", {}).get("value")
-
+            s.values, s.frequency, s.currency, s.is_financial).get("net_debt", {}).get("value")
         s.ttm = compute_ttm_derived(
             t12=t12, avg_assets=avg("assets"), avg_equity=avg("equity"),
-            pit_net_debt=pit_net_debt, is_financial=s.is_financial,
-        )
+            pit_net_debt=pit_net_debt, is_financial=s.is_financial)
+
+
+def attach_ttm_metrics(facts: dict, summaries: list[PeriodSummary], *,
+                       concepts_by_key=CONCEPTS_BY_KEY) -> None:
+    """SEC entry point (behavior unchanged): flatten companyfacts then attach TTM."""
+    flat = flatten_points(facts)
+    attach_ttm_from_flat(flat, summaries, concepts_by_key=concepts_by_key)
 
 
 def _fmt(value, unit: str) -> str:
@@ -1076,37 +1058,28 @@ def render_summary_html(summary: PeriodSummary) -> str:
     )
 
 
-def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
-    """Flatten a period summary into queryable rows for data/financials/<cik>.jsonl.
-
-    Emits both ``kind="reported"`` rows (raw XBRL concepts) and ``kind="derived"``
-    rows (computed ratios/aggregates), so leverage, EBITDA, total debt, etc. are
-    queryable alongside the line items they came from.
-    """
-    base = {
-        "cik": cik, "fy": summary.fy, "frequency": summary.frequency,
-        "currency": summary.currency, "sic": summary.sic,
-        "is_financial": summary.is_financial,
-        "period_end": summary.period_end.isoformat() if summary.period_end else None,
-        "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
-        "sec_form": summary.sec_form, "accession": summary.accession,
-    }
-    rows = [
-        {**base, "kind": "reported", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"],
-         "tag": v.get("tag")}
-        for key, v in summary.values.items()
-    ]
-    rows += [
-        {**base, "kind": "derived", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"],
-         "sector_relevant": v.get("sector_relevant", True)}
-        for key, v in summary.derived.items()
-    ]
-    rows += [
-        {**base, "kind": "derived_ttm", "concept": key,
-         "label": v["label"], "value": v["value"], "unit": v["unit"],
-         "sector_relevant": v.get("sector_relevant", True)}
-        for key, v in summary.ttm.items()
-    ]
+def rows_from_base(base: dict, summary: PeriodSummary) -> list[dict]:
+    """Flatten a summary into reported/derived/derived_ttm rows on top of ``base``
+    (the identity + period columns), shared by the SEC and EU pillars."""
+    rows = [{**base, "kind": "reported", "concept": key, "label": v["label"],
+             "value": v["value"], "unit": v["unit"], "tag": v.get("tag")}
+            for key, v in summary.values.items()]
+    rows += [{**base, "kind": "derived", "concept": key, "label": v["label"],
+              "value": v["value"], "unit": v["unit"],
+              "sector_relevant": v.get("sector_relevant", True)}
+             for key, v in summary.derived.items()]
+    rows += [{**base, "kind": "derived_ttm", "concept": key, "label": v["label"],
+              "value": v["value"], "unit": v["unit"],
+              "sector_relevant": v.get("sector_relevant", True)}
+             for key, v in summary.ttm.items()]
     return rows
+
+
+def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
+    base = {"cik": cik, "fy": summary.fy, "frequency": summary.frequency,
+            "currency": summary.currency, "sic": summary.sic,
+            "is_financial": summary.is_financial,
+            "period_end": summary.period_end.isoformat() if summary.period_end else None,
+            "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
+            "sec_form": summary.sec_form, "accession": summary.accession}
+    return rows_from_base(base, summary)
