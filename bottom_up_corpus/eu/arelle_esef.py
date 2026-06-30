@@ -46,7 +46,7 @@ def oim_from_esef_zip(zip_path: str, *, cntlr=None) -> dict:
         facts: dict[str, dict] = {}
         for i, f in enumerate(model.facts):
             q, ctx = f.qname, f.context
-            if q is None or ctx is None:
+            if q is None or ctx is None or getattr(f, "isNil", False):
                 continue
             if ctx.isInstantPeriod:
                 period = ctx.instantDatetime.isoformat()
@@ -57,8 +57,10 @@ def oim_from_esef_zip(zip_path: str, *, cntlr=None) -> dict:
             concept = f"{q.prefix}:{q.localName}" if q.prefix else q.localName  # flatten strips the prefix
             dims: dict = {"concept": concept, "period": period}
             if f.unit is not None and f.unit.measures and f.unit.measures[0]:
-                dims["unit"] = str(f.unit.measures[0][0])      # e.g. "iso4217:EUR"
-            for dq in getattr(ctx, "qnameDims", {}) or {}:     # segment dims -> flatten drops these facts
+                num = str(f.unit.measures[0][0])
+                den = f.unit.measures[1]
+                dims["unit"] = f"{num}/{den[0]}" if den else num   # e.g. "iso4217:EUR/xbrli:shares"
+            for dq in getattr(ctx, "qnameDims", {}) or {}:          # segment dims -> flatten drops these facts
                 dims[str(dq)] = "segment"
             facts[f"f{i}"] = {"value": str(f.value), "decimals": f.decimals, "dimensions": dims}
         return {"documentInfo": {"documentType": _OIM_DOCTYPE}, "facts": facts}

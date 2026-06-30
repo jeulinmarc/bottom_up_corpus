@@ -11,9 +11,9 @@ import json
 from ..config import Config
 from ..financials import attach_ttm_from_flat, rows_from_base, summaries_from_flat
 from ..storage import Storage
+from .arelle_esef import oim_from_esef_zip
 from .entities import Entity, resolve_entities
 from .ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
-from .arelle_esef import oim_from_esef_zip
 from .oim import flatten_oim_json
 from .sources.filings_org import FilingsXbrlOrg
 
@@ -110,9 +110,9 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, u
             out["no_financials"] += 1
             continue
         flat = facts_for_entity(ent, fetcher=fetcher)
-        if use_arelle:
-            for tag, pts in arelle_facts_for_entity(ent, config=config).items():
-                flat.setdefault(tag, []).extend(pts)
+        arelle_flat = arelle_facts_for_entity(ent, config=config) if use_arelle else {}
+        for tag, pts in arelle_flat.items():
+            flat.setdefault(tag, []).extend(pts)
         summaries = summaries_from_flat(flat, concepts=IFRS_CONCEPTS, company=ent.name,
                                         company_current=ent.name, sic=None)
         attach_ttm_from_flat(flat, summaries, concepts_by_key=IFRS_CONCEPTS_BY_KEY)
@@ -127,9 +127,11 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, u
         out["with_financials"] += 1
         if write:
             out["paths"].append(storage.write_eu_financials_table(ent.lei, rows))
-        coverage.append({"lei": ent.lei, "name": ent.name, "status": "ok",
-                         "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy],
-                         "arelle": bool(use_arelle)})
+        cov_ok = {"lei": ent.lei, "name": ent.name, "status": "ok",
+                  "periods": len(summaries), "fy_range": [summaries[-1].fy, summaries[0].fy]}
+        if use_arelle:
+            cov_ok["arelle"] = bool(arelle_flat)
+        coverage.append(cov_ok)
     cov_path = config.data_dir / "reports" / "eu_financials_coverage.jsonl"
     if write:
         cov_path.parent.mkdir(parents=True, exist_ok=True)
