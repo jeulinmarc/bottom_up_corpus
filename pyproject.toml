@@ -20,6 +20,9 @@ dependencies = [
 # The Belgium (FSMA STORI) backend needs a browser-impersonating HTTP client to
 # clear the FSMA F5 WAF. Imported lazily; only required to run the BE backend.
 be = ["curl_cffi>=0.7"]
+# Tier B ESEF parsing: local .zip packages via Arelle. Imported lazily inside
+# oim_from_esef_zip; only required to run the Arelle bridge.
+eu-financials = ["arelle-release"]
 
 [project.scripts]
 bottom_up_corpus = "bottom_up_corpus.cli:main"

@@ -1,0 +1,65 @@
+"""Tier B — parse a local ESEF report-package .zip into an OIM xBRL-JSON dict using
+Arelle (the same shape filings.xbrl.org's json_url returns, so flatten_oim_json
+consumes it). Arelle is an OPTIONAL dependency: pip install '.[eu-financials]'.
+"""
+from __future__ import annotations
+
+import zipfile
+
+_OIM_DOCTYPE = "https://xbrl.org/2021/xbrl-json"
+
+
+def oim_from_esef_zip(zip_path: str, *, cntlr=None) -> dict:
+    """An ESEF report-package .zip -> an OIM xBRL-JSON dict.
+
+    Pass a shared Arelle ``cntlr`` to amortize the one-time IFRS-taxonomy load
+    across many zips. Raises ImportError (with an install hint) if Arelle is
+    absent; ValueError if the package has no inline-XBRL report or yields no facts.
+    """
+    try:
+        from arelle import Cntlr
+    except ImportError as exc:  # optional dependency
+        raise ImportError(
+            "Tier B ESEF parsing needs Arelle — install the optional extra: "
+            "pip install '.[eu-financials]'"
+        ) from exc
+
+    inner = [n for n in zipfile.ZipFile(zip_path).namelist()
+             if n.lower().endswith(".xhtml") and "/reports/" in n.lower()]
+    if not inner:
+        raise ValueError(f"no inline-XBRL report (reports/*.xhtml) in {zip_path}")
+
+    own = cntlr is None
+    if own:
+        cntlr = Cntlr.Cntlr(logFileName="logToBuffer")
+    try:
+        cntlr.webCache.noCertificateCheck = True   # tolerate SSL-inspection proxies
+    except Exception:  # noqa: BLE001
+        pass
+
+    model = cntlr.modelManager.load(f"{zip_path}/{inner[0]}")   # NB: the inner report, not the zip
+    if model is None or not getattr(model, "facts", None):
+        raise ValueError(f"Arelle parsed no facts from {zip_path}")
+
+    facts: dict[str, dict] = {}
+    for i, f in enumerate(model.facts):
+        q, ctx = f.qname, f.context
+        if q is None or ctx is None:
+            continue
+        if ctx.isInstantPeriod:
+            period = ctx.instantDatetime.isoformat()
+        elif ctx.isStartEndPeriod:
+            period = f"{ctx.startDatetime.isoformat()}/{ctx.endDatetime.isoformat()}"
+        else:
+            continue
+        concept = f"{q.prefix}:{q.localName}" if q.prefix else q.localName  # flatten strips the prefix
+        dims: dict = {"concept": concept, "period": period}
+        if f.unit is not None and f.unit.measures and f.unit.measures[0]:
+            dims["unit"] = str(f.unit.measures[0][0])      # e.g. "iso4217:EUR"
+        for dq in getattr(ctx, "qnameDims", {}) or {}:     # segment dims -> flatten drops these facts
+            dims[str(dq)] = "segment"
+        facts[f"f{i}"] = {"value": str(f.value), "decimals": f.decimals, "dimensions": dims}
+
+    if own and model is not None:
+        model.close()
+    return {"documentInfo": {"documentType": _OIM_DOCTYPE}, "facts": facts}
