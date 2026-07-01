@@ -431,9 +431,13 @@ def test_list_fi_dates_uses_correct_url_and_params():
 
 
 def test_iter_fi_all_yields_business_ids_and_stops_at_last_page():
-    """Two pages: first returns 100 items, second returns 3 → stop after page 2."""
-    page1 = [{"businessId": f"ID{i:04d}"} for i in range(100)]
-    page2 = [{"businessId": "LAST1"}, {"businessId": "LAST2"}, {"businessId": "LAST3"}]
+    """Two pages: first returns 100 items, second returns 3 → stop after page 2.
+
+    The real API returns {"totalResults": N, "financials": [{businessId, …}, …]},
+    not a bare list.  Stub must match that shape.
+    """
+    page1_items = [{"businessId": f"ID{i:04d}"} for i in range(100)]
+    page2_items = [{"businessId": "LAST1"}, {"businessId": "LAST2"}, {"businessId": "LAST3"}]
 
     class _PaginatedFetcher:
         def __init__(self):
@@ -442,7 +446,8 @@ def test_iter_fi_all_yields_business_ids_and_stops_at_last_page():
         def get_json(self, url, *, params=None, **kw):
             self.calls.append(params)
             page = (params or {}).get("page", 1)
-            return page1 if page == 1 else page2
+            items = page1_items if page == 1 else page2_items
+            return {"totalResults": 103, "financials": items}
 
     stub = _PaginatedFetcher()
     result = list(iter_fi_all("2024-12-31", fetcher=stub))

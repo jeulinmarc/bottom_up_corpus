@@ -131,7 +131,7 @@ def iter_fi_all(financial_date: str, *, fetcher) -> Iterator[str]:
     page = 1
     while True:
         try:
-            items = fetcher.get_json(
+            resp = fetcher.get_json(
                 url, params={"financialDate": financial_date, "page": page}
             )
         except Exception:  # noqa: BLE001
@@ -143,6 +143,12 @@ def iter_fi_all(financial_date: str, *, fetcher) -> Iterator[str]:
             )
             return
 
+        # Real API response: {"totalResults": N, "financials": [{businessId, …}, …]}
+        if not isinstance(resp, dict):
+            log.debug("PRH iter_fi_all unexpected response type %r on page %d", type(resp), page)
+            return
+
+        items = resp.get("financials") or []
         if not items:
             return
 
