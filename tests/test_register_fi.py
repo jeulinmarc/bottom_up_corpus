@@ -5,6 +5,7 @@ Task 2 — concept pack + NO-FALSE-DATA gate (``concepts_fi.map_fi_facts``).
 """
 import pytest
 
+from bottom_up_corpus.financials import compute_derived
 from bottom_up_corpus.registers.concepts_fi import map_fi_facts
 from bottom_up_corpus.registers.fi_prh_xbrl import parse_fi_facts
 
@@ -120,7 +121,7 @@ def test_full_net_income_is_x740_not_x738():
 
 def test_full_total_assets():
     m = _mapped(FIXTURE)
-    ta = m["values"]["total_assets"]
+    ta = m["values"]["assets"]          # canonical engine key: assets (was total_assets)
     assert ta["value"] == pytest.approx(201_064.55, abs=0.01)
     assert ta["tag"] == "fi_MC:x360"
 
@@ -179,7 +180,7 @@ def test_abbrev_revenue_absent_but_gate_holds():
     assert "revenue" not in m["values"]               # x673 missing in abbreviated
     assert _reason(m, "revenue") is not None
     assert m["values"]["equity"]["value"] == pytest.approx(19_979.80, abs=0.01)
-    assert m["values"]["total_assets"]["value"] == pytest.approx(122_979.81, abs=0.01)
+    assert m["values"]["assets"]["value"] == pytest.approx(122_979.81, abs=0.01)
     assert m["unbalanced"] is False                   # primary balance holds
 
 
@@ -194,8 +195,8 @@ def test_housing_negative_non_current_accepted():
     assert nc["value"] == pytest.approx(x376, abs=0.01)   # accepted as-is, no positivity check
     assert nc["value"] < 0
     assert nc["tag"] == "fi_MC:x376"
-    # decomposition x376 + x424 == x360 still holds → current_assets also emitted
-    assert m["values"]["current_assets"]["value"] == pytest.approx(parsed["fields"][424], abs=0.01)
+    # decomposition x376 + x424 == x360 still holds → assets_current also emitted
+    assert m["values"]["assets_current"]["value"] == pytest.approx(parsed["fields"][424], abs=0.01)
     assert m["unbalanced"] is False
 
 
@@ -227,3 +228,57 @@ def test_synthetic_debt_not_reconciling_suppresses_split():
     assert "short_term_debt" not in m["values"]
     reason = _reason(m, "long_term_debt")
     assert reason is not None and "reconcile" in reason
+
+
+# --- I1: canonical key names restore compute_derived ratios ---------------------
+
+def test_compute_derived_produces_roa_operating_margin_interest_coverage():
+    """After I1 rename (total_assets→assets, operating_profit→operating_income,
+    current_assets→assets_current), compute_derived receives canonical keys and
+    now produces roa, operating_margin, and interest_coverage from the full_2024
+    fixture.  Before the rename these three were silently skipped."""
+    m = _mapped(FIXTURE)
+    assert m["unbalanced"] is False
+    # Confirm the renamed keys are present in the output
+    assert "assets" in m["values"], "canonical key 'assets' must be emitted"
+    assert "operating_income" in m["values"], "canonical key 'operating_income' must be emitted"
+    assert "interest_expense" in m["values"], "canonical key 'interest_expense' must be emitted"
+    derived = compute_derived(m["values"], frequency="annual", currency="EUR")
+    assert "roa" in derived, (
+        "roa (net_income / assets) should be produced — requires 'assets' key")
+    assert "operating_margin" in derived, (
+        "operating_margin (operating_income / revenue) should be produced")
+    assert "interest_coverage" in derived, (
+        "interest_coverage (operating_income / interest_expense) should be produced")
+    # Sanity-check values are finite numbers, not None
+    for key in ("roa", "operating_margin", "interest_coverage"):
+        assert isinstance(derived[key]["value"], (int, float)), \
+            f"{key} value must be numeric"
+
+
+# --- I2: P&L leg 1 -----------------------------------------------------------
+
+def test_synthetic_pnl_leg1_failure_suppresses_net_income():
+    """Leg-1 failure (|x689 + x12 - x738| > tol) suppresses net_income even when
+    leg 2 would pass (x738 == x740, no appropriations)."""
+    # x689=100k + x12=50k = 150k, but x738=200k: leg 1 FAILS (diff=50k >> tol=1k).
+    # Leg 2: x738 + x541_absent == x740 → 200k + 0 == 200k: would pass alone.
+    parsed = {
+        "period_end": "2024-12-31", "currency": "EUR",
+        "fields": {
+            360: 500_000.0, 435: 300_000.0, 513: 200_000.0,   # balanced sheet
+            673: 1_000_000.0,   # revenue
+            689: 100_000.0,     # operating_income (x689)
+            12:   50_000.0,     # net financial items (x12): 100k + 50k = 150k ≠ x738
+            738: 200_000.0,     # result before appropriations (deliberately wrong)
+            740: 200_000.0,     # result after appropriations
+        },
+    }
+    m = map_fi_facts(parsed)
+    assert m["unbalanced"] is False
+    assert "net_income" not in m["values"], \
+        "net_income must be suppressed when leg 1 fails"
+    reason = _reason(m, "net_income")
+    assert reason is not None
+    assert "leg" in reason.lower(), \
+        f"suppression reason should mention 'leg'; got: {reason!r}"

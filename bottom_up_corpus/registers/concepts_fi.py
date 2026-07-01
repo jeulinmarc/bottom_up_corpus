@@ -19,8 +19,8 @@ Two Finnish traps drive the gate:
   *appropriations* (``x541``), so the final bottom line is ``x740``
   (``result after appropriations``), **never** ``x738`` (``result before
   appropriations``): ``x740 = x738 + x541``. We map ``net_income`` to ``x740``
-  and, when ``x738`` is present, verify the waterfall reconciles — if it does
-  not we suppress ``net_income`` rather than fall back to ``x738``.
+  and verify a two-leg waterfall — if either leg fails we suppress ``net_income``
+  rather than fall back to ``x738``.
 
 * **The maturity-label trap (leverage).** ``x583`` and ``x816`` split total
   liabilities (``x513``) by maturity and reconcile to it to the cent, but the
@@ -30,12 +30,12 @@ Two Finnish traps drive the gate:
   data*. Emitting a guessed ``long_term_debt``/``short_term_debt`` split would be
   a false maturity claim, and mapping the whole of ``x513`` into a single bucket
   asserts an equally-false "all one maturity" label. Per NO-FALSE-DATA we
-  therefore **suppress the maturity split and suppress engine leverage**
-  (``long_term_debt``/``short_term_debt``) entirely — never guess which is long
-  vs short — while still emitting the confirmed **total** ``liabilities``
-  (``x513``). Leverage is liabilities-based via that total, not via a fabricated
-  split. (Should a future, authoritative codelist confirm the assignment, the
-  split can be emitted here under the existing ``x583 + x816 == x513`` gate.)
+  therefore **suppress the maturity split** (``long_term_debt``/``short_term_debt``)
+  entirely — never guess which is long vs short. FI emits ``liabilities`` (``x513``)
+  as a raw reported value but produces **no** ``total_debt``/``debt_to_equity``
+  (the engine's leverage ratios require the suppressed split). A future authoritative
+  codelist confirming the assignment would re-enable the split under the existing
+  ``x583 + x816 == x513`` gate.
 
 The confidence gate (§4 of the design doc):
 
@@ -46,8 +46,11 @@ The confidence gate (§4 of the design doc):
   **may be negative** — housing companies — so there is no positivity check).
   On mismatch the two asset components are suppressed (the gate-verified total
   ``x360`` still stands).
-* **P&L waterfall:** when ``x738`` is present, ``x738 + (x541 or 0) == x740``;
-  else ``net_income`` (``x740``) is suppressed. Never ``x738``.
+* **P&L waterfall (two legs):** Leg 1 — when both ``x12`` (net financial items)
+  and ``x738`` are present: ``|x689 + x12 − x738| ≤ tol``; failure suppresses
+  ``net_income``. Leg 2 — when ``x738`` is present: ``|x738 + (x541 or 0) −
+  x740| ≤ tol``; failure suppresses ``net_income``. When ``x738`` is absent both
+  legs are skipped and ``x740`` is emitted directly. Never ``x738``.
 
 Always suppressed (semantics unconfirmed under FAS): ``income_tax`` (tax is
 routed through appropriations, not a clean line), ``cash`` (``x438`` ambiguous),
@@ -64,15 +67,15 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 FI_PACK: dict[str, int] = {
     "revenue":            673,
-    "operating_profit":   689,
+    "operating_income":   689,   # canonical engine key (was operating_profit)
     "net_income":         740,   # FINAL — after appropriations; never x738
     "interest_expense":  4046,   # abs()
-    "total_assets":       360,
+    "assets":             360,   # canonical engine key (was total_assets)
     "equity":             435,
     "liabilities":        513,
     "personnel_costs":   1869,
     "non_current_assets": 376,   # may be negative
-    "current_assets":     424,
+    "assets_current":     424,   # canonical engine key (was current_assets)
 }
 
 # Concepts we never emit for FI, with the reason recorded in ``suppressed``.
@@ -86,7 +89,7 @@ _ALWAYS_SUPPRESS: dict[str, str] = {
 }
 
 # Codes handled by dedicated gate logic rather than the plain pack loop.
-_GATED = {"net_income", "non_current_assets", "current_assets"}
+_GATED = {"net_income", "non_current_assets", "assets_current"}
 
 
 def _tol(scale: float) -> float:
@@ -155,14 +158,25 @@ def map_fi_facts(parsed: dict) -> dict:
         else:
             emit(key, code, raw)
 
-    # --- net_income (x740) guarded by the appropriations waterfall (NEVER x738).
+    # --- net_income (x740) guarded by the two-leg appropriations waterfall (NEVER x738).
+    # Leg 1 (when x12 net financial items and x738 both present): x689 + x12 == x738.
+    # Leg 2 (when x738 present): x738 + (x541 or 0) == x740.
+    x689 = fields.get(689)   # operating income — also emitted above via the plain loop
+    x12  = fields.get(12)    # net financial items
     x738, x541, x740 = fields.get(738), fields.get(541), fields.get(740)
     if x740 is None:
         suppress("net_income",
                  "fi_MC:x740 (final result after appropriations) absent")
+    elif (x12 is not None and x738 is not None
+          and abs((x689 or 0.0) + x12 - x738)
+              > _tol(max(abs(x689 or 0.0), abs(x738)))):
+        suppress("net_income",
+                 f"P&L leg-1 fails: x689 {x689} + x12 {x12} != x738 "
+                 f"{x738} — P&L is untrusted, net_income suppressed "
+                 "(never falls back to x738)")
     elif x738 is not None and abs(x738 + (x541 or 0.0) - x740) > _tol(max(abs(x738), abs(x740))):
         suppress("net_income",
-                 f"P&L waterfall fails: x738 {x738} + x541 {x541 or 0.0} != x740 "
+                 f"P&L leg-2 fails: x738 {x738} + x541 {x541 or 0.0} != x740 "
                  f"{x740} — net_income unconfirmed (never falls back to x738)")
     else:
         emit("net_income", 740, x740)
@@ -177,7 +191,7 @@ def map_fi_facts(parsed: dict) -> dict:
         and abs((x376 + x424) - x360) > _tol(abs(x360))
     )
     for key, code, raw in (("non_current_assets", 376, x376),
-                           ("current_assets", 424, x424)):
+                           ("assets_current", 424, x424)):
         if raw is None:
             suppress(key, f"fi_MC:x{code} absent on the filing")
         elif decomp_fails:
@@ -209,7 +223,8 @@ def map_fi_facts(parsed: dict) -> dict:
         lev_reason = ("x583/x816 reconcile to x513 but the long-term vs "
                       "short-term label is UNCONFIRMED from the instance "
                       "(no label linkbase) — never guess; maturity split "
-                      "suppressed, leverage stays liabilities-based via x513")
+                      "suppressed; no total_debt/debt_to_equity produced "
+                      "(a codelist confirming the split would re-enable it)")
     suppress("long_term_debt", lev_reason)
     suppress("short_term_debt", lev_reason)
 
