@@ -125,12 +125,15 @@ def _emit_financial_debt(flat: list[dict], emit, suppressed: list) -> None:
     instrument tranche; ``ST`` = the same for ``rst=m2``. The subordinated
     cross-cut (``sts``) is excluded (it double-counts across the tranches).
 
-    NO-FALSE-DATA guard — an INDEPENDENT cross-check, not trust in the tranche
-    logic: ``LT+ST`` must reconcile with the financial-nature slice of the
-    total-liabilities rubric, Σ ``m50[ntr=m3]`` breakdown-free (``rst=m1`` +
-    ``rst=m2`` on the passif) — a *different* rubric, so an independent witness.
-    Emit only if they reconcile within tol; otherwise suppress and fall back to
-    liabilities-based leverage rather than emit a possibly-wrong figure."""
+    NO-FALSE-DATA guard — an INDEPENDENT per-bucket cross-check, not trust in
+    the tranche logic: **both** ``LT`` and ``ST`` must each reconcile with their
+    respective bucket of the financial-nature slice of total liabilities,
+    Σ ``m50[ntr=m3, rst=m1]`` (witness_lt) and Σ ``m50[ntr=m3, rst=m2]``
+    (witness_st) — a *different* rubric, so a genuinely independent witness.
+    A filing whose ``m51`` maturity split disagrees with the ``m50`` split — while
+    the totals happen to reconcile — would emit a wrong LT/ST split; the whole
+    block is suppressed instead. Emit only if both buckets reconcile within tol;
+    otherwise suppress and fall back to liabilities-based leverage."""
     keys = ("long_term_debt", "short_term_debt")
 
     def suppress(reason: str) -> None:
@@ -177,10 +180,13 @@ def _emit_financial_debt(flat: list[dict], emit, suppressed: list) -> None:
     st = sum(f["value"] for f in borrow if f["dims"]["rst"] == "m2")
 
     # Independent witness: the financial-nature slice of total liabilities
-    # (bas=m50, ntr=m3), breakdown-free rst=m1 + rst=m2 on the passif (part=m3).
-    # Dedup by full dim-tuple to guard against malformed duplicate contexts.
-    witness = 0.0
-    seen = False
+    # (bas=m50, ntr=m3), tracked per bucket (rst=m1 LT, rst=m2 ST) on the
+    # passif (part=m3). Dedup by full dim-tuple to guard against malformed
+    # duplicate contexts.
+    witness_lt = 0.0
+    witness_st = 0.0
+    seen_lt = False
+    seen_st = False
     _seen_w: set[frozenset] = set()
     for fact in flat:
         dims = fact["dims"]
@@ -195,16 +201,28 @@ def _emit_financial_debt(flat: list[dict], emit, suppressed: list) -> None:
             if _wk in _seen_w:
                 continue
             _seen_w.add(_wk)
-            witness += fact["value"]
-            seen = True
-    if not seen:
+            if dims["rst"] == "m1":
+                witness_lt += fact["value"]
+                seen_lt = True
+            else:
+                witness_st += fact["value"]
+                seen_st = True
+
+    if not (seen_lt or seen_st):
         suppress("no m50[ntr=m3] witness to cross-check the m51 borrowings total")
         return
 
-    total = lt + st
-    if abs(total - witness) > _tol(max(abs(total), abs(witness))):
-        suppress(f"m51 borrowings {total} do not reconcile with the independent "
-                 f"m50[ntr=m3] witness {witness}")
+    # Per-bucket cross-check (NO-FALSE-DATA split guarantee): LT and ST must
+    # each reconcile with their respective witness bucket. A filing whose m51
+    # split disagrees with the m50[ntr=m3] split — while the totals happen to
+    # reconcile — would emit a wrong LT/ST split; suppress the whole block.
+    if abs(lt - witness_lt) > _tol(max(abs(lt), abs(witness_lt))):
+        suppress(f"m51 LT borrowings {lt} do not reconcile with the independent "
+                 f"m50[ntr=m3, rst=m1] witness {witness_lt}")
+        return
+    if abs(st - witness_st) > _tol(max(abs(st), abs(witness_st))):
+        suppress(f"m51 ST borrowings {st} do not reconcile with the independent "
+                 f"m50[ntr=m3, rst=m2] witness {witness_st}")
         return
 
     emit("long_term_debt", lt, "m51 (derived, x-checked)")

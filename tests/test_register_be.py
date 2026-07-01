@@ -167,6 +167,33 @@ def test_map_bnb_debt_block_suppressed_when_xcheck_fails():
     assert res["unbalanced"] is False
 
 
+def test_map_bnb_debt_block_suppressed_on_split_mismatch():
+    """Fix 1 — per-bucket cross-check: m51 is ALL LT (rst=m1, total=1_000_000) but
+    the m50[ntr=m3] witness splits 400_000 LT / 600_000 ST. The totals reconcile
+    (1_000_000 == 400_000 + 600_000) but the LT bucket disagrees → the whole
+    debt block must be SUPPRESSED (reason recorded). long_term_debt, short_term_debt,
+    and total_debt must all be absent from the result."""
+    flat = _balanced_base() + [
+        # m51: all LT (rst=m1 tranches only), total = 1_000_000
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1", "typ": "m1"}, "value": 600_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1", "typ": "m2"}, "value": 400_000.0, "unit": "EUR"},
+        # m50[ntr=m3] witness: 400_000 LT + 600_000 ST = 1_000_000 (totals match,
+        # but per-bucket disagrees: m51 LT=1_000_000 vs witness_lt=400_000)
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 400_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2"}, "value": 600_000.0, "unit": "EUR"},
+    ]
+    res = map_bnb_facts(flat)
+    # LT bucket disagrees → whole debt block suppressed
+    assert "long_term_debt" not in res["values"]
+    assert "short_term_debt" not in res["values"]
+    assert "total_debt" not in res["values"]   # derived from LT+ST; absent if LT/ST absent
+    # Reason recorded for at least one of the debt keys
+    assert any(k in ("long_term_debt", "short_term_debt") for k, _ in res["suppressed"])
+    # Non-debt values still emit; filing itself is not unbalanced
+    assert round(_val(res, "equity")) == 40_000
+    assert res["unbalanced"] is False
+
+
 def test_map_bnb_debt_block_suppressed_when_tranche_lacks_typ():
     """Synthetic: an m51 balance-sheet fact missing its typ tranche -> the total
     cannot be confirmed, so the debt block is suppressed atomically."""

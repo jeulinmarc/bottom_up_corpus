@@ -610,7 +610,7 @@ The derived block produced from this pack includes (for a full filer):
 
 - **Aggregates:** `total_debt` (borrowings), `net_debt`, `net_cash`, `working_capital`,
   `invested_capital`
-- **Profitability:** `net_margin`, `roe`, `roa`, `effective_tax_rate`
+- **Profitability:** `net_margin`, `roe`, `roa`
 - **Leverage / liquidity:** `debt_to_equity` (borrowings), `debt_to_assets` (borrowings),
   `current_ratio`, `quick_ratio`, `cash_ratio`
 - **Efficiency:** `asset_turnover`, `dso`
