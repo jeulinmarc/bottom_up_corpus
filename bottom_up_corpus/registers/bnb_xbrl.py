@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 from typing import Union
 
@@ -121,6 +122,31 @@ def parse_bnb_data_xbrl(source: Union[str, bytes, Path]) -> list[dict]:
     return facts
 
 
+def _period_end_from_root(root: ET.Element) -> "str | None":
+    """Extract the max period-end date from an already-parsed XBRL root element.
+
+    Iterates every ``xbrli:context/xbrli:period`` and collects all ``endDate``
+    and ``instant`` text values.  Each string is normalised to a plain
+    ``date`` via ``date.fromisoformat(s.strip()[:10])`` — robust against
+    timestamps with a trailing ``T00:00:00`` — and the max ``date`` is returned
+    as ``"YYYY-MM-DD"``.  Strings that cannot be parsed are silently skipped.
+    Returns ``None`` when no valid period date is found.
+    """
+    parsed: list[date] = []
+    for ctx in root.iter(_TAG_CONTEXT):
+        period = ctx.find(_TAG_PERIOD)
+        if period is None:
+            continue
+        for tag in (_TAG_END_DATE, _TAG_INSTANT):
+            el = period.find(tag)
+            if el is not None and el.text and el.text.strip():
+                try:
+                    parsed.append(date.fromisoformat(el.text.strip()[:10]))
+                except ValueError:
+                    pass  # skip malformed / non-ISO strings
+    return max(parsed).isoformat() if parsed else None
+
+
 def period_end_of(source: Union[str, bytes, Path]) -> "str | None":
     """Return the filing's reporting date as the max of all context period dates.
 
@@ -150,18 +176,69 @@ def period_end_of(source: Union[str, bytes, Path]) -> "str | None":
     else:
         root = ET.fromstring(source)
 
-    dates: list[str] = []
-    for ctx in root.iter(_TAG_CONTEXT):
-        period = ctx.find(_TAG_PERIOD)
-        if period is None:
+    return _period_end_from_root(root)
+
+
+def parse_bnb_document(
+    source: Union[str, bytes, Path],
+) -> "tuple[list[dict], str | None]":
+    """Parse a BNB -data.xbrl **once** and return ``(facts, period_end)``.
+
+    Combines the work of :func:`parse_bnb_data_xbrl` and
+    :func:`period_end_of` into a single XML parse.  Use this on the producer
+    path (``_be_pipeline``) to avoid parsing large documents twice per filing
+    at batch scale.
+
+    The existing :func:`parse_bnb_data_xbrl` and :func:`period_end_of`
+    functions are unchanged — they each still parse independently and their
+    own tests continue to pass.
+
+    Parameters
+    ----------
+    source:
+        A file path (str or Path) or raw bytes of the -data.xbrl document.
+
+    Returns
+    -------
+    (facts, period_end)
+        *facts* — same list as :func:`parse_bnb_data_xbrl`.
+        *period_end* — same ``str | None`` as :func:`period_end_of`.
+    """
+    if isinstance(source, (str, Path)):
+        tree = ET.parse(str(source))
+        root = tree.getroot()
+    else:
+        root = ET.fromstring(source)
+
+    # --- facts (same logic as parse_bnb_data_xbrl) ---
+    ctx_index = _build_context_index(root)
+    facts: list[dict] = []
+    for elem in root:
+        local = _local(elem.tag)
+        if local in _SKIP_LOCAL:
             continue
-        end = period.find(_TAG_END_DATE)
-        if end is not None and end.text and end.text.strip():
-            dates.append(end.text.strip())
-        instant = period.find(_TAG_INSTANT)
-        if instant is not None and instant.text and instant.text.strip():
-            dates.append(instant.text.strip())
-    return max(dates) if dates else None
+        ctx_ref = elem.get("contextRef")
+        if ctx_ref is None:
+            continue
+        if elem.get(_ATTR_NIL, "").lower() == "true":
+            continue
+        unit_ref = elem.get("unitRef")
+        if unit_ref is None:
+            continue
+        text = (elem.text or "").strip()
+        if not text:
+            continue
+        try:
+            value = float(text)
+        except ValueError:
+            continue
+        dims = dict(ctx_index.get(ctx_ref, {}))
+        facts.append({"dims": dims, "value": value, "unit": unit_ref})
+
+    # --- period_end (via shared helper, robust date parsing) ---
+    period_end = _period_end_from_root(root)
+
+    return facts, period_end
 
 
 def open_bnb_deposit(zip_bytes: bytes) -> bytes:

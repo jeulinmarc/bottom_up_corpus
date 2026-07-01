@@ -20,7 +20,7 @@ from ..eu.oim import flatten_oim_json
 from ..financials import PeriodSummary, rows_from_base
 from ..storage import Storage, _atomic_write_text
 from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
-from .bnb_xbrl import open_bnb_deposit, parse_bnb_data_xbrl, period_end_of
+from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
 from .ch_ixbrl import oim_from_ch_html
 from .concepts_be import map_bnb_facts
@@ -309,8 +309,8 @@ def _be_pipeline(
     or ``bytes`` (for the API path after deposit extraction).  Raises on any
     parse or mapping error — callers must wrap in ``try/except``.
     """
-    flat = parse_bnb_data_xbrl(xbrl_source)
-    pe = period_end_of(xbrl_source)
+    # Single parse for both facts and period_end (M1: avoids double-parsing at batch scale).
+    flat, pe = parse_bnb_document(xbrl_source)
     mapped = map_bnb_facts(flat, period_end=pe)
 
     cov_base: dict = {"be_number": entity_id, "lei": lei}

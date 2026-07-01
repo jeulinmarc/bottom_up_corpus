@@ -586,26 +586,37 @@ def test_cli_be_file_write(tmp_path):
     assert out_file.exists()
 
 
-def test_cli_be_numbers_dry_run(tmp_path):
-    """--be-numbers dry-run prints without raising (needs BNB_CBSO_KEY env or config)."""
-    import os
+def test_cli_be_numbers_dry_run(tmp_path, monkeypatch):
+    """--be-numbers dry-run is fully offline: _fetch_bnb_deposit is monkeypatched.
+
+    Without the patch the CLI would reach the real https://ws.cbso.nbb.be
+    API (retries → up to ~127 s in offline CI).  With the patch:
+    - fetch returns None → 1 entity counted as no-financials (not an error)
+    - rc == 0 (CLI succeeds)
+    - no file written (dry-run)
+    - fetch was called with exactly the KBO we supplied
+    """
+    import bottom_up_corpus.registers.financials as _rf
     from bottom_up_corpus.cli import main
 
-    # We set a dummy key so the CLI doesn't error on missing key.
-    old_key = os.environ.get("BNB_CBSO_KEY")
-    os.environ["BNB_CBSO_KEY"] = "dummy"
-    try:
-        # The fetcher will fail to reach the real API in tests, so the result
-        # is 1 entity counted as an error (network unreachable) — but the CLI
-        # must NOT raise an exception.
-        rc = main([
-            "--data-dir", str(tmp_path),
-            "register-financials",
-            "--be-numbers", "0648822310",
-        ])
-    finally:
-        if old_key is None:
-            del os.environ["BNB_CBSO_KEY"]
-        else:
-            os.environ["BNB_CBSO_KEY"] = old_key
+    calls: list[str] = []
+
+    def _stub_fetch(be_number, *, fetcher, key):
+        calls.append(be_number)
+        return None  # simulates "no deposit found" — batch-safe, no network
+
+    monkeypatch.setattr(_rf, "_fetch_bnb_deposit", _stub_fetch)
+    monkeypatch.setenv("BNB_CBSO_KEY", "dummy")
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--be-numbers", "0648822310",
+    ])
+
     assert rc == 0
+    # Dry-run: no JSONL written
+    assert not (tmp_path / "financials_register" / "0648822310.jsonl").exists()
+    # Stub was invoked exactly once with the requested KBO — confirms the CLI
+    # reached the fetch call and didn't short-circuit before it.
+    assert calls == ["0648822310"]
