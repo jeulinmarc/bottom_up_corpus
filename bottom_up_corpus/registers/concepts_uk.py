@@ -34,6 +34,13 @@ which would silently UNDERSTATE assets = a false number.
 """
 from __future__ import annotations
 
+import re
+
+# ISO-4217 currency code pattern: exactly 3 uppercase ASCII letters.
+# Used to reject non-monetary units (e.g. "shares", "GBP/shares") when picking
+# the reporting currency from the period's unit map.
+_CURRENCY_RE = re.compile(r'^[A-Z]{3}$')
+
 # curated key -> FRC local-name fallbacks, highest priority first. First present
 # (in the current period) wins. NetAssetsLiabilities is handled separately (it is
 # both the gate anchor and its own ``net_assets`` output key).
@@ -66,7 +73,9 @@ def _current_period(flat: dict[str, list[dict]]) -> tuple[str, dict, str] | None
 
     ``T`` maps each concept's local name -> its value at ``period_end`` (the
     tagged figures; prior-year comparatives are ignored). ``currency`` is the
-    first non-empty unit seen at ``period_end`` (else GBP)."""
+    first ISO-4217 unit (matches ``^[A-Z]{3}$``) seen at ``period_end``; share-
+    count (``"shares"``) and per-share (``"GBP/shares"``) units are rejected so
+    they cannot poison monetary rows. Falls back to ``"GBP"``."""
     ends = [p["end"] for pts in flat.values() for p in pts if p.get("end")]
     if not ends:
         return None
@@ -78,8 +87,10 @@ def _current_period(flat: dict[str, list[dict]]) -> tuple[str, dict, str] | None
             if p.get("end") != pe:
                 continue
             tagged[local] = p["val"]
-            if not currency and p.get("unit"):
-                currency = p["unit"]
+            if not currency:
+                u = p.get("unit", "")
+                if u and _CURRENCY_RE.match(u):
+                    currency = u
             break            # one value per concept per period (json_url has no dupes)
     if not tagged:
         return None
@@ -157,6 +168,14 @@ def map_ch_facts(flat: dict[str, list[dict]]) -> dict | None:
                        "assets", "liabilities")
     liabilities_current = (CA - NCA) if (CA is not None and NCA is not None) else None
     long_term_debt = (TALCL - NAeff) if (TALCL is not None and NAeff is not None) else None
+
+    # Floor rounding-induced tiny-negative long_term_debt to zero. A filer with
+    # no non-current liabilities should produce TALCL == NetAssets exactly, but
+    # rounding can leave a value like -1 or -2. We treat values in the range
+    # [-tol, 0) as zero; genuine negative TALCL-NAeff (anomalous) is kept as-is.
+    if long_term_debt is not None and long_term_debt < 0 and TALCL is not None:
+        if long_term_debt >= -_tol(max(abs(TALCL), abs(NAeff))):
+            long_term_debt = 0.0
 
     if suppress_balance:
         for key in DERIVED_BALANCE:

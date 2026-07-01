@@ -312,7 +312,8 @@ Because most UK filings carry only balance-sheet data, the derived block is a st
 subset of the engine's full output. For a **complete filer** (revenue + full balance
 sheet both tagged):
 
-- **Aggregates:** `total_debt`, `net_debt`, `net_cash`, `working_capital`
+- **Aggregates:** `total_debt`, `net_debt`, `net_cash`, `working_capital`,
+  `invested_capital`
 - **Margins:** `operating_margin`, `net_margin`
 - **Returns:** `roe`, `roa`
 - **Leverage / liquidity:** `debt_to_equity`, `debt_to_assets`, `current_ratio`,
@@ -321,8 +322,10 @@ sheet both tagged):
 For the **majority of balance-sheet-only filers**, every metric that requires revenue or
 income is absent. There is no `ebitda` (no D&A in the iXBRL schema), no
 `free_cash_flow`, `cfo_to_debt`, or `fcf_to_debt` (no cash-flow statement), no
-`net_debt_to_ebitda`, and no `tangible_book_value` (no goodwill/intangibles breakdown
-in standard FRC filings — the same gap as the NO register).
+`net_debt_to_ebitda`, and no `tangible_book_value` (suppressed — FRC filings carry no
+goodwill/intangibles breakdown, so the engine's TBV would collapse to equity and
+silently overstate it for any filer carrying intangibles; suppressed via the shared
+`_SUPPRESSED_CONCEPTS` filter, the same mechanism as the NO register).
 
 A coverage report is written to `data/reports/register_coverage.jsonl` for every filing
 processed: `status="ok"` with a period count, `"no-financials"` (no usable iXBRL facts

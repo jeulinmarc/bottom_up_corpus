@@ -94,6 +94,33 @@ def test_reconciliation_mismatch_suppresses_all_derived_balance():   # crafted
     assert m["unbalanced"] is False
 
 
+def test_currency_iso4217_guard():
+    """Fix #2: share-count and per-share units must not poison the currency field.
+
+    In an iXBRL filing, a share-count fact (unit="shares") or a per-share fact
+    (unit="GBP/shares") may be iterated before GBP monetary facts.  The old code
+    accepted any truthy unit; the fix accepts only ISO-4217 codes (^[A-Z]{3}$).
+    """
+    # shares-unit fact comes first in iteration order (Python 3.7+ preserves insertion
+    # order in dicts), then a per-share unit, then the GBP monetary facts.
+    f = {
+        "NumberShares": [{"val": 1_000_000, "end": "2025-03-31",
+                          "unit": "shares", "tag": "NumberShares"}],
+        "PerShareEarnings": [{"val": 0.05, "end": "2025-03-31",
+                              "unit": "GBP/shares", "tag": "PerShareEarnings"}],
+        "Equity": [{"val": 50_000, "end": "2025-03-31",
+                    "unit": "GBP", "tag": "Equity"}],
+        "NetAssetsLiabilities": [{"val": 50_000, "end": "2025-03-31",
+                                  "unit": "GBP", "tag": "NetAssetsLiabilities"}],
+    }
+    m = map_ch_facts(f)
+    assert m is not None
+    assert m["currency"] == "GBP", f"Expected currency GBP, got {m['currency']!r}"
+    # All emitted monetary values must carry GBP, not "shares"
+    assert m["values"]["equity"]["unit"] == "GBP"
+    assert not m["unbalanced"]
+
+
 def test_oim_from_ch_html_parses_micro():
     pytest.importorskip("arelle")
     from bottom_up_corpus.registers.ch_ixbrl import oim_from_ch_html
@@ -257,6 +284,23 @@ _OIM_UNBALANCED = {
             "unit": "iso4217:GBP"}},
         "f1": {"value": "25000", "decimals": 0, "dimensions": {
             "concept": "uk-bus:NetAssetsLiabilities", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+    },
+}
+
+
+# EQ0001 — equity-only filer: Equity = NetAssetsLiabilities, no goodwill/intangibles.
+# The engine would compute tangible_book_value = equity − 0 − 0 = equity, which would
+# overstate true TBV for any filer carrying intangibles.  The shared _SUPPRESSED_CONCEPTS
+# filter must drop it before the row is written.
+_OIM_EQUITY_ONLY = {
+    "documentInfo": {"documentType": "https://xbrl.org/2021/xbrl-json"},
+    "facts": {
+        "f0": {"value": "100000", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:Equity", "period": "2025-12-31T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f1": {"value": "100000", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:NetAssetsLiabilities", "period": "2025-12-31T00:00:00",
             "unit": "iso4217:GBP"}},
     },
 }
@@ -432,6 +476,47 @@ def test_build_ch_financials_unbalanced(monkeypatch, tmp_path):
     assert len(rows) == 1
     assert rows[0]["ch_number"] == "UNBAL01"
     assert rows[0]["status"] == "unbalanced"
+
+
+def test_uk_tangible_book_value_suppressed(monkeypatch, tmp_path):
+    """Fix #1: tangible_book_value must never appear in UK output.
+
+    For any filer with no tagged goodwill/intangibles (the FRC-taxonomy norm),
+    the engine's TBV collapses to equity — a false number for any company with
+    intangibles.  The shared _SUPPRESSED_CONCEPTS filter in _emit_entity_rows
+    must drop it before writing, regardless of which producer is used.
+    """
+    import json
+    import zipfile
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ch_financials
+
+    equity_bytes = b"<html>equity-only</html>"
+    zip_path = tmp_path / "equity_bulk.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Prod223_4212_EQ0001_20251231.html", equity_bytes)
+
+    def fake_oim(html_path, *, cntlr=None):
+        return _OIM_EQUITY_ONLY
+
+    monkeypatch.setattr("bottom_up_corpus.registers.financials.oim_from_ch_html", fake_oim)
+
+    cfg = Config(data_dir=tmp_path)
+    rep = build_ch_financials(str(zip_path), config=cfg, write=True, cntlr=_FakeCntlr())
+
+    assert rep["with_financials"] == 1
+    path = tmp_path / "financials_register" / "EQ0001.jsonl"
+    rows = [json.loads(x) for x in path.read_text().splitlines()]
+    assert rows, "EQ0001.jsonl must be written"
+
+    concepts = {r.get("concept") for r in rows}
+    assert "tangible_book_value" not in concepts, (
+        "tangible_book_value must be suppressed for UK — no goodwill/intangibles in FRC"
+    )
+    assert "tangible_book_value_per_share" not in concepts
+
+    # control: equity itself is still emitted
+    assert "equity" in concepts, "equity must still be emitted"
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ updating coverage/counter state, so the storage + coverage logic is only written
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -102,6 +103,10 @@ def _emit_entity_rows(
     coverage:   Mutable list; one entry is appended.
     write:      When False, skip the disk write and ``paths`` update.
     """
+    # Single choke point: drop concepts that are structurally unprovable from any
+    # register source.  Filtering here — rather than in each individual producer —
+    # means no new producer can accidentally emit them.
+    rows = [row for row in rows if row.get("concept") not in _SUPPRESSED_CONCEPTS]
     if not rows:
         coverage.append({**cov_base, "status": "no-financials"})
         out["no_financials"] += 1
@@ -133,13 +138,9 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
                 if not mapped:
                     continue
                 s = _summary(mapped, r.get("name") or r["orgnr"])
-                # I1: drop tangible_book_value (unprovable from the register) per-row.
-                rows.extend(
-                    row for row in rows_from_base(
-                        _base(r["orgnr"], r.get("lei"), mapped, s,
-                              country="NO", source="brreg"), s)
-                    if row.get("concept") not in _SUPPRESSED_CONCEPTS
-                )
+                rows.extend(rows_from_base(
+                    _base(r["orgnr"], r.get("lei"), mapped, s,
+                          country="NO", source="brreg"), s))
                 n += 1
             cov_base = {"orgnr": r["orgnr"], "lei": r.get("lei")}
             _emit_entity_rows(r["orgnr"], rows, n, cov_base, storage, out, coverage,
@@ -206,12 +207,13 @@ def build_ch_financials(
             cov_base: dict = {"ch_number": ch_number, "lei": None}
 
             try:
-                # Arelle needs a real file path (not bytes); write to a temp file and
-                # always clean up regardless of parse success/failure.
-                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                    tmp_name = tmp.name  # M1: assign before write so finally unlink is safe
-                    tmp.write(html_bytes)
+                # Arelle needs a real file path (not bytes). Create a named temp
+                # file, then write + parse inside a single try/finally so the file
+                # is always removed — even if the write itself raises.
+                tmp_fd, tmp_name = tempfile.mkstemp(suffix=".html")
                 try:
+                    os.close(tmp_fd)
+                    Path(tmp_name).write_bytes(html_bytes)
                     oim = oim_from_ch_html(tmp_name, cntlr=cntlr)
                 finally:
                     Path(tmp_name).unlink(missing_ok=True)
