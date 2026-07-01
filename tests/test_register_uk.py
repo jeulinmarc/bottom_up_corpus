@@ -188,3 +188,301 @@ def test_iter_ch_bulk_limit(tmp_path):
 
     results = list(iter_ch_bulk(str(zip_path), limit=1))
     assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Synthetic OIM dicts for unit tests (no Arelle required)
+# ---------------------------------------------------------------------------
+# 02855129 — FRS105 micro balance-sheet only
+# Period: year ended 31 March 2026 (instant midnight = 2026-04-01T00:00:00 -> 2026-03-31)
+_OIM_MICRO = {
+    "documentInfo": {"documentType": "https://xbrl.org/2021/xbrl-json"},
+    "facts": {
+        "f0": {"value": "0", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:FixedAssets", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f1": {"value": "304205", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:CurrentAssets", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f2": {"value": "24699", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:NetCurrentAssetsLiabilities", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f3": {"value": "24699", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:TotalAssetsLessCurrentLiabilities", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f4": {"value": "24699", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:Equity", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+    },
+}
+
+# SC741022 — FRS102 P&L-only filer (TALCL absent -> balance block suppressed)
+# Period: year ended 31 August 2025
+# Instant items: midnight 2025-09-01T00:00:00 -> 2025-08-31
+# Duration items: 2024-09-01T00:00:00/2025-09-01T00:00:00 -> end 2025-08-31
+_OIM_PL = {
+    "documentInfo": {"documentType": "https://xbrl.org/2021/xbrl-json"},
+    "facts": {
+        "f0": {"value": "30927", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:TurnoverRevenue",
+            "period": "2024-09-01T00:00:00/2025-09-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f1": {"value": "15894", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:ProfitLoss",
+            "period": "2024-09-01T00:00:00/2025-09-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f2": {"value": "18260", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:Equity", "period": "2025-09-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f3": {"value": "18260", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:NetAssetsLiabilities", "period": "2025-09-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f4": {"value": "22922", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:CurrentAssets", "period": "2025-09-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f5": {"value": "10759", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:CashBankOnHand", "period": "2025-09-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+    },
+}
+
+
+def _make_bulk_zip(tmp_path, fixture_dir="tests/fixtures/uk"):
+    """Build a two-entry bulk zip from the two UK HTML fixtures."""
+    import zipfile
+    micro_bytes = open(f"{fixture_dir}/frs105_micro_02855129.html", "rb").read()
+    pl_bytes = open(f"{fixture_dir}/frs102_pl_SC741022.html", "rb").read()
+    zip_path = tmp_path / "accounts_bulk.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Prod223_4212_02855129_20260331.html", micro_bytes)
+        zf.writestr("Prod223_4212_SC741022_20250831.html", pl_bytes)
+    return zip_path, micro_bytes, pl_bytes
+
+
+# ---------------------------------------------------------------------------
+# build_ch_financials — unit (no Arelle; monkeypatched OIM loader)
+# ---------------------------------------------------------------------------
+
+class _FakeCntlr:
+    """Minimal stub so build_ch_financials skips the Arelle Cntlr() call."""
+    def close(self): pass
+
+
+def test_build_ch_financials_unit(monkeypatch, tmp_path):
+    import json
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ch_financials
+
+    zip_path, micro_bytes, pl_bytes = _make_bulk_zip(tmp_path)
+
+    def fake_oim(html_path, *, cntlr=None):
+        content = open(html_path, "rb").read()
+        if content == micro_bytes:
+            return _OIM_MICRO
+        if content == pl_bytes:
+            return _OIM_PL
+        raise ValueError(f"Unexpected content at {html_path}")
+
+    monkeypatch.setattr("bottom_up_corpus.registers.financials.oim_from_ch_html", fake_oim)
+
+    cfg = Config(data_dir=tmp_path)
+    rep = build_ch_financials(str(zip_path), config=cfg, write=True, cntlr=_FakeCntlr())
+
+    # Summary counters
+    assert rep["entities"] == 2
+    assert rep["with_financials"] == 2
+    assert rep["no_financials"] == 0
+    assert rep["unbalanced"] == 0
+    assert rep["errors"] == 0
+    assert rep["periods"] == 2
+
+    # 02855129 rows: source / country / basis + values
+    path_micro = tmp_path / "financials_register" / "02855129.jsonl"
+    rows_micro = [json.loads(x) for x in path_micro.read_text().splitlines()]
+    assert rows_micro, "02855129.jsonl must be written"
+    assert all(r["source"] == "companies_house" for r in rows_micro)
+    assert all(r["country"] == "GB" for r in rows_micro)
+    assert all(r["basis"] == "company" for r in rows_micro)
+    # assets = TALCL(24699) + liabilities_current(CA-NCA = 304205-24699 = 279506) = 304205
+    assets_row = next(r for r in rows_micro if r["kind"] == "reported" and r["concept"] == "assets")
+    assert assets_row["value"] == 304205
+    equity_row = next(r for r in rows_micro if r["kind"] == "reported" and r["concept"] == "equity")
+    assert equity_row["value"] == 24699
+
+    # SC741022 rows: revenue + equity
+    path_pl = tmp_path / "financials_register" / "SC741022.jsonl"
+    rows_pl = [json.loads(x) for x in path_pl.read_text().splitlines()]
+    assert rows_pl, "SC741022.jsonl must be written"
+    rev_row = next(r for r in rows_pl if r["kind"] == "reported" and r["concept"] == "revenue")
+    assert rev_row["value"] == 30927
+    eq_row = next(r for r in rows_pl if r["kind"] == "reported" and r["concept"] == "equity")
+    assert eq_row["value"] == 18260
+
+    # Coverage written
+    assert rep.get("coverage_path") is not None
+    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    assert cov_path.exists()
+    cov = {c["ch_number"]: c for c in
+           (json.loads(x) for x in cov_path.read_text().splitlines())}
+    assert cov["02855129"]["status"] == "ok"
+    assert cov["SC741022"]["status"] == "ok"
+
+
+def test_build_ch_financials_dry_run_writes_nothing(monkeypatch, tmp_path):
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ch_financials
+
+    zip_path, micro_bytes, pl_bytes = _make_bulk_zip(tmp_path)
+
+    def fake_oim(html_path, *, cntlr=None):
+        content = open(html_path, "rb").read()
+        return _OIM_MICRO if content == micro_bytes else _OIM_PL
+
+    monkeypatch.setattr("bottom_up_corpus.registers.financials.oim_from_ch_html", fake_oim)
+
+    cfg = Config(data_dir=tmp_path)
+    rep = build_ch_financials(str(zip_path), config=cfg, write=False, cntlr=_FakeCntlr())
+
+    assert rep["coverage_path"] is None
+    assert not (tmp_path / "financials_register").exists()
+    assert rep["with_financials"] == 2   # counted even in dry-run
+
+
+def test_build_ch_financials_error_isolation(monkeypatch, tmp_path):
+    """One unparseable entity must not abort the whole batch."""
+    import json
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ch_financials
+
+    zip_path, micro_bytes, pl_bytes = _make_bulk_zip(tmp_path)
+    call_count = {"n": 0}
+
+    def fake_oim(html_path, *, cntlr=None):
+        call_count["n"] += 1
+        content = open(html_path, "rb").read()
+        if content == micro_bytes:
+            raise RuntimeError("synthetic parse failure")
+        return _OIM_PL   # SC741022 succeeds
+
+    monkeypatch.setattr("bottom_up_corpus.registers.financials.oim_from_ch_html", fake_oim)
+
+    cfg = Config(data_dir=tmp_path)
+    rep = build_ch_financials(str(zip_path), config=cfg, write=True, cntlr=_FakeCntlr())
+
+    assert rep["errors"] == 1
+    assert rep["with_financials"] == 1
+    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    cov = {c["ch_number"]: c for c in
+           (json.loads(x) for x in cov_path.read_text().splitlines())}
+    assert cov["02855129"]["status"] == "error"
+    assert cov["SC741022"]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# build_ch_financials — integration (real Arelle; real HTML fixtures)
+# ---------------------------------------------------------------------------
+
+def test_build_ch_financials_integration(tmp_path):
+    """End-to-end with real Arelle parse of the two HTML fixtures."""
+    pytest.importorskip("arelle")
+    import json
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ch_financials
+
+    zip_path, _, _ = _make_bulk_zip(tmp_path)
+    cfg = Config(data_dir=tmp_path)
+    rep = build_ch_financials(str(zip_path), config=cfg, write=True)
+
+    assert rep["with_financials"] == 2, f"expected 2 with_financials, got {rep}"
+
+    # SC741022: revenue 30927 + equity 18260
+    path_sc = tmp_path / "financials_register" / "SC741022.jsonl"
+    rows_sc = [json.loads(x) for x in path_sc.read_text().splitlines()]
+    rev = next((r["value"] for r in rows_sc
+                if r["kind"] == "reported" and r["concept"] == "revenue"), None)
+    assert rev == 30927, f"SC741022 revenue: expected 30927 got {rev}"
+    eq_sc = next((r["value"] for r in rows_sc
+                  if r["kind"] == "reported" and r["concept"] == "equity"), None)
+    assert eq_sc == 18260, f"SC741022 equity: expected 18260 got {eq_sc}"
+
+    # 02855129: assets 304205 + equity 24699
+    path_micro = tmp_path / "financials_register" / "02855129.jsonl"
+    rows_micro = [json.loads(x) for x in path_micro.read_text().splitlines()]
+    assets = next((r["value"] for r in rows_micro
+                   if r["kind"] == "reported" and r["concept"] == "assets"), None)
+    assert assets == 304205, f"02855129 assets: expected 304205 got {assets}"
+    eq_micro = next((r["value"] for r in rows_micro
+                     if r["kind"] == "reported" and r["concept"] == "equity"), None)
+    assert eq_micro == 24699, f"02855129 equity: expected 24699 got {eq_micro}"
+
+
+# ---------------------------------------------------------------------------
+# CLI: register-financials --ch-bulk
+# ---------------------------------------------------------------------------
+
+def test_cli_ch_bulk_dry_run(monkeypatch, tmp_path):
+    from bottom_up_corpus import cli
+
+    zip_path, _, _ = _make_bulk_zip(tmp_path)
+    captured = {}
+
+    def fake_build(zip_path_arg, *, config, write, limit=None, cntlr=None):
+        captured.update(zip_path=zip_path_arg, write=write, limit=limit)
+        return {"entities": 2, "with_financials": 2, "no_financials": 0,
+                "unbalanced": 0, "errors": 0, "periods": 2, "paths": [],
+                "coverage_path": None}
+
+    monkeypatch.setattr(cli, "build_ch_financials", fake_build)
+
+    args = cli.build_parser().parse_args(
+        ["register-financials", "--ch-bulk", str(zip_path)])
+    rc = args.func(args)
+    assert rc == 0
+    assert captured["write"] is False          # dry-run default
+    assert captured["zip_path"] == str(zip_path)
+    assert captured["limit"] is None
+    # Nothing written
+    assert not (tmp_path / "financials_register").exists()
+
+
+def test_cli_ch_bulk_with_write(monkeypatch, tmp_path):
+    from bottom_up_corpus import cli
+
+    zip_path, _, _ = _make_bulk_zip(tmp_path)
+    captured = {}
+
+    def fake_build(zip_path_arg, *, config, write, limit=None, cntlr=None):
+        captured.update(write=write, limit=limit)
+        return {"entities": 2, "with_financials": 2, "no_financials": 0,
+                "unbalanced": 0, "errors": 0, "periods": 2, "paths": [],
+                "coverage_path": str(tmp_path / "reports" / "register_coverage.jsonl")}
+
+    monkeypatch.setattr(cli, "build_ch_financials", fake_build)
+
+    args = cli.build_parser().parse_args(
+        ["register-financials", "--ch-bulk", str(zip_path), "--write", "--limit", "5"])
+    rc = args.func(args)
+    assert rc == 0
+    assert captured["write"] is True
+    assert captured["limit"] == 5
+
+
+def test_cli_no_register_still_works(monkeypatch, tmp_path):
+    """Existing NO path (--orgnrs) must still dispatch to build_register_financials."""
+    from bottom_up_corpus import cli
+
+    captured = {}
+
+    def fake_no(specs, *, fetcher, config, write):
+        captured.update(specs=specs, write=write)
+        return {"entities": 1, "with_financials": 1, "periods": 1,
+                "coverage_path": None, "paths": []}
+
+    monkeypatch.setattr(cli, "build_register_financials", fake_no)
+
+    args = cli.build_parser().parse_args(
+        ["register-financials", "--orgnrs", "923609016"])
+    rc = args.func(args)
+    assert rc == 0
+    assert captured["specs"] == [{"orgnr": "923609016"}]
+    assert captured["write"] is False   # dry-run default

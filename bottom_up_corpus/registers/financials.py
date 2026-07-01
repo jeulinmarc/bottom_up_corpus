@@ -1,14 +1,27 @@
-"""Register-financials producer — Brreg JSON accounts -> the curated schema, in a
-separate data/financials_register/ output labelled by basis."""
+"""Register-financials producer — Brreg JSON accounts + CH iXBRL -> the curated schema.
+
+Two producers share a common tail:
+- ``build_register_financials``: Norwegian Brreg register (multi-period per entity).
+- ``build_ch_financials``: UK Companies House Accounts Bulk Data zip (one period per entity).
+
+Both use the shared ``_emit_entity_rows`` helper for writing the financials table and
+updating coverage/counter state, so the storage + coverage logic is only written once.
+"""
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import date
+from pathlib import Path
 
 from ..config import Config
+from ..eu.oim import flatten_oim_json
 from ..financials import PeriodSummary, rows_from_base
 from ..storage import Storage, _atomic_write_text
+from .ch_bulk import iter_ch_bulk
+from .ch_ixbrl import oim_from_ch_html
 from .concepts_no import map_brreg_entry
+from .concepts_uk import map_ch_facts
 from .identity import resolve_register_specs
 from .no_brreg import fetch_brreg_accounts
 
@@ -42,19 +55,62 @@ def _dedupe_latest(entries: list[dict]) -> list[dict]:
     return list(best.values())
 
 
-def _summary(mapped: dict, name: str) -> PeriodSummary:
+def _summary(
+    mapped: dict, name: str,
+    *, sec_form: str = "brreg", accession: str | None = None,
+) -> PeriodSummary:
+    """Build a PeriodSummary from a ``mapped`` dict (NO or UK)."""
     pe = date.fromisoformat(mapped["period_end"])
+    acc = accession if accession is not None else f"{sec_form}-{pe.isoformat()}"
     return PeriodSummary(
-        period_end=pe, frequency="annual", publication_date=None, sec_form="brreg",
-        accession=f"brreg-{pe.isoformat()}", company=name, company_current=name,
+        period_end=pe, frequency="annual", publication_date=None, sec_form=sec_form,
+        accession=acc, company=name, company_current=name,
         values=mapped["values"], currency=mapped["currency"], sic=None)
 
 
-def _base(orgnr: str, lei, mapped: dict, summary: PeriodSummary) -> dict:
-    return {"entity_id": orgnr, "lei": lei, "country": "NO", "source": "brreg",
+def _base(
+    entity_id: str, lei, mapped: dict, summary: PeriodSummary,
+    *, country: str, source: str,
+) -> dict:
+    """Build the common row base dict (identity + period columns)."""
+    return {"entity_id": entity_id, "lei": lei, "country": country, "source": source,
             "basis": mapped["basis"], "fy": summary.fy, "frequency": "annual",
             "currency": mapped["currency"], "period_end": mapped["period_end"],
             "publication_date": None}
+
+
+def _emit_entity_rows(
+    entity_id: str, rows: list[dict], n_periods: int,
+    cov_base: dict, storage: Storage, out: dict, coverage: list[dict],
+    *, write: bool,
+) -> None:
+    """Shared tail: write the financials table, update counters, append coverage entry.
+
+    Handles both the ``no-financials`` (empty rows) and ``ok`` paths. Error and
+    ``unbalanced`` paths are handled by the individual producers before calling here.
+
+    Parameters
+    ----------
+    entity_id:  Key for ``write_register_financials_table`` and ``paths``.
+    rows:       Pre-built row list from ``rows_from_base``; may be empty.
+    n_periods:  Number of source periods that contributed rows (for the coverage entry).
+    cov_base:   Dict of coverage-identifying fields (e.g. ``{"orgnr": …}`` for NO,
+                ``{"ch_number": …}`` for UK); ``status`` and ``periods`` are added here.
+    storage:    Storage instance for ``write_register_financials_table``.
+    out:        Mutable summary dict; ``no_financials`` / ``with_financials`` / ``periods``
+                / ``paths`` are updated in-place.
+    coverage:   Mutable list; one entry is appended.
+    write:      When False, skip the disk write and ``paths`` update.
+    """
+    if not rows:
+        coverage.append({**cov_base, "status": "no-financials"})
+        out["no_financials"] += 1
+        return
+    out["periods"] += n_periods
+    out["with_financials"] += 1
+    if write:
+        out["paths"].append(storage.write_register_financials_table(entity_id, rows))
+    coverage.append({**cov_base, "status": "ok", "periods": n_periods})
 
 
 def build_register_financials(specs, *, fetcher, config: Config, write: bool = True) -> dict:
@@ -78,18 +134,16 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
                     continue
                 s = _summary(mapped, r.get("name") or r["orgnr"])
                 # I1: drop tangible_book_value (unprovable from the register) per-row.
-                rows.extend(row for row in rows_from_base(_base(r["orgnr"], r.get("lei"), mapped, s), s)
-                            if row.get("concept") not in _SUPPRESSED_CONCEPTS)
+                rows.extend(
+                    row for row in rows_from_base(
+                        _base(r["orgnr"], r.get("lei"), mapped, s,
+                              country="NO", source="brreg"), s)
+                    if row.get("concept") not in _SUPPRESSED_CONCEPTS
+                )
                 n += 1
-            if not rows:
-                coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "no-financials"})
-                out["no_financials"] += 1
-                continue
-            out["periods"] += n
-            out["with_financials"] += 1
-            if write:
-                out["paths"].append(storage.write_register_financials_table(r["orgnr"], rows))
-            coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"), "status": "ok", "periods": n})
+            cov_base = {"orgnr": r["orgnr"], "lei": r.get("lei")}
+            _emit_entity_rows(r["orgnr"], rows, n, cov_base, storage, out, coverage,
+                              write=write)
         except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
             coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"),
                              "status": "error", "error": str(exc)})
@@ -99,6 +153,120 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
         cov = config.data_dir / "reports" / "register_coverage.jsonl"
         _atomic_write_text(cov, "\n".join(json.dumps(c, default=str) for c in coverage))
         out["coverage_path"] = str(cov)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_ch_financials(
+    zip_path: str,
+    *,
+    config: Config,
+    write: bool = True,
+    limit: int | None = None,
+    cntlr=None,
+) -> dict:
+    """Parse a Companies House Accounts Bulk Data zip and emit the curated schema.
+
+    Iterates ``iter_ch_bulk(zip_path, limit=limit)``, writes each HTML to a temp
+    file, parses it with Arelle via ``oim_from_ch_html``, flattens + maps through
+    ``map_ch_facts``, and emits rows via the shared tail.
+
+    A single Arelle ``Cntlr`` is shared for the whole batch (first file ~14 s
+    taxonomy download, subsequent files ~0.7 s each).  Pass a pre-built ``cntlr``
+    to skip the Arelle dependency check (useful for unit tests).
+
+    Parameters
+    ----------
+    zip_path:  Path to a CH Accounts Bulk Data .zip file.
+    config:    Config instance (data_dir for output).
+    write:     Persist rows + coverage (default True); False for dry-run.
+    limit:     Cap on entities processed.
+    cntlr:     Optional shared Arelle Cntlr; created internally if None.
+    """
+    own_cntlr = cntlr is None
+    if own_cntlr:
+        try:
+            from arelle import Cntlr as _ArelleCntlr
+        except ImportError as exc:
+            raise ImportError(
+                "UK Companies House iXBRL parsing needs Arelle — install the optional "
+                "extra: pip install '.[eu-financials]'"
+            ) from exc
+        cntlr = _ArelleCntlr.Cntlr(logFileName="logToBuffer")
+
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {"entities": 0, "with_financials": 0, "no_financials": 0,
+                 "unbalanced": 0, "errors": 0, "periods": 0, "paths": []}
+
+    try:
+        for ch_number, html_bytes in iter_ch_bulk(zip_path, limit=limit):
+            out["entities"] += 1
+            cov_base: dict = {"ch_number": ch_number, "lei": None}
+
+            try:
+                # Arelle needs a real file path (not bytes); write to a temp file and
+                # always clean up regardless of parse success/failure.
+                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                    tmp.write(html_bytes)
+                    tmp_name = tmp.name
+                try:
+                    oim = oim_from_ch_html(tmp_name, cntlr=cntlr)
+                finally:
+                    Path(tmp_name).unlink(missing_ok=True)
+
+                flat = flatten_oim_json(
+                    oim, filed="", form="accounts", accn=f"ch-{ch_number}")
+                mapped = map_ch_facts(flat)
+
+                # No usable period at all, or the period has no emittable values
+                if mapped is None or not mapped.get("values"):
+                    cov = {**cov_base, "status": "no-financials"}
+                    if mapped and mapped.get("suppressed"):
+                        cov["suppressed"] = mapped["suppressed"]
+                    coverage.append(cov)
+                    out["no_financials"] += 1
+                    continue
+
+                # NetAssets != Equity -> whole filing rejected
+                if mapped["unbalanced"]:
+                    cov = {**cov_base, "status": "unbalanced"}
+                    if mapped.get("suppressed"):
+                        cov["suppressed"] = mapped["suppressed"]
+                    coverage.append(cov)
+                    out["unbalanced"] += 1
+                    continue
+
+                s = _summary(
+                    mapped, ch_number,
+                    sec_form="companies_house",
+                    accession=f"ch-{ch_number}-{mapped['period_end']}",
+                )
+                base = _base(ch_number, None, mapped, s, country="GB",
+                             source="companies_house")
+                rows = list(rows_from_base(base, s))
+
+                cov = dict(cov_base)
+                if mapped.get("suppressed"):
+                    cov["suppressed"] = mapped["suppressed"]
+                _emit_entity_rows(ch_number, rows, 1, cov, storage, out, coverage,
+                                  write=write)
+
+            except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch
+                coverage.append({**cov_base, "status": "error", "error": str(exc)})
+                out["errors"] += 1
+                continue
+
+    finally:
+        if own_cntlr:
+            cntlr.close()
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(cov_path,
+                           "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
     else:
         out["coverage_path"] = None
     return out
