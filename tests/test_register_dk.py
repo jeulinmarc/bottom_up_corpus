@@ -629,3 +629,240 @@ def test_non_dk_lei_is_unresolved():
     )[0]
     assert r.get("cvr") is None
     assert r["status"] == "unresolved"
+
+
+# ===========================================================================
+# Task 6 — DK producer + CLI (build_dk_financials_from_files / build_dk_financials)
+# ===========================================================================
+
+import json as _json
+
+from bottom_up_corpus.config import Config
+from bottom_up_corpus.registers.financials import (
+    build_dk_financials_from_files,
+    build_dk_financials,
+)
+
+
+# ---------------------------------------------------------------------------
+# Path B (FSA / DK-GAAP) — from_files
+# ---------------------------------------------------------------------------
+
+def test_build_dk_financials_from_files_fsa_writes_jsonl(tmp_path):
+    """FSA path (write=True): data/financials_register/30830725.jsonl written;
+    rows carry source='erst-fsa', country='DK', basis='company', DKK,
+    period_end='2025-09-30', equity=-585256, liabilities=592000."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_dk_financials_from_files([MICROB], config=cfg, write=True)
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["no_financials"] == 0
+    assert out["errors"] == 0
+
+    out_file = tmp_path / "financials_register" / "30830725.jsonl"
+    assert out_file.exists(), f"Expected {out_file} to be written"
+
+    rows = [_json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert rows, "JSONL must not be empty"
+
+    for row in rows:
+        assert row["source"] == "erst-fsa"
+        assert row["country"] == "DK"
+        assert row["basis"] == "company"
+        assert row["currency"] == "DKK"
+        assert row["period_end"] == "2025-09-30"
+
+    reported = {r["concept"]: r["value"] for r in rows if r["kind"] == "reported"}
+    assert reported["equity"] == -585256.0
+    assert reported["liabilities"] == 592000.0
+
+
+def test_build_dk_financials_from_files_fsa_dry_run(tmp_path):
+    """write=False: no file written, counters correct, paths=[]."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_dk_financials_from_files([MICROB], config=cfg, write=False)
+
+    assert out["with_financials"] == 1
+    assert out["paths"] == []
+    out_file = tmp_path / "financials_register" / "30830725.jsonl"
+    assert not out_file.exists(), "Dry-run must not write any file"
+
+
+# ---------------------------------------------------------------------------
+# Path A (ESEF / IFRS) — from_files
+# ---------------------------------------------------------------------------
+
+def test_build_dk_financials_from_files_esef_counters(tmp_path):
+    """ESEF slice → with_financials=1, errors=0, entities=1."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_dk_financials_from_files([ESEF_SLICE], config=cfg, write=False)
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["errors"] == 0
+
+
+def test_build_dk_financials_from_files_esef_source_and_dkk(tmp_path):
+    """ESEF rows have source='erst-ifrs', country='DK', currency='DKK',
+    and borrowings-based debt_to_equity in derived."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_dk_financials_from_files([ESEF_SLICE], config=cfg, write=True)
+
+    # At least one JSONL file should be written (entity_id from LEI or filename)
+    jsonl_files = list((tmp_path / "financials_register").glob("*.jsonl"))
+    assert jsonl_files, "Expected at least one JSONL file"
+
+    rows = [
+        _json.loads(ln)
+        for f in jsonl_files
+        for ln in f.read_text().splitlines()
+        if ln.strip()
+    ]
+    assert rows
+
+    for row in rows:
+        assert row["source"] == "erst-ifrs"
+        assert row["country"] == "DK"
+        assert row["currency"] == "DKK"
+
+    derived_concepts = {r["concept"] for r in rows if r["kind"] == "derived"}
+    assert "debt_to_equity" in derived_concepts, (
+        f"borrowings-based debt_to_equity missing; derived: {derived_concepts}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Error isolation
+# ---------------------------------------------------------------------------
+
+def test_build_dk_financials_from_files_error_isolation(tmp_path):
+    """A nonexistent path is counted as error without aborting the batch."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_dk_financials_from_files(
+        ["/nonexistent/dk_30830725_fake.xml", MICROB],
+        config=cfg, write=False,
+    )
+    assert out["errors"] == 1
+    assert out["with_financials"] == 1
+
+
+# ---------------------------------------------------------------------------
+# API path (build_dk_financials) — stubbed fetcher
+# ---------------------------------------------------------------------------
+
+class _VirkFullStubFetcher:
+    """Stub for build_dk_financials: post_json → ES response; get → raw bytes."""
+
+    def __init__(self, cvr: str, xml_bytes: bytes):
+        self._cvr = cvr
+        self._bytes = xml_bytes
+
+    def post_json(self, url, body, **kw):
+        return {
+            "hits": {"hits": [{"_source": {
+                "cvrNummer": int(self._cvr),
+                "offentliggoerelsesTidspunkt": "2025-11-01T00:00:00",
+                "offentliggoerelsestype": "AARSRAPPORT",
+                "dokumenter": [{
+                    "dokumentType": "AARSRAPPORT",
+                    "dokumentMimeType": "application/xml",
+                    "dokumentUrl": f"http://distribution.virk.dk/doc/{self._cvr}",
+                }],
+            }}]}
+        }
+
+    def get(self, url, **kw):
+        class _Resp:
+            def __init__(self, b): self.content = b
+        return _Resp(self._bytes)
+
+    def get_json(self, url, **kw):
+        return {}  # GLEIF lookup not needed for direct cvr path
+
+
+def test_build_dk_financials_api_stub(tmp_path):
+    """API path: stub fetcher returns FSA bytes → writes 30830725.jsonl,
+    rows have source='erst-fsa', country='DK'."""
+    raw = open(MICROB, "rb").read()
+    stub = _VirkFullStubFetcher("30830725", raw)
+    cfg = Config(data_dir=tmp_path)
+
+    out = build_dk_financials(
+        [{"cvr": "30830725"}],
+        fetcher=stub,
+        config=cfg,
+        write=True,
+    )
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["errors"] == 0
+
+    out_file = tmp_path / "financials_register" / "30830725.jsonl"
+    assert out_file.exists()
+    rows = [_json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert any(r["source"] == "erst-fsa" for r in rows)
+    assert any(r["country"] == "DK" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# CLI — --dk-file / --dk-cvr
+# ---------------------------------------------------------------------------
+
+def test_cli_dk_file_dry_run(tmp_path):
+    """--dk-file dry-run: no file written (default posture)."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--dk-file", MICROB,
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "30830725.jsonl"
+    assert not out_file.exists(), "Dry-run must not write any file"
+
+
+def test_cli_dk_file_write(tmp_path):
+    """--dk-file --write: JSONL is written."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--dk-file", MICROB,
+        "--write",
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "30830725.jsonl"
+    assert out_file.exists()
+
+
+def test_cli_dk_cvr_dry_run(tmp_path, monkeypatch):
+    """--dk-cvr dry-run: build_dk_financials called with write=False; no file written."""
+    import bottom_up_corpus.cli as _cli
+    from bottom_up_corpus.cli import main
+
+    calls: list[str] = []
+
+    def _stub(specs, *, fetcher, config, write):
+        for s in specs:
+            calls.append(s.get("cvr"))
+        return {
+            "entities": len(specs), "with_financials": 0, "no_financials": len(specs),
+            "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+            "coverage_path": None,
+        }
+
+    monkeypatch.setattr(_cli, "build_dk_financials", _stub)
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--dk-cvr", "30830725",
+    ])
+    assert rc == 0
+    assert calls == ["30830725"]
+    out_file = tmp_path / "financials_register" / "30830725.jsonl"
+    assert not out_file.exists()
