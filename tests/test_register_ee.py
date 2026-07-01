@@ -397,3 +397,134 @@ def test_cli_ee_file_write(tmp_path):
     assert rc == 0
     out_file = tmp_path / "financials_register" / "10003666.jsonl"
     assert out_file.exists(), "Expected JSONL to be written with --write"
+
+
+# ===========================================================================
+# Fix 1 — accumulate + dedupe: multi-period and resubmission tests
+# ===========================================================================
+
+def _make_ee_csvs(reports):
+    """Build minimal (elements_bytes, meta_bytes) for synthetic test reports.
+
+    ``reports`` is a list of dicts:
+        {
+            "report_id": str,
+            "registrikood": str | None,
+            "period_end": str,          # DD.MM.YYYY format for meta CSV
+            "assets": float,
+            "equity": float,
+            "cl": float,                # CurrentLiabilities
+            "ncl": float,               # NonCurrentLiabilities
+        }
+    The balance identity Assets == Equity + CL + NCL must hold; the caller is
+    responsible for passing consistent values.
+    """
+    elem_rows = ["report_id;tabel;elemendi_label;elemendi_nimetus;vaartus"]
+    meta_rows = [
+        "report_id;registrikood;aruandeaasta;kas konsolideeritud?;period_end"
+    ]
+    for r in reports:
+        rid = r["report_id"]
+        for name, val in [
+            ("Assets", r["assets"]),
+            ("Equity", r["equity"]),
+            ("CurrentLiabilities", r["cl"]),
+            ("NonCurrentLiabilities", r["ncl"]),
+        ]:
+            elem_rows.append(f"{rid};b;l;{name};{val}")
+        rk = r.get("registrikood") or ""
+        meta_rows.append(
+            f"{rid};{rk};2024;Ei;{r['period_end']}"
+        )
+    elem_bytes = "\n".join(elem_rows).encode("utf-8")
+    meta_bytes = "\n".join(meta_rows).encode("utf-8")
+    return elem_bytes, meta_bytes
+
+
+def test_ee_accumulates_multi_period_same_entity(tmp_path):
+    """Two reports for the SAME registrikood with DIFFERENT period_ends are both
+    written into a single JSONL.  entities=1, with_financials=1, periods=2."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ee_financials_from_files
+
+    elem_bytes, meta_bytes = _make_ee_csvs([
+        {"report_id": "R1", "registrikood": "99000001",
+         "period_end": "31.12.2023",
+         "assets": 1_000_000.0, "equity": 800_000.0,
+         "cl": 100_000.0, "ncl": 100_000.0},
+        {"report_id": "R2", "registrikood": "99000001",
+         "period_end": "31.12.2024",
+         "assets": 1_200_000.0, "equity": 900_000.0,
+         "cl": 150_000.0, "ncl": 150_000.0},
+    ])
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_ee_financials_from_files(
+        elem_bytes, meta_bytes, config=cfg, write=True
+    )
+
+    assert out["entities"] == 1, f"expected 1 entity, got {out['entities']}"
+    assert out["with_financials"] == 1
+    assert out["no_financials"] == 0
+    assert out["unbalanced"] == 0
+    assert out["errors"] == 0
+    assert out["periods"] == 2, (
+        f"expected 2 accumulated periods, got {out['periods']}"
+    )
+
+    out_file = tmp_path / "financials_register" / "99000001.jsonl"
+    assert out_file.exists(), "Expected JSONL to be written"
+
+    rows = [_json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    period_ends_in_file = {r["period_end"] for r in rows}
+    assert "2023-12-31" in period_ends_in_file, (
+        f"FY2023 period missing from file; found: {period_ends_in_file}"
+    )
+    assert "2024-12-31" in period_ends_in_file, (
+        f"FY2024 period missing from file; found: {period_ends_in_file}"
+    )
+
+
+def test_ee_dedupes_same_period_resubmission(tmp_path):
+    """Two reports for the same (registrikood, period_end) — a resubmission —
+    result in exactly ONE period in the written JSONL (last-seen wins)."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ee_financials_from_files
+
+    elem_bytes, meta_bytes = _make_ee_csvs([
+        # Original submission — smaller asset base
+        {"report_id": "R1", "registrikood": "99000002",
+         "period_end": "31.12.2024",
+         "assets": 1_000_000.0, "equity": 800_000.0,
+         "cl": 100_000.0, "ncl": 100_000.0},
+        # Resubmission for the same period — supersedes R1, larger asset base
+        {"report_id": "R2", "registrikood": "99000002",
+         "period_end": "31.12.2024",
+         "assets": 1_200_000.0, "equity": 900_000.0,
+         "cl": 150_000.0, "ncl": 150_000.0},
+    ])
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_ee_financials_from_files(
+        elem_bytes, meta_bytes, config=cfg, write=True
+    )
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["periods"] == 1, (
+        f"resubmission deduplication failed: expected 1 period, got {out['periods']}"
+    )
+
+    out_file = tmp_path / "financials_register" / "99000002.jsonl"
+    rows = [_json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    period_ends_in_file = {r["period_end"] for r in rows}
+    assert period_ends_in_file == {"2024-12-31"}, (
+        f"expected exactly one period '2024-12-31', got {period_ends_in_file}"
+    )
+
+    # Last-seen (R2) wins: the surviving assets value should be 1_200_000
+    asset_rows = [r for r in rows if r["concept"] == "assets" and r["kind"] == "reported"]
+    assert asset_rows, "assets reported row missing"
+    assert asset_rows[0]["value"] == 1_200_000.0, (
+        f"expected R2 (last-seen) asset value 1200000, got {asset_rows[0]['value']}"
+    )

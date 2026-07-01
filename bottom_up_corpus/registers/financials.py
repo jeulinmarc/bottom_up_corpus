@@ -844,8 +844,13 @@ def build_ee_financials_from_files(
 ) -> dict:
     """Iterate EE Äriregister bulk CSVs and emit the curated schema.
 
-    Joins the elements and metadata CSVs via :func:`iter_ee_reports`, maps each
-    report through :func:`map_ee_report`, and emits rows via the shared tail.
+    Joins the elements and metadata CSVs via :func:`iter_ee_reports`, groups all
+    reports by ``registrikood``, deduplicates same-period resubmissions (last-seen
+    wins — a proxy for the ``taidetud_aruanne_report_id`` supersession pointer which
+    is not surfaced by the iterator), and writes **one file per entity** with ALL of
+    its periods accumulated.  This mirrors the Norwegian :func:`build_register_financials`
+    accumulate-and-dedupe pattern, avoiding the silent per-report overwrite that
+    previously clobbered all but the last-processed period for an entity.
 
     Parameters
     ----------
@@ -858,7 +863,7 @@ def build_ee_financials_from_files(
     write:
         Persist rows + coverage (default True); False for dry-run.
     limit:
-        Cap on the number of reports processed.  ``None`` = no cap.
+        Cap on the number of reports streamed from the iterator.  ``None`` = no cap.
     """
     storage = Storage(config)
     coverage: list[dict] = []
@@ -867,51 +872,87 @@ def build_ee_financials_from_files(
         "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
     }
 
-    for report in _iter_ee_reports(elem_path, meta_path):
-        if limit is not None and out["entities"] >= limit:
-            break
-        out["entities"] += 1
-        registrikood = report.get("registrikood")
-        cov_base: dict = {"registrikood": registrikood, "lei": None}
+    # --- Pass 1: stream reports up to *limit*, grouping by registrikood.
+    # Deduplication key = period_end within each registrikood; last-seen report wins
+    # for same-period resubmissions (mirrors _dedupe_latest for the NO producer,
+    # which keeps the highest Brreg submission id — here we use last-seen order as
+    # a proxy since iter_ee_reports does not surface taidetud_aruanne_report_id).
+    entity_groups: dict[str, dict[str, dict]] = {}  # rk -> {period_key -> report}
+    n_reports = 0
 
+    for report in _iter_ee_reports(elem_path, meta_path):
+        if limit is not None and n_reports >= limit:
+            break
+        n_reports += 1
+
+        registrikood = report.get("registrikood")
         if not registrikood:
-            coverage.append({**cov_base, "status": "no-financials"})
+            # No registrikood: count as entity + no-financials immediately.
+            out["entities"] += 1
+            coverage.append({"registrikood": None, "lei": None, "status": "no-financials"})
             out["no_financials"] += 1
             continue
 
-        try:
-            mapped = _map_ee_report(
-                report["elements"], report["period_end"], registrikood
-            )
+        period_end = report.get("period_end")
+        # Sentinel for unknown period_end so distinct unknown-period reports don't
+        # clobber each other.
+        period_key = (
+            period_end if period_end is not None
+            else f"_none_{report.get('report_id', n_reports)}"
+        )
+        if registrikood not in entity_groups:
+            entity_groups[registrikood] = {}
+        entity_groups[registrikood][period_key] = report  # last-seen wins
 
-            if mapped["unbalanced"]:
-                cov = {**cov_base, "status": "unbalanced"}
+    # --- Pass 2: emit one file per registrikood with all accumulated periods.
+    for registrikood, period_map in entity_groups.items():
+        out["entities"] += 1
+        cov_base: dict = {"registrikood": registrikood, "lei": None}
+
+        try:
+            rows: list[dict] = []
+            n_periods = 0
+            suppressed_all: list = []
+            had_unbalanced = False
+
+            for period_key in sorted(period_map):
+                report = period_map[period_key]
+                mapped = _map_ee_report(
+                    report["elements"], report["period_end"], registrikood
+                )
+
                 if mapped.get("suppressed"):
-                    cov["suppressed"] = mapped["suppressed"]
+                    suppressed_all.extend(mapped["suppressed"])
+
+                if mapped["unbalanced"]:
+                    had_unbalanced = True
+                    continue  # period gate failed; try next period for this entity
+
+                if not mapped.get("values"):
+                    continue  # NGO/no-financials period; try next
+
+                s = _summary(
+                    mapped, registrikood,
+                    sec_form="rik",
+                    accession=f"rik-{registrikood}-{mapped['period_end']}",
+                )
+                base = _base(registrikood, None, mapped, s, country="EE", source="rik")
+                rows.extend(rows_from_base(base, s))
+                n_periods += 1
+
+            cov = dict(cov_base)
+            if suppressed_all:
+                cov["suppressed"] = suppressed_all
+
+            # If no period produced rows and all failures were balance-gate rejections,
+            # classify the entity as "unbalanced" rather than "no-financials".
+            if not rows and had_unbalanced:
+                cov["status"] = "unbalanced"
                 coverage.append(cov)
                 out["unbalanced"] += 1
                 continue
 
-            if not mapped.get("values"):
-                cov = {**cov_base, "status": "no-financials"}
-                if mapped.get("suppressed"):
-                    cov["suppressed"] = mapped["suppressed"]
-                coverage.append(cov)
-                out["no_financials"] += 1
-                continue
-
-            s = _summary(
-                mapped, registrikood,
-                sec_form="rik",
-                accession=f"rik-{registrikood}-{mapped['period_end']}",
-            )
-            base = _base(registrikood, None, mapped, s, country="EE", source="rik")
-            rows = list(rows_from_base(base, s))
-
-            cov = dict(cov_base)
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            _emit_entity_rows(registrikood, rows, 1, cov, storage, out, coverage,
+            _emit_entity_rows(registrikood, rows, n_periods, cov, storage, out, coverage,
                               write=write)
 
         except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going

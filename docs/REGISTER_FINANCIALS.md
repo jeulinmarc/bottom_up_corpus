@@ -1535,9 +1535,10 @@ Each `kind="reported"` row carries the et-gaap element name as its `tag`
 
 The derived block produced from this pack (for a full filer) includes:
 
-- **Profitability:** `operating_margin`, `net_margin`, `ebitda`, `ebitda_margin`,
-  `nopat`, `effective_tax_rate`
-- **Returns:** `roe`, `roa`, `roic`
+- **Profitability:** `operating_margin`, `net_margin`, `ebitda`, `ebitda_margin`
+  (`nopat` and `effective_tax_rate` are **not** produced — the EE pack carries no
+  `income_tax` line)
+- **Returns:** `roe`, `roa` (`roic` is **not** produced — requires `income_tax`)
 - **Aggregates:** `total_debt`, `net_debt`, `net_cash`, `working_capital`,
   `invested_capital`
 - **Leverage / liquidity:** `debt_to_equity`, `debt_to_assets`, `current_ratio`,
