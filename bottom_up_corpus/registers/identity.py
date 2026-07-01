@@ -4,6 +4,8 @@
             (verbatim, only when legalAddress.country == "GB").
 - Belgium:  be_number directly (KBO, 10 digits), or LEI -> GLEIF registeredAs ->
             be_number (only when legalAddress.country == "BE").
+- Finland:  business_id directly (Y-tunnus NNNNNNN-N), or LEI -> GLEIF registeredAs ->
+            business_id (only when legalAddress.country == "FI").
 """
 from __future__ import annotations
 import re
@@ -22,6 +24,11 @@ def _norm_ch_number(s: str) -> str:
 def _norm_kbo(s: str) -> str:
     """Strip non-digit characters; preserve leading zero; zero-pad to 10 digits."""
     return re.sub(r"\D", "", s).zfill(10)
+
+
+def _norm_ytunnus(s: str) -> str:
+    """Strip surrounding whitespace; keep Y-tunnus (NNNNNNN-N) format as-is."""
+    return s.strip()
 
 
 def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
@@ -45,9 +52,15 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "lei": spec.get("lei"), "name": spec.get("name", ""),
                         "country": "BE", "status": "ok"})
             continue
-        # --- LEI -> GLEIF path (NO, GB, BE) ---
+        # --- FI direct path: business_id (Y-tunnus) provided ---
+        if spec.get("business_id"):
+            out.append({"business_id": _norm_ytunnus(str(spec["business_id"])),
+                        "lei": spec.get("lei"), "name": spec.get("name", ""),
+                        "country": "FI", "status": "ok"})
+            continue
+        # --- LEI -> GLEIF path (NO, GB, BE, FI) ---
         lei = spec.get("lei")
-        orgnr = ch_number = be_number = name = country = None
+        orgnr = ch_number = be_number = business_id = name = country = None
         if lei:
             try:
                 raw = fetcher.get_json(_GLEIF.format(lei=lei))
@@ -63,6 +76,8 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                 ch_number = _norm_ch_number(str(ra))
             elif country == "BE" and ra:
                 be_number = _norm_kbo(str(ra))
+            elif country == "FI" and ra:
+                business_id = _norm_ytunnus(str(ra))
         if orgnr:
             out.append({"orgnr": orgnr, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
@@ -71,6 +86,9 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "country": country or "", "status": "ok"})
         elif be_number:
             out.append({"be_number": be_number, "lei": lei, "name": name or spec.get("name", ""),
+                        "country": country or "", "status": "ok"})
+        elif business_id:
+            out.append({"business_id": business_id, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
         else:
             out.append({"orgnr": None, "lei": lei, "name": name or spec.get("name", ""),

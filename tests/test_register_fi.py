@@ -282,3 +282,52 @@ def test_synthetic_pnl_leg1_failure_suppresses_net_income():
     assert reason is not None
     assert "leg" in reason.lower(), \
         f"suppression reason should mention 'leg'; got: {reason!r}"
+
+
+# ===========================================================================
+# Task 3 — FI identity (Y-tunnus / LEI->GLEIF registeredAs)
+# ===========================================================================
+
+from bottom_up_corpus.registers.identity import _norm_ytunnus, resolve_register_specs
+
+
+class _GleifFetcherFI:
+    """Stub GLEIF fetcher returning a fixed country + registeredAs."""
+    def __init__(self, country, registered_as):
+        self._c, self._r = country, registered_as
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": "ACME FINLAND OY"},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_norm_ytunnus_strips_whitespace():
+    """_norm_ytunnus strips surrounding spaces and keeps NNNNNNN-N intact."""
+    assert _norm_ytunnus(" 2919415-2 ") == "2919415-2"
+    assert _norm_ytunnus("0112038-9") == "0112038-9"
+    assert _norm_ytunnus("  0112038-9  ") == "0112038-9"
+
+
+def test_fi_lei_resolves_via_gleif_registeredas():
+    """A FI LEI whose GLEIF country==FI resolves to business_id via registeredAs."""
+    r = resolve_register_specs(
+        [{"lei": "L_FI1"}],
+        fetcher=_GleifFetcherFI("FI", "0112038-9"),
+    )[0]
+    assert r["business_id"] == "0112038-9"
+    assert r["lei"] == "L_FI1"
+    assert r["status"] == "ok"
+    assert r["country"] == "FI"
+
+
+def test_non_fi_lei_is_unresolved():
+    """A LEI whose GLEIF country!=FI must not produce a business_id (no-guess)."""
+    r = resolve_register_specs(
+        [{"lei": "L_SE1"}],
+        fetcher=_GleifFetcherFI("SE", "5560000000"),
+    )[0]
+    assert r.get("business_id") is None
+    assert r["status"] == "unresolved"
