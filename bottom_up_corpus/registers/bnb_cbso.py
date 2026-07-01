@@ -90,8 +90,10 @@ def fetch_bnb_deposit(kbo: str, *, fetcher, key: str) -> bytes | None:
         return None
 
     # Prefer the URL embedded in the reference record; fall back to canonical pattern.
+    # Use .get() so a missing ReferenceNumber produces a broken-but-harmless URL
+    # that the inner try/except catches — never raises out of this function.
     acct_url: str = latest.get("AccountingDataURL") or (
-        f"{BASE}/authentic/deposit/{latest['ReferenceNumber']}/accountingData"
+        f"{BASE}/authentic/deposit/{latest.get('ReferenceNumber', '')}/accountingData"
     )
     try:
         resp = fetcher.get(

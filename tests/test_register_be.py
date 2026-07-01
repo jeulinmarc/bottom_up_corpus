@@ -1,5 +1,7 @@
 """Tests for the Belgium BNB CBSO register: the stdlib XBRL parser (no Arelle)
 and the dimensional concept pack + NO-FALSE-DATA confidence gate."""
+from pathlib import Path
+
 import pytest
 
 from bottom_up_corpus.registers.bnb_xbrl import parse_bnb_data_xbrl, open_bnb_deposit
@@ -263,17 +265,19 @@ _CBSO_REFS = [
     },
 ]
 
-_FIXTURE_BYTES = open("tests/fixtures/be/m02_full_0648822310.xbrl", "rb").read()
+_FIXTURE_BYTES = (Path(__file__).parent / "fixtures/be/m02_full_0648822310.xbrl").read_bytes()
 
 
 class _CbsoFetcherOK:
-    """Stub: get_json returns _CBSO_REFS; get() returns fixture bytes."""
+    """Stub: get_json returns refs; get() returns bytes by URL (or fallback acct_bytes)."""
 
-    def __init__(self, refs=_CBSO_REFS, acct_bytes=_FIXTURE_BYTES):
+    def __init__(self, refs=_CBSO_REFS, acct_bytes=_FIXTURE_BYTES, url_map=None):
         self._refs = refs
         self._acct = acct_bytes
+        self._url_map: dict[str, bytes] = url_map or {}
         self.last_get_json_headers = None
         self.last_get_headers = None
+        self.last_get_url = None
 
     def get_json(self, url, *, headers=None, **kw):
         self.last_get_json_headers = headers
@@ -281,12 +285,13 @@ class _CbsoFetcherOK:
 
     def get(self, url, *, headers=None, **kw):
         self.last_get_headers = headers
+        self.last_get_url = url
 
         class _Resp:
             pass
 
         r = _Resp()
-        r.content = self._acct
+        r.content = self._url_map.get(url, self._acct)
         return r
 
 
@@ -298,12 +303,21 @@ class _CbsoFetcherRefsError:
 
 
 def test_fetch_bnb_deposit_latest_bytes():
-    """Two deposits with different DepositDates → bytes of the LATEST returned."""
+    """Two deposits (2019-deposit vs 2021-deposit) → bytes for the LATEST URL returned.
+
+    REF001 has DepositDate 2019-04-10 (older); REF002 has DepositDate 2021-03-15 (latest).
+    The stub returns distinct bytes per URL so this test fails if _pick_latest
+    selects the wrong deposit.
+    """
     from bottom_up_corpus.registers.bnb_cbso import fetch_bnb_deposit
 
-    fetcher = _CbsoFetcherOK()
+    _URL_MAP = {
+        "https://ws.cbso.nbb.be/authentic/deposit/REF001/accountingData": b"OLDER",
+        "https://ws.cbso.nbb.be/authentic/deposit/REF002/accountingData": b"LATEST",
+    }
+    fetcher = _CbsoFetcherOK(url_map=_URL_MAP)
     result = fetch_bnb_deposit("0648822310", fetcher=fetcher, key="test-key")
-    assert result == _FIXTURE_BYTES
+    assert result == b"LATEST"
 
 
 def test_fetch_bnb_deposit_headers_sent():
