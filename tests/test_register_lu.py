@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from bottom_up_corpus.registers.lu_ecdf import parse_lu_declarers
+from bottom_up_corpus.registers.concepts_lu import map_lu_entity
 
 FIXTURES = Path("tests/fixtures/lu")
 FERRERO = FIXTURES / "ferrero_b60814_full_2022.xml"
@@ -106,3 +107,169 @@ class TestISO885915Encoding:
         assert len(result) == 1
         assert result[0]["rcs"] == "B99999"
         assert result[0]["name"] == "Société S.A."
+
+
+# --------------------------------------------------------------------------- #
+# Concept pack (`map_lu_entity`) + NO-FALSE-DATA confidence gate.              #
+# Asserted against the REAL validated values (parse fixture -> map).           #
+# --------------------------------------------------------------------------- #
+
+def _map(path, rcs):
+    """Parse a fixture and map the one declarer's BS+P&L declarations."""
+    d = _declarer(parse_lu_declarers(path), rcs)
+    return map_lu_entity(d["declarations"])
+
+
+def _val(res, key):
+    """The numeric value emitted for ``key`` (KeyError if suppressed/absent)."""
+    return res["values"][key]["value"]
+
+
+def _suppressed_keys(res):
+    return {k for k, _ in res["suppressed"]}
+
+
+class TestFerreroMap:
+    """FERRERO INTERNATIONAL S.A. — 2022 taxonomy, full BS holdco."""
+
+    def _res(self):
+        return _map(FERRERO, "B60814")
+
+    def test_not_unbalanced(self):
+        assert self._res()["unbalanced"] is False
+
+    def test_balance_sheet_core(self):
+        r = self._res()
+        assert _val(r, "assets") == pytest.approx(8_721_873_385, abs=0.01)
+        assert _val(r, "equity") == pytest.approx(3_545_668_561, abs=0.01)
+        assert _val(r, "liabilities") == pytest.approx(5_170_122_402, abs=0.01)
+        assert _val(r, "provisions") == pytest.approx(4_479_350, abs=0.01)
+        assert _val(r, "cash") == pytest.approx(19_581_809, abs=0.01)
+
+    def test_income_statement(self):
+        r = self._res()
+        assert _val(r, "revenue") == pytest.approx(237_229_504, abs=0.01)
+        assert _val(r, "participation_income") == pytest.approx(1_014_702_785, abs=0.01)
+
+    def test_net_income_uses_669_not_667(self):
+        # 669 is the FINAL result (667 + other taxes). Never fall back to 667.
+        r = self._res()
+        assert _val(r, "net_income") == pytest.approx(677_206_437, abs=0.01)
+        assert r["values"]["net_income"]["tag"] == "ecdf:669"
+
+    def test_income_tax_sign_negated_v2022(self):
+        # raw ecdf:635 = -107,661,564 (signed expense) -> emit +107,661,564.
+        r = self._res()
+        assert _val(r, "income_tax") == pytest.approx(107_661_564, abs=0.01)
+
+    def test_interest_expense_abs_v2022(self):
+        # raw ecdf:627 = -153,611,574 -> emit abs = +153,611,574.
+        r = self._res()
+        assert _val(r, "interest_expense") == pytest.approx(153_611_574, abs=0.01)
+
+    def test_financial_debt_reconciles(self):
+        # borrowings-based: 437 (bonds 3.17bn) + 355 (bank 1.37bn); ST+LT == total.
+        r = self._res()
+        fd = _val(r, "financial_debt")
+        st = _val(r, "short_term_debt")
+        lt = _val(r, "long_term_debt")
+        assert fd == pytest.approx(4_540_773_958, abs=0.01)
+        assert lt == pytest.approx(4_137_307_291, abs=0.01)
+        assert st == pytest.approx(403_466_667, abs=0.01)
+        assert st + lt == pytest.approx(fd, abs=0.01)
+
+
+class TestKrokusMap:
+    """KROKUS S.A. — 2012 taxonomy, full BS."""
+
+    def _res(self):
+        return _map(KROKUS, "B138357")
+
+    def test_not_unbalanced(self):
+        assert self._res()["unbalanced"] is False
+
+    def test_assets(self):
+        assert _val(self._res(), "assets") == pytest.approx(2_182_897.55, abs=0.01)
+
+    def test_financial_debt_2012_codes(self):
+        # 2012: financial_debt = 341 + 355; LT = 347+353+359, ST = 351+357 (=0).
+        r = self._res()
+        assert _val(r, "financial_debt") == pytest.approx(1_576_436.52, abs=0.01)
+        assert _val(r, "long_term_debt") == pytest.approx(1_576_436.52, abs=0.01)
+        assert _val(r, "short_term_debt") == pytest.approx(0.0, abs=0.01)
+
+    def test_net_income_639_minus_735(self):
+        r = self._res()
+        assert _val(r, "net_income") == pytest.approx(24_384.16, abs=0.01)
+        assert r["values"]["net_income"]["tag"] == "ecdf:639-735"
+
+
+class TestSilversteinMap:
+    """Silverstein CEE Holdings S.à r.l. — 2022 taxonomy, ABRIDGED BS."""
+
+    def _res(self):
+        return _map(SILVERSTEIN, "B154370")
+
+    def test_not_unbalanced(self):
+        assert self._res()["unbalanced"] is False
+
+    def test_equity_and_assets_present(self):
+        r = self._res()
+        assert _val(r, "equity") == pytest.approx(794_133.18, abs=0.01)
+        assert _val(r, "assets") == pytest.approx(1_386_627.13, abs=0.01)
+
+    def test_revenue_suppressed_on_abridged(self):
+        r = self._res()
+        assert "revenue" not in r["values"]
+        assert "revenue" in _suppressed_keys(r)
+
+    def test_debt_block_suppressed_on_abridged(self):
+        # Abridged gives only aggregate liabilities (435), not borrowings.
+        r = self._res()
+        for key in ("financial_debt", "short_term_debt", "long_term_debt"):
+            assert key not in r["values"]
+            assert key in _suppressed_keys(r)
+
+    def test_net_income_from_669_not_667(self):
+        # 667 = -39,414.70 (pre other-taxes) must NEVER be used; 669 = -44,229.70.
+        r = self._res()
+        assert _val(r, "net_income") == pytest.approx(-44_229.70, abs=0.01)
+        assert _val(r, "net_income") != pytest.approx(-39_414.70, abs=0.01)
+        assert r["values"]["net_income"]["tag"] == "ecdf:669"
+
+
+class TestSyntheticGates:
+    """Confidence-gate edge cases on constructed declarations."""
+
+    def test_primary_gate_unbalanced_empties_values(self):
+        # 201 != 405 beyond tol -> unbalanced, no values emitted.
+        decls = [{
+            "type": "CA_BILAN", "model": "2", "currency": "EUR",
+            "period_end": "2022-12-31",
+            "fields": {201: 1_000.0, 405: 5_000.0, 301: 1_000.0},
+        }]
+        r = map_lu_entity(decls)
+        assert r["unbalanced"] is True
+        assert r["values"] == {}
+        assert any(k == "__all__" for k, _ in r["suppressed"])
+
+    def test_debt_maturity_mismatch_emits_only_total(self):
+        # Full v2022 BS that balances (primary + structural), financial_debt
+        # formable, but ST+LT (300) != financial_debt (4000) -> only the total.
+        decls = [{
+            "type": "CA_BILAN", "model": "2", "currency": "EUR",
+            "period_end": "2022-12-31",
+            "fields": {
+                201: 10_000.0, 405: 10_000.0,   # primary balances
+                301: 4_000.0, 435: 6_000.0,     # structural: 4000+0+6000+0 == 10000
+                669: 0.0,                        # marks the 2022 taxonomy
+                437: 3_000.0, 355: 1_000.0,      # financial_debt = 4000
+                441: 100.0, 443: 200.0,          # ST=100, LT=200 -> 300 != 4000
+            },
+        }]
+        r = map_lu_entity(decls)
+        assert _val(r, "financial_debt") == pytest.approx(4_000.0, abs=0.01)
+        assert "short_term_debt" not in r["values"]
+        assert "long_term_debt" not in r["values"]
+        assert "short_term_debt" in _suppressed_keys(r)
+        assert "long_term_debt" in _suppressed_keys(r)
