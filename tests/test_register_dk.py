@@ -400,3 +400,52 @@ def test_map_dk_esef_balance_gate_holds():
     # Borrowings-based leverage is present in derived
     assert "debt_to_equity" in s.derived
     assert s.currency == "DKK"
+
+
+# ===========================================================================
+# Task 4 — DK identity (CVR / LEI->GLEIF registeredAs)
+# ===========================================================================
+
+from bottom_up_corpus.registers.identity import _norm_cvr, resolve_register_specs
+
+
+class _GleifFetcherDK:
+    """Minimal GLEIF stub returning one DK entity record."""
+    def __init__(self, country, registered_as, name="ACME DENMARK ApS"):
+        self._c, self._r, self._n = country, registered_as, name
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": self._n},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_norm_cvr_strips_whitespace():
+    """_norm_cvr strips surrounding whitespace and keeps 8-digit CVR as string."""
+    assert _norm_cvr(" 24256790 ") == "24256790"
+    assert _norm_cvr("24256790") == "24256790"
+    assert _norm_cvr("  04256790  ") == "04256790"
+
+
+def test_dk_lei_resolves_via_gleif_registeredas():
+    """A DK LEI whose GLEIF country==DK resolves to cvr via registeredAs."""
+    r = resolve_register_specs(
+        [{"lei": "L_DK1"}],
+        fetcher=_GleifFetcherDK("DK", "24256790"),
+    )[0]
+    assert r["cvr"] == "24256790"
+    assert r["lei"] == "L_DK1"
+    assert r["country"] == "DK"
+    assert r["status"] == "ok"
+
+
+def test_non_dk_lei_is_unresolved():
+    """A LEI whose GLEIF country!=DK must not produce a cvr (no-guess)."""
+    r = resolve_register_specs(
+        [{"lei": "L_SE1"}],
+        fetcher=_GleifFetcherDK("SE", "24256790"),
+    )[0]
+    assert r.get("cvr") is None
+    assert r["status"] == "unresolved"
