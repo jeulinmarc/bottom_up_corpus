@@ -2,10 +2,11 @@
 
 `bottom_up_corpus/registers/` ingests **open-data statutory accounts** from national
 business registers and writes them in the same curated schema as the SEC and EU pillars.
-This document covers the purpose, source, schema, honest caveats, and CLI for five
+This document covers the purpose, source, schema, honest caveats, and CLI for six
 registers: **Norway's Brønnøysund Register Centre (Brreg)**, **UK Companies House**,
 **Belgium's BNB Central Balance Sheet Office (CBSO)**, **Luxembourg's LBR/STATEC
-Centrale des bilans**, and **Finland's PRH avoindata XBRL platform**.
+Centrale des bilans**, **Finland's PRH avoindata XBRL platform**, and **Estonia's
+Äriregister (RIK avaandmed)**.
 
 See also: [`FINANCIALS.md`](FINANCIALS.md) (the SEC/US-GAAP pillar that defines the
 shared schema and derived-metrics engine) and [`EU_FINANCIALS.md`](EU_FINANCIALS.md)
@@ -1455,14 +1456,321 @@ multiple quarterly archives.
 
 ---
 
+## Source — Estonia Äriregister (RIK) avaandmed (bulk CSV)
+
+Estonia's **Äriregister (RIK — Registrite ja Infosüsteemide Keskus)** publishes
+annual statutory accounts as **two bulk CSV exports** on its open-data platform:
+
+```
+https://avaandmed.ariregister.rik.ee/et/avaandmete-allalaadimine
+```
+
+**No API key, no registration, no authentication required** — every download is
+completely open. Both exports are published under a **CC-BY 4.0** licence.
+
+| Export | File pattern | Content |
+|---|---|---|
+| **Elements** | `4.<year>_aruannete_elemendid_<snapshot>.zip` | One row per financial element per report; semicolon-delimited, columns `report_id;tabel;elemendi_label;elemendi_nimetus;vaartus` |
+| **Metadata** | `1.aruannete_yldandmed_<snapshot>.zip` | One row per report: `report_id`, `registrikood`, `aruandeaasta`, `period_end` (DD.MM.YYYY), `kas konsolideeritud?` |
+
+The two exports are joined on `report_id`. The critical feature of the elements
+export is that `elemendi_nimetus` carries the **English et-gaap element name** already
+extracted — `"Assets"`, `"Equity"`, `"CurrentLiabilities"`,
+`"TotalAnnualPeriodProfitLoss"`, etc. The mapping is therefore a **pure stdlib
+CSV-join** (`csv` + `zipfile`) with a direct key-to-element lookup — **no XBRL
+parser, no Arelle**. This is the simplest acquisition path in the register pillar.
+
+**Standalone-only:** any element whose `elemendi_nimetus` ends in `"Consolidated"` is
+dropped at parse time. The plain names are always the standalone legal-entity figures
+(`basis="company"`). Consolidated variants are excluded and never mixed with the
+for-profit standalone pack.
+
+File names include a rotating snapshot date in their stems. The `--ee-year` online
+path requires explicit `--ee-elem-url` and `--ee-meta-url` arguments (the snapshot
+date is not predictable from the year alone); obtain the current URLs from the RIK
+download listing at the address above.
+
+History covers **FY 2019–2025** (annual cuts). The database holds approximately
+**321 000 registered companies** (~65% dormant or micro — see Caveats).
+
+## Schema — `data/financials_register/<registrikood>.jsonl`
+
+Output follows the same per-period row model as the other registers and the SEC/EU
+pillars (see [`FINANCIALS.md`](FINANCIALS.md) for the full curated-concepts
+definition):
+
+| Column | Value |
+|---|---|
+| `entity_id` | Registrikood (8-digit zero-padded string, e.g. `"10003666"`) |
+| `lei` | GLEIF LEI if resolved; `null` for the keyless `--ee-file` path |
+| `country` | `"EE"` |
+| `source` | `"rik"` |
+| `basis` | `"company"` (standalone legal-entity accounts) |
+| `fy` | Fiscal year (integer, derived from `period_end`) |
+| `frequency` | `"annual"` (RIK holds only annual statutory accounts) |
+| `currency` | `"EUR"` (Estonia adopted the euro in 2011; all accounts are in EUR) |
+| `period_end` | ISO-8601 date string (`DD.MM.YYYY` from the bulk is parsed to `YYYY-MM-DD`) |
+| `publication_date` | `null` (not exposed by the bulk export) |
+
+The concept pack mapped directly from the et-gaap element names:
+
+| Curated key | et-gaap element | Notes |
+|---|---|---|
+| `assets` | `Assets` | Total balance-sheet assets (primary gate anchor) |
+| `assets_current` | `CurrentAssets` | Current assets |
+| `non_current_assets` | `NonCurrentAssets` | Non-current assets |
+| `cash` | `CashAndCashEquivalents` | Cash and equivalents |
+| `equity` | `Equity` | Shareholders' equity (primary gate anchor) |
+| `liabilities_current` | `CurrentLiabilities` | Current liabilities (working capital, liquidity) |
+| `short_term_debt` | `CurrentLiabilities` | Liabilities-based leverage split — see Caveats |
+| `long_term_debt` | `NonCurrentLiabilities` | Liabilities-based leverage split — see Caveats |
+| `revenue` | `Revenue` | Turnover |
+| `operating_income` | `TotalProfitLoss` | Operating result (*ärikasum*) — **not** net income; see gate |
+| `pretax_income` | `TotalProfitLossBeforeTax` | Result before income tax |
+| `net_income` | `TotalAnnualPeriodProfitLoss` | FINAL net result (after income tax) — see gate |
+| `dep_amort` | `DepreciationAndImpairmentLossReversal` | Stored as `abs()` — source is a negative cost line |
+
+Each `kind="reported"` row carries the et-gaap element name as its `tag`
+(e.g. `"et-gaap:Assets"`), so downstream consumers can inspect the exact element used.
+
+The derived block produced from this pack (for a full filer) includes:
+
+- **Profitability:** `operating_margin`, `net_margin`, `ebitda`, `ebitda_margin`,
+  `nopat`, `effective_tax_rate`
+- **Returns:** `roe`, `roa`, `roic`
+- **Aggregates:** `total_debt`, `net_debt`, `net_cash`, `working_capital`,
+  `invested_capital`
+- **Leverage / liquidity:** `debt_to_equity`, `debt_to_assets`, `current_ratio`,
+  `quick_ratio`, `cash_ratio`
+- **Efficiency:** `asset_turnover`, `dso`
+
+`interest_coverage` is **never available** — the RIK bulk contains no interest or
+borrowings element (confirmed across the full dataset); it is always suppressed and
+recorded in the coverage report. `net_debt_to_ebitda`, `free_cash_flow`, `cfo_to_debt`,
+and `fcf_to_debt` are not emitted (no cash-flow statement in the bulk).
+
+A coverage report is written to `data/reports/register_coverage.jsonl` for every
+entity processed: `status="ok"` with a period count, `"no-financials"` (NGO/non-profit
+template detected — see gate), `"unbalanced"` (primary gate rejected the filing), or
+`"error"` (parse exception). Suppressed items and their reasons are always recorded in
+the `suppressed` list.
+
+## The confidence gate — no false data
+
+**Governing principle:** a number known to be wrong must never be emitted; a missing
+number is strictly better than a wrong one. Two Estonian-specific traps shape the gate.
+
+### The net-income trap — `TotalAnnualPeriodProfitLoss`, never `TotalProfitLoss`
+
+The Estonian P&L waterfall has three clearly-named levels that are easy to confuse:
+
+| et-gaap element | Estonian label | Meaning |
+|---|---|---|
+| `TotalProfitLoss` | *ärikasum* | **Operating** result — before financial items and tax |
+| `TotalProfitLossBeforeTax` | *kasum enne tulumaksu* | Result before income tax |
+| `TotalAnnualPeriodProfitLoss` | *aruandeaasta kasum* | **FINAL** net result (after income tax) |
+
+**`net_income` is always `TotalAnnualPeriodProfitLoss` — never `TotalProfitLoss`
+(operating) nor `TotalProfitLossBeforeTax` (pretax).** Mapping either earlier line as
+net income would produce a materially wrong figure for any entity carrying financial
+items or income tax. The three lines go to three distinct keys (`operating_income` /
+`pretax_income` / `net_income`) and are never conflated.
+
+Note: Estonia's corporate income tax system taxes dividends on distribution rather than
+profits on accrual, so most Estonian companies carry no accrual income tax and
+`TotalAnnualPeriodProfitLoss == TotalProfitLossBeforeTax`. However, a minority do
+carry accrual tax (e.g. registrikood `10524187`: pretax 2 919 396 → net 2 637 345).
+Mapping `TotalProfitLossBeforeTax` as `net_income` would silently overstate income for
+those entities — unacceptable.
+
+### Primary gate: `Assets == Equity + CurrentLiabilities + NonCurrentLiabilities`
+
+All four balance-sheet components are **directly tagged** in the et-gaap element set —
+no derivation is needed. The gate verifies:
+
+```
+|Assets − (Equity + CurrentLiabilities + NonCurrentLiabilities)| ≤ tol
+```
+
+where `tol = max(2 EUR, 0.005 · |Assets|)` (0.5% of assets, never tighter than 2 EUR
+for micro-entity rounding). Absent liability buckets count as 0 (a zero-debt filer).
+Mismatch → `unbalanced=True`, **no values emitted**: a wrong balance sheet is worse
+than none. Validated to the cent on all 13 real fixtures used in development.
+
+### NGO / non-profit template guard
+
+The RIK bulk mixes **for-profit company accounts** (using `Assets` / `Equity`) and
+**NGO / non-profit accounts** (using `LiabilitiesAndNetAssets` /
+`NetSurplusDeficitForPeriod`). Mapping an NGO report into the company schema would
+emit mislabelled figures. When either `Assets` or `Equity` is absent, the report is
+treated as `"no-financials"` — the reason is recorded in the coverage report and no
+values are emitted. This is a clean `no-financials` status, not `unbalanced`.
+
+### Always suppressed
+
+| Key | Reason |
+|---|---|
+| `interest_expense` | No interest element exists anywhere in the RIK bulk — suppressed (no false data) |
+| `interest_coverage` | No interest or borrowings element in the bulk — coverage ratio not computable — suppressed (no false data) |
+
+## The `basis` field — EE
+
+All EE rows carry `basis="company"`. The RIK avaandmed bulk is standalone-only:
+`*Consolidated` element variants are dropped at parse time, so only the legal entity's
+own statutory accounts flow through. Consolidated-group accounts for Estonian entities
+that are part of larger groups are not available from this source.
+
+Note that `basis="company"` rows from the RIK register and `basis="consolidated"` rows
+from the EU ESEF pillar (`data/financials_eu/`) are already separated by output
+directory. They must **not** be merged without an explicit accounting and scope
+reconciliation: Estonian GAAP (Estonian Accounting Standards / EAS) is based on IFRS
+but differs in application; the obligor population (all Estonian legal entities above
+the filing threshold) overlaps only partly with the ESEF pillar (Estonian listed groups
+that issued regulated securities).
+
+## Identity — registrikood and LEI
+
+**Registrikood (`entity_id`):** The Estonian company registration code — an 8-digit
+zero-padded numeric string (e.g. `"10003666"`). Non-digit characters are stripped and
+the result is left-zero-padded to 8 digits. It is taken directly from the
+`registrikood` column in the metadata CSV; no external lookup is needed.
+
+**LEI resolution:** When a spec carries a GLEIF LEI, the engine calls
+`GET https://api.gleif.org/api/v1/lei-records/{lei}` and extracts
+`entity.registeredAs`. This is accepted as the registrikood **only when**
+`entity.legalAddress.country == "EE"` — the same country guard as the NO/BE/FI
+registers. A LEI from a non-Estonian jurisdiction returns `status="unresolved"` in the
+coverage report. For the keyless `--ee-file` path, no GLEIF call is made and `lei` is
+`null` in every output row.
+
+## CLI usage — EE
+
+```bash
+# dry-run (default): parse local elements + metadata CSVs or zips, print summary
+bottom_up_corpus register-financials --ee-file elements.csv metadata.csv
+
+# dry-run from downloaded zips
+bottom_up_corpus register-financials \
+  --ee-file 4.2024_aruannete_elemendid.zip 1.aruannete_yldandmed.zip
+
+# write data/financials_register/<registrikood>.jsonl + coverage report
+bottom_up_corpus register-financials \
+  --ee-file 4.2024_aruannete_elemendid.zip 1.aruannete_yldandmed.zip --write
+
+# cap to the first N reports (bounded test run)
+bottom_up_corpus register-financials \
+  --ee-file 4.2024_aruannete_elemendid.zip 1.aruannete_yldandmed.zip \
+  --limit 1000 --write
+
+# online path: download bulk zips for a given year (explicit URLs required)
+bottom_up_corpus register-financials --ee-year 2024 \
+  --ee-elem-url https://avaandmed.ariregister.rik.ee/…/4.2024_…zip \
+  --ee-meta-url https://avaandmed.ariregister.rik.ee/…/1.…zip \
+  --write
+```
+
+`--write` is the only side-effecting flag. Omitting it is a safe dry-run that prints
+entity / period / unbalanced counts without touching disk. `--limit N` caps the number
+of reports processed and is available for both `--ee-file` and `--ee-year`.
+
+The `--ee-file` and `--ee-year` flags are mutually exclusive with each other and with
+`--orgnrs`, `--leis`, `--ch-bulk`, `--be-file`, `--be-numbers`, `--fi-file`,
+`--fi-businessid`, and `--lu-file`.
+
+**URL note:** RIK bulk file names include a rotating snapshot date in the stem
+(e.g. `4.2024_aruannete_elemendid_kuni_20250114T180000.zip`). Pass explicit
+`--ee-elem-url` and `--ee-meta-url` when using `--ee-year`; obtain the current URLs
+from the RIK download listing at
+`https://avaandmed.ariregister.rik.ee/et/avaandmete-allalaadimine`.
+
+## Honest caveats — EE
+
+### Leverage is liabilities-based — `interest_coverage` never available
+
+The RIK bulk carries **no financial borrowings element** — no bond, bank-loan, or
+lease line is tagged anywhere in the element set (confirmed across the full dataset).
+The mapping therefore approximates:
+
+```
+short_term_debt  ← CurrentLiabilities    (all current liabilities)
+long_term_debt   ← NonCurrentLiabilities (all non-current liabilities)
+total_debt       ≈ total liabilities      (not pure financial debt)
+```
+
+All gearing metrics (`debt_to_equity`, `debt_to_assets`, `net_debt`, `net_cash`,
+`invested_capital`) rest on this total-liabilities basis. This is coarser than the BE
+and LU registers (which expose genuine financial borrowings) but is the best available
+from the RIK structured data.
+
+As a direct consequence, **`interest_coverage` is never available from this source**:
+there is no interest-expense element to form the ratio. This is not a temporary gap —
+the bulk simply does not carry that field.
+
+Never compare leverage metrics across registers without checking `source`: a
+`debt_to_equity` from `source="rik"` (liabilities-based) is not directly comparable to
+one from `source="bnb"` or `source="lbr"` (borrowings-based). The `source` field is
+the guard.
+
+### Universe is micro-skewed (~65% dormant or micro)
+
+The RIK avaandmed bulk covers approximately **321 000 registered Estonian companies**.
+Of these, roughly **65% are dormant or micro-entities** that file minimal or nil
+accounts. For credit-relevance analysis, apply a minimum-assets filter (e.g.
+`assets ≥ 1 000 000 EUR`) to narrow to the operating commercial universe. Without such
+a filter, aggregate statistics will be heavily distorted by the dormant/micro tail.
+
+### Small economy
+
+Estonia is a small economy (~1.4 million population). The company universe is
+correspondingly compact: even after applying a minimum-assets filter, the population of
+credit-relevant Estonian entities is modest compared with NO, UK, BE, or LU.
+
+### Annual accounts only, FY 2019–2025
+
+RIK avaandmed holds annual statutory accounts. There are no quarterly or semi-annual
+periods. `frequency` is always `"annual"`. History is available from **FY 2019
+onwards**; accounts prior to 2019 are not in the avaandmed bulk export.
+
+### Standalone accounts only
+
+The bulk export provides **standalone legal-entity accounts** only. Consolidated group
+accounts for Estonian-headquartered groups are not part of the RIK avaandmed dataset.
+Every row carries `basis="company"`. Large Estonian groups that also file ESEF
+consolidated accounts are handled separately by the EU ESEF pillar and must not be
+merged here.
+
+### Estonian GAAP (EAS), not IFRS — never merge with ESEF
+
+RIK statutory accounts follow **Estonian Accounting Standards (EAS)**, which is based
+on IFRS but distinct in application and taxonomic detail. Estonian listed groups also
+file **ESEF consolidated accounts** under IFRS — those are ingested by the EU ESEF
+pillar (`data/financials_eu/`) and must **never be merged** with RIK rows. The GAAP
+regime, consolidation scope, and obligor populations all differ.
+
+### No commercial fallback — ever
+
+If a company has no filing in the bulk export, it is recorded as `"no-financials"`.
+Revenue, income, and balance-sheet figures are **never supplemented from commercial
+databases or any non-public source**. Open data only.
+
+See also: [NO (Brreg)](#source--brreg-regnskapsregisteret-norway),
+[UK (Companies House)](#source--uk-companies-house-statutory-accounts-ixbrl),
+[BE (BNB CBSO)](#source--belgium-bnb-cbso-annual-accounts-dimensional-xbrl),
+[FI (PRH)](#source--finland-prh-avoindata-xbrl-open-api),
+[LU (LBR/STATEC)](#source--luxembourg-lbrstatec-centrale-des-bilans-ecdf),
+[`FINANCIALS.md`](FINANCIALS.md), [`EU_FINANCIALS.md`](EU_FINANCIALS.md).
+
+---
+
 ## Out of scope — future PRs
 
 The current implementation covers **Norway (Brreg)** (JSON, no XBRL), **UK Companies
 House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), **Belgium BNB CBSO**
-(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path), and
-**Luxembourg LBR/STATEC** (custom eCDF XML, stdlib only, keyless `--lu-file` path), and
+(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path),
+**Luxembourg LBR/STATEC** (custom eCDF XML, stdlib only, keyless `--lu-file` path),
 **Finland PRH** (dimensional XBRL, stdlib only; fully keyless `--fi-file` +
-`--fi-businessid` paths).
+`--fi-businessid` paths), and **Estonia Äriregister/RIK** (bulk CSV-join, stdlib
+only; fully keyless `--ee-file` + `--ee-year` paths).
 
 National registers not yet supported:
 
