@@ -291,3 +291,112 @@ def test_map_split_not_reconciling_suppresses_debt():
     r = map_fsa_facts(parsed)
     assert "short_term_debt" not in r["values"]
     assert "long_term_debt" not in r["values"]
+
+
+# ===========================================================================
+# Task 3 — Virk ESEF bare-XBRL parser (reuses IFRS engine, borrowings leverage)
+# ===========================================================================
+ESEF_SLICE = "tests/fixtures/dk/dk_esef_slice.xml"
+
+
+def test_parse_virk_esef_xml_returns_flat_shape():
+    """parse_virk_esef_xml returns {local_name: [datapoint]} matching oim.flatten_oim_json shape.
+
+    Instant facts (balance-sheet): val, end, unit, tag, label, filed, form, accn — no 'start'.
+    Duration facts (P&L): same keys plus 'start'.
+    """
+    from bottom_up_corpus.registers.concepts_dk import parse_virk_esef_xml
+
+    flat = parse_virk_esef_xml(open(ESEF_SLICE, "rb").read())
+
+    # ifrs-full local names present
+    assert "Assets" in flat
+    assert "Equity" in flat
+    assert "Revenue" in flat
+    assert "ProfitLoss" in flat
+    assert "NoncurrentBorrowings" in flat
+    assert "CurrentBorrowings" in flat
+    assert "CashAndCashEquivalents" in flat
+
+    # Instant fact: no 'start'; unit = DKK; correct value
+    assets_pts = flat["Assets"]
+    assert len(assets_pts) == 1          # only no-dim context (dim context excluded)
+    pt = assets_pts[0]
+    assert pt["val"] == 1_000_000.0
+    assert pt["end"] == "2025-12-31"
+    assert "start" not in pt
+    assert pt["unit"] == "DKK"
+    assert pt["tag"] == "Assets"
+    assert pt["label"] == "Assets"
+    assert "filed" in pt
+    assert "form" in pt
+    assert "accn" in pt
+
+    # Duration fact: has 'start'
+    rev_pts = flat["Revenue"]
+    assert len(rev_pts) == 1
+    rp = rev_pts[0]
+    assert rp["val"] == 2_000_000.0
+    assert rp["start"] == "2025-01-01"
+    assert rp["end"] == "2025-12-31"
+    assert rp["unit"] == "DKK"
+
+
+def test_parse_virk_esef_xml_skips_dimension_contexts():
+    """Contexts with xbrli:scenario children (dimensioned) are excluded — no double-counting."""
+    from bottom_up_corpus.registers.concepts_dk import parse_virk_esef_xml
+
+    flat = parse_virk_esef_xml(open(ESEF_SLICE, "rb").read())
+    # The slice fixture has a dimensioned context with Assets=999999 that must be ignored.
+    assert len(flat.get("Assets", [])) == 1
+
+
+def test_summaries_from_flat_yields_borrowings_debt_to_equity():
+    """summaries_from_flat + IFRS_CONCEPTS yields assets/equity/revenue + borrowings-based
+    debt_to_equity: (NoncurrentBorrowings + CurrentBorrowings) / Equity."""
+    from bottom_up_corpus.registers.concepts_dk import parse_virk_esef_xml
+    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS
+    from bottom_up_corpus.financials import summaries_from_flat
+
+    flat = parse_virk_esef_xml(open(ESEF_SLICE, "rb").read())
+    summaries = summaries_from_flat(
+        flat, concepts=IFRS_CONCEPTS,
+        company="Test DK ESEF Co", company_current="Test DK ESEF Co",
+        sic=None,
+    )
+    assert len(summaries) >= 1
+    s = summaries[0]
+    assert s.currency == "DKK"
+
+    v = s.values
+    assert v["assets"]["value"] == 1_000_000.0
+    assert v["equity"]["value"] == 600_000.0
+    assert v["revenue"]["value"] == 2_000_000.0
+    assert v["net_income"]["value"] == 200_000.0
+
+    # Borrowings-based debt_to_equity via s.derived:
+    # total_debt = long_term_debt + short_term_debt = 300,000 + 100,000 = 400,000
+    # debt_to_equity = 400,000 / 600,000 ≈ 0.6667
+    d = s.derived
+    assert "debt_to_equity" in d, f"derived keys: {list(d)}"
+    assert abs(d["debt_to_equity"]["value"] - (400_000 / 600_000)) < 0.001
+
+
+def test_map_dk_esef_balance_gate_holds():
+    """map_dk_esef verifies Assets == Equity + Liabilities and returns PeriodSummary list."""
+    from bottom_up_corpus.registers.concepts_dk import map_dk_esef
+
+    summaries = map_dk_esef(open(ESEF_SLICE, "rb").read())
+    assert len(summaries) >= 1
+    s = summaries[0]
+    v = s.values
+
+    # Balance gate: Assets = 1,000,000 = Equity 600,000 + Liabilities 400,000
+    assets = v["assets"]["value"]
+    equity = v["equity"]["value"]
+    liabilities = v["liabilities"]["value"]
+    assert abs(assets - (equity + liabilities)) < max(2.0, 0.005 * abs(assets))
+
+    # Borrowings-based leverage is present in derived
+    assert "debt_to_equity" in s.derived
+    assert s.currency == "DKK"

@@ -1,4 +1,14 @@
-"""Map Denmark FSA (Erhvervsstyrelsen) DK-GAAP facts to our curated concepts.
+"""DK register concept mapping — two paths.
+
+Path A (listed ESEF/IFRS):  parse_virk_esef_xml + map_dk_esef
+    Stdlib ``xml.etree`` parser for Virk bare ``ifrs-full`` XBRL instances.
+    Produces the same flat ``{local_name: [datapoint]}`` shape as
+    ``eu.oim.flatten_oim_json``, then feeds it through the existing
+    ``summaries_from_flat(flat, concepts=IFRS_CONCEPTS)`` — 100 % reuse,
+    no Arelle, borrowings-based leverage for free.
+
+Path B (private DK-GAAP FSA):  map_fsa_facts
+    Map Denmark FSA (Erhvervsstyrelsen) DK-GAAP facts to our curated concepts.
 
 Consumes the flat fact map produced by
 :func:`bottom_up_corpus.registers.dk_fsa_xbrl.parse_fsa_facts` —
@@ -240,3 +250,190 @@ def _emit_maturity_split(emit, suppress, liabilities, short, long, provisions):
                  "no fsa:LongtermLiabilitiesOtherThanProvisions on the filing "
                  "(short bucket reconciles alone — long-term total not tagged, "
                  "never synthesised)")
+
+
+# ===========================================================================
+# Path A — Virk ESEF bare-XBRL parser (listed issuers, IFRS)
+# ===========================================================================
+
+import xml.etree.ElementTree as _ET
+from datetime import date as _date
+
+# XBRL instance namespace URIs
+_NS_XBRLI = "http://www.xbrl.org/2003/instance"
+_NS_XSI = "http://www.w3.org/2001/XMLSchema-instance"
+
+_TAG_CTX = f"{{{_NS_XBRLI}}}context"
+_TAG_PERIOD = f"{{{_NS_XBRLI}}}period"
+_TAG_START = f"{{{_NS_XBRLI}}}startDate"
+_TAG_END = f"{{{_NS_XBRLI}}}endDate"
+_TAG_INSTANT = f"{{{_NS_XBRLI}}}instant"
+_TAG_SCENARIO = f"{{{_NS_XBRLI}}}scenario"
+_TAG_UNIT = f"{{{_NS_XBRLI}}}unit"
+_TAG_MEASURE = f"{{{_NS_XBRLI}}}measure"
+_ATTR_NIL = f"{{{_NS_XSI}}}nil"
+
+
+def parse_virk_esef_xml(xml_bytes: bytes) -> "dict[str, list[dict]]":
+    """Parse a Virk bare ``ifrs-full`` XBRL instance into the engine's flat shape.
+
+    Returns ``{local_name: [datapoint]}`` where each datapoint mirrors the keys
+    produced by ``eu.oim.flatten_oim_json``:
+
+    * **Instant** (balance-sheet) facts: ``val``, ``end``, ``unit``, ``tag``,
+      ``label``, ``filed``, ``form``, ``accn`` — no ``start`` key.
+    * **Duration** (P&L / cash-flow) facts: same keys plus ``start``.
+
+    Only **no-dimension** contexts (``xbrli:context`` with no children under
+    ``xbrli:scenario``) are indexed. Contexts with a non-empty
+    ``xbrli:scenario`` (equity-component splits, maturity buckets, …) are
+    dropped, preventing any disaggregation from leaking into the top-line.
+
+    The ``ifrs-full`` namespace URI is matched by URI substring (handles both
+    the ``2023-03-27`` and ``2024-03-27`` taxonomy vintages without relying on
+    the ``ifrs-full`` prefix, which filing tools can remap). Extension-taxonomy
+    facts (non-``ifrs-full`` namespaces) are silently excluded.
+    """
+    root = _ET.fromstring(xml_bytes)
+
+    # ---- 1. Locate the ifrs-full namespace URI by substring ----
+    ifrs_ns: "str | None" = None
+    for elem in root.iter():
+        tag = elem.tag
+        if tag.startswith("{"):
+            uri = tag[1:tag.index("}")]
+            if "ifrs.org" in uri and "ifrs-full" in uri:
+                ifrs_ns = uri
+                break
+    if ifrs_ns is None:
+        return {}
+
+    ifrs_prefix = f"{{{ifrs_ns}}}"
+
+    # ---- 2. Index no-dimension contexts ----
+    nodim: "dict[str, dict]" = {}          # ctx_id -> {start, end, is_instant}
+    for ctx in root.iter(_TAG_CTX):
+        ctx_id = ctx.get("id", "")
+        scenario = ctx.find(_TAG_SCENARIO)
+        if scenario is not None and len(list(scenario)) > 0:
+            continue                       # dimensioned — exclude
+        period = ctx.find(_TAG_PERIOD)
+        if period is None:
+            continue
+        instant_el = period.find(_TAG_INSTANT)
+        if instant_el is not None:
+            try:
+                d = _date.fromisoformat((instant_el.text or "").strip()[:10])
+            except ValueError:
+                continue
+            nodim[ctx_id] = {"start": None, "end": d.isoformat(), "is_instant": True}
+        else:
+            start_el = period.find(_TAG_START)
+            end_el = period.find(_TAG_END)
+            if start_el is None or end_el is None:
+                continue
+            try:
+                s = _date.fromisoformat((start_el.text or "").strip()[:10])
+                e = _date.fromisoformat((end_el.text or "").strip()[:10])
+            except ValueError:
+                continue
+            nodim[ctx_id] = {"start": s.isoformat(), "end": e.isoformat(), "is_instant": False}
+
+    # ---- 3. Build unit -> currency map ----
+    unit_map: "dict[str, str]" = {}
+    for unit_el in root.iter(_TAG_UNIT):
+        uid = unit_el.get("id", "")
+        measure_el = unit_el.find(_TAG_MEASURE)
+        if measure_el is not None and measure_el.text:
+            m = measure_el.text.strip()
+            if m.startswith("iso4217:"):
+                unit_map[uid] = m.split(":", 1)[1]
+
+    # ---- 4. Extract ifrs-full numeric facts from no-dim contexts ----
+    out: "dict[str, list[dict]]" = {}
+    for elem in root:
+        tag = elem.tag
+        if not tag.startswith(ifrs_prefix):
+            continue                       # not ifrs-full — exclude extension facts
+        if elem.get(_ATTR_NIL, "").lower() == "true":
+            continue
+        ctx_ref = elem.get("contextRef")
+        if ctx_ref not in nodim:
+            continue
+        unit_ref = elem.get("unitRef")
+        if unit_ref is None:
+            continue                       # non-numeric / text / boolean fact
+        currency = unit_map.get(unit_ref)
+        if not currency:
+            continue                       # non-monetary unit (xbrli:pure, shares, …)
+        text = (elem.text or "").strip()
+        if not text:
+            continue
+        try:
+            val: "int | float" = int(text) if "." not in text else float(text)
+        except ValueError:
+            continue
+
+        local = tag[len(ifrs_prefix):]     # strip "{...}" prefix -> local name
+        ctx_info = nodim[ctx_ref]
+        point: dict = {
+            "val": val,
+            "end": ctx_info["end"],
+            "unit": currency,
+            "tag": local,
+            "label": local,
+            "filed": "",
+            "form": "",
+            "accn": "",
+        }
+        if not ctx_info["is_instant"] and ctx_info["start"]:
+            point["start"] = ctx_info["start"]
+
+        out.setdefault(local, []).append(point)
+
+    return out
+
+
+def map_dk_esef(xml_bytes: bytes) -> list:
+    """Virk ESEF bare-XBRL → list of :class:`~bottom_up_corpus.financials.PeriodSummary`.
+
+    Pipeline: ``parse_virk_esef_xml`` → ``summaries_from_flat(IFRS_CONCEPTS)``
+    (100 % reuse of the EU IFRS engine — no Arelle, borrowings-based leverage
+    via ``NoncurrentBorrowings`` + ``CurrentBorrowings``). The balance gate
+    ``Assets == Equity + Liabilities`` is verified for each summary and a
+    warning is emitted when it fails; the summary is retained rather than
+    discarded (partial financials are still useful downstream, and the caller
+    can apply stricter filtering).
+
+    Returns a list of :class:`PeriodSummary` objects (same type that
+    ``eu.financials.build_eu_financials`` produces), ready for
+    :func:`~bottom_up_corpus.financials.rows_from_base`.
+    """
+    from ..financials import summaries_from_flat
+    from ..eu.ifrs_concepts import IFRS_CONCEPTS
+    import warnings
+
+    flat = parse_virk_esef_xml(xml_bytes)
+    summaries = summaries_from_flat(
+        flat, concepts=IFRS_CONCEPTS,
+        company="", company_current="", sic=None,
+    )
+
+    # Balance gate: Assets == Equity + Liabilities within tolerance.
+    for s in summaries:
+        v = s.values
+        assets = (v.get("assets") or {}).get("value")
+        equity_v = (v.get("equity") or v.get("equity_total") or {}).get("value")
+        liabilities = (v.get("liabilities") or {}).get("value")
+        if assets is not None and equity_v is not None and liabilities is not None:
+            tol = max(2.0, 0.005 * abs(assets))
+            diff = abs(assets - (equity_v + liabilities))
+            if diff > tol:
+                warnings.warn(
+                    f"ESEF balance gate ({s.period_end}): Assets {assets:,.0f} != "
+                    f"Equity {equity_v:,.0f} + Liabilities {liabilities:,.0f} "
+                    f"(diff={diff:.0f}, tol={tol:.0f}) — filing may be unreliable",
+                    stacklevel=2,
+                )
+
+    return summaries
