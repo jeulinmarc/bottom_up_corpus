@@ -516,6 +516,8 @@ def _register_specs(args: argparse.Namespace) -> list[dict]:
 
 def _cmd_register_financials(args: argparse.Namespace) -> int:
     cfg = _config(args)
+    if getattr(args, "limit", None) is not None and not getattr(args, "ch_bulk", None):
+        raise SystemExit("error: --limit requires --ch-bulk")
     if getattr(args, "ch_bulk", None):
         rep = build_ch_financials(
             args.ch_bulk, config=cfg, write=args.write,

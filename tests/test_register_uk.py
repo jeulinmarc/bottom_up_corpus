@@ -247,6 +247,21 @@ _OIM_PL = {
 }
 
 
+# UNBAL — crafted filing where Equity=24699 but NetAssetsLiabilities=25000
+# (difference 301 >> _tol(25000)=125 -> triggers the unbalanced gate in map_ch_facts)
+_OIM_UNBALANCED = {
+    "documentInfo": {"documentType": "https://xbrl.org/2021/xbrl-json"},
+    "facts": {
+        "f0": {"value": "24699", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:Equity", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+        "f1": {"value": "25000", "decimals": 0, "dimensions": {
+            "concept": "uk-bus:NetAssetsLiabilities", "period": "2026-04-01T00:00:00",
+            "unit": "iso4217:GBP"}},
+    },
+}
+
+
 def _make_bulk_zip(tmp_path, fixture_dir="tests/fixtures/uk"):
     """Build a two-entry bulk zip from the two UK HTML fixtures."""
     import zipfile
@@ -376,6 +391,47 @@ def test_build_ch_financials_error_isolation(monkeypatch, tmp_path):
            (json.loads(x) for x in cov_path.read_text().splitlines())}
     assert cov["02855129"]["status"] == "error"
     assert cov["SC741022"]["status"] == "ok"
+
+
+def test_build_ch_financials_unbalanced(monkeypatch, tmp_path):
+    """I1: Unbalanced filing (NetAssetsLiabilities != Equity beyond tolerance) must
+    be flagged status='unbalanced', counted in out['unbalanced'], not in
+    out['no_financials'], and must NOT produce a financials JSONL on disk."""
+    import json
+    import zipfile
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_ch_financials
+
+    # One-file bulk zip whose OIM will return unbalanced (Equity=24699, NA=25000)
+    unbalanced_bytes = b"<html>unbalanced</html>"
+    zip_path = tmp_path / "unbalanced_bulk.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Prod223_4212_UNBAL01_20260331.html", unbalanced_bytes)
+
+    def fake_oim(html_path, *, cntlr=None):
+        return _OIM_UNBALANCED
+
+    monkeypatch.setattr("bottom_up_corpus.registers.financials.oim_from_ch_html", fake_oim)
+
+    cfg = Config(data_dir=tmp_path)
+    rep = build_ch_financials(str(zip_path), config=cfg, write=True, cntlr=_FakeCntlr())
+
+    # Summary counters: the filing is unbalanced, NOT no-financials
+    assert rep["unbalanced"] == 1, f"expected unbalanced=1, got {rep}"
+    assert rep["no_financials"] == 0, f"expected no_financials=0, got {rep}"
+    assert rep["with_financials"] == 0
+    assert rep["entities"] == 1
+
+    # No JSONL written for the unbalanced entity
+    assert not (tmp_path / "financials_register" / "UNBAL01.jsonl").exists()
+
+    # Coverage row for this entity must carry status='unbalanced'
+    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    assert cov_path.exists(), "coverage file must be written"
+    rows = [json.loads(x) for x in cov_path.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["ch_number"] == "UNBAL01"
+    assert rows[0]["status"] == "unbalanced"
 
 
 # ---------------------------------------------------------------------------

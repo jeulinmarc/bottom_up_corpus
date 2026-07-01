@@ -209,8 +209,8 @@ def build_ch_financials(
                 # Arelle needs a real file path (not bytes); write to a temp file and
                 # always clean up regardless of parse success/failure.
                 with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                    tmp_name = tmp.name  # M1: assign before write so finally unlink is safe
                     tmp.write(html_bytes)
-                    tmp_name = tmp.name
                 try:
                     oim = oim_from_ch_html(tmp_name, cntlr=cntlr)
                 finally:
@@ -220,12 +220,12 @@ def build_ch_financials(
                     oim, filed="", form="accounts", accn=f"ch-{ch_number}")
                 mapped = map_ch_facts(flat)
 
-                # No usable period at all, or the period has no emittable values
-                if mapped is None or not mapped.get("values"):
-                    cov = {**cov_base, "status": "no-financials"}
-                    if mapped and mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
+                # C1: None check first, then unbalanced, then empty values — so that
+                # the unbalanced branch is reached before the no-values branch (an
+                # unbalanced filing returns values={}, which would otherwise fall
+                # through to the no-financials path first).
+                if mapped is None:
+                    coverage.append({**cov_base, "status": "no-financials"})
                     out["no_financials"] += 1
                     continue
 
@@ -236,6 +236,15 @@ def build_ch_financials(
                         cov["suppressed"] = mapped["suppressed"]
                     coverage.append(cov)
                     out["unbalanced"] += 1
+                    continue
+
+                # No emittable values (but not an outright unbalanced rejection)
+                if not mapped.get("values"):
+                    cov = {**cov_base, "status": "no-financials"}
+                    if mapped.get("suppressed"):
+                        cov["suppressed"] = mapped["suppressed"]
+                    coverage.append(cov)
+                    out["no_financials"] += 1
                     continue
 
                 s = _summary(
