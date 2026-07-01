@@ -377,3 +377,109 @@ def test_non_lu_lei_unresolved():
     )[0]
     assert r["status"] == "unresolved"
     assert not r.get("rcs")
+
+
+# ---------------------------------------------------------------------------
+# lu_cdb: iter_lu_declarers + download_lu_quarter
+# ---------------------------------------------------------------------------
+
+_TWO_DECLARER_XML = b"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<STATECCDBDeclarations>
+  <Declarer>
+    <RcsNumber>B60814</RcsNumber>
+    <LegalUnitName>FERRERO INTERNATIONAL S.A.</LegalUnitName>
+    <Declaration type="CA_BILAN" model="2">
+      <Currency>EUR</Currency>
+      <EndDate>2022-12-31</EndDate>
+      <FormData>
+        <Field ecdf="201"><Data>1000.0</Data></Field>
+      </FormData>
+    </Declaration>
+  </Declarer>
+  <Declarer>
+    <RcsNumber>B138357</RcsNumber>
+    <LegalUnitName>KROKUS S.A.</LegalUnitName>
+    <Declaration type="CA_BILAN" model="2">
+      <Currency>EUR</Currency>
+      <EndDate>2022-12-31</EndDate>
+      <FormData>
+        <Field ecdf="201"><Data>2000.0</Data></Field>
+      </FormData>
+    </Declaration>
+  </Declarer>
+</STATECCDBDeclarations>
+"""
+
+
+class TestIterLuDeclarers:
+    """iter_lu_declarers — no-network tests using a synthetic 2-Declarer XML."""
+
+    def test_yields_both_declarers(self):
+        from bottom_up_corpus.registers.lu_cdb import iter_lu_declarers
+        result = list(iter_lu_declarers(_TWO_DECLARER_XML))
+        assert len(result) == 2
+        rcs_set = {d["rcs"] for d in result}
+        assert rcs_set == {"B60814", "B138357"}
+
+    def test_declarers_have_correct_names(self):
+        from bottom_up_corpus.registers.lu_cdb import iter_lu_declarers
+        result = {d["rcs"]: d for d in iter_lu_declarers(_TWO_DECLARER_XML)}
+        assert result["B60814"]["name"] == "FERRERO INTERNATIONAL S.A."
+        assert result["B138357"]["name"] == "KROKUS S.A."
+
+    def test_rcs_filter_selects_one(self):
+        from bottom_up_corpus.registers.lu_cdb import iter_lu_declarers
+        result = list(iter_lu_declarers(_TWO_DECLARER_XML, rcs_filter={"B60814"}))
+        assert len(result) == 1
+        assert result[0]["rcs"] == "B60814"
+
+    def test_rcs_filter_empty_set_yields_nothing(self):
+        from bottom_up_corpus.registers.lu_cdb import iter_lu_declarers
+        result = list(iter_lu_declarers(_TWO_DECLARER_XML, rcs_filter=set()))
+        assert result == []
+
+    def test_rcs_filter_none_yields_all(self):
+        from bottom_up_corpus.registers.lu_cdb import iter_lu_declarers
+        result = list(iter_lu_declarers(_TWO_DECLARER_XML, rcs_filter=None))
+        assert len(result) == 2
+
+    def test_declarations_preserved(self):
+        from bottom_up_corpus.registers.lu_cdb import iter_lu_declarers
+        result = {d["rcs"]: d for d in iter_lu_declarers(_TWO_DECLARER_XML)}
+        dec = result["B60814"]["declarations"][0]
+        assert dec["type"] == "CA_BILAN"
+        assert dec["currency"] == "EUR"
+        assert dec["period_end"] == "2022-12-31"
+        assert dec["fields"][201] == 1000.0
+
+
+class TestDownloadLuQuarter:
+    """download_lu_quarter — no-network tests using a stub fetcher."""
+
+    class _StubFetcher:
+        def __init__(self, content: bytes):
+            self._content = content
+
+        def get(self, url: str, **kw):
+            class _Resp:
+                pass
+            r = _Resp()
+            r.content = self._content
+            return r
+
+    class _FailingFetcher:
+        def get(self, url: str, **kw):
+            raise ConnectionError("network unreachable")
+
+    def test_returns_bytes(self):
+        from bottom_up_corpus.registers.lu_cdb import download_lu_quarter
+        payload = b"<fake>xml</fake>"
+        fetcher = self._StubFetcher(payload)
+        result = download_lu_quarter("https://example.com/q.xml", fetcher=fetcher)
+        assert result == payload
+
+    def test_raises_runtime_error_on_failure(self):
+        from bottom_up_corpus.registers.lu_cdb import download_lu_quarter
+        with pytest.raises(RuntimeError, match="Failed to download"):
+            download_lu_quarter("https://example.com/q.xml", fetcher=self._FailingFetcher())
