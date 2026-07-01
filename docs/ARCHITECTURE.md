@@ -24,7 +24,7 @@ keyed on the SEC **CIK** (Central Index Key), the permanent issuer anchor.
 flowchart LR
     subgraph sources["Open primary sources"]
         EDGAR["SEC EDGAR<br/>(submissions, full-index,<br/>XBRL facts, full-text search)"]
-        FUT["Phase 5 (future):<br/>EDINET / DART / ESEF / …"]
+        FUT["Phase 5 (future):<br/>EDINET / DART / …"]
     end
     BUC["bottom_up_corpus<br/>(company / micro)"]
     CBC["cb_corpus<br/>(central-bank / macro)"]
@@ -130,7 +130,7 @@ Module responsibilities, one line each:
 | `taxonomy.py` | `FormType` families A–F; raw-form ↔ code mapping; scope parsing. |
 | `universe.py` | Resolve tickers / CIKs / CUSIPs / index → `Issuer`s; the `Universe` JSONL store. |
 | `naming.py` / `entity.py` | Point-in-time issuer names; cross-CIK economic-entity joins. |
-| `financials.py` / `ownership.py` | Normalize XBRL into period summaries; structure insider/13F filings. |
+| `financials.py` / `ownership.py` | Shared financials engine (reported/derived/TTM rows, ~60 curated concepts) — reused by SEC XBRL (`edgar_xbrl`), EU ESEF (`eu/financials.py`), and the register pillar (`registers/`). Structure insider/13F filings. |
 | `indices.py` | S&P 500 composition + dated membership (Wikipedia). |
 | `rag.py` / `completeness.py` | Read manifests back into `SourceItem`s; audit coverage vs. expected cadence. |
 | `config.py` / `http.py` | Runtime config + identifier parsers (`normalize_cik`, `cusip6`, …); the polite Fetcher. |
@@ -186,10 +186,12 @@ flowchart TB
 data/
 ├── manifest/<cik>.jsonl       # INDEX: one line per filing (committed) — the map
 ├── universe/<name>.jsonl      # curated issuer lists (committed); +<name>_changes/_collisions.jsonl
-├── financials/<cik>.jsonl     # normalized XBRL metrics (committed)
+├── financials/<cik>.jsonl     # SEC XBRL structured financials (committed)
+├── financials_eu/<lei>.jsonl  # EU ESEF/IFRS structured financials (committed)
+├── financials_register/<entity_id>.jsonl  # register statutory financials (committed)
 ├── ownership/<cik>.jsonl      # normalized insider / 13F rows (committed)
 ├── discovery_errors.jsonl     # append-only audit trail
-├── reports/                   # completeness matrices
+├── reports/                   # completeness matrices (incl. register_coverage.jsonl)
 └── raw/<cik>/<code>/<year>/   # the documents themselves (git-ignored, regenerable)
 ```
 
@@ -401,3 +403,30 @@ For US-shaped sources, the SEC pillar itself stays source-pluggable: a new
 `Source` subclass maps its endpoint to the same `FilingRecord` schema; the storage,
 manifest, RAG and completeness layers need no change. Candidate future sources:
 Japan EDINET, Korea DART, Brazil CVM.
+
+---
+
+## 10. Structured-financials layer
+
+The same curated row schema (defined in [`FINANCIALS.md`](FINANCIALS.md)) is produced
+by three independent paths that share the `financials.py` engine:
+
+| Path | Universe | Source | Module | Output |
+|---|---|---|---|---|
+| **SEC XBRL** | US listed issuers | EDGAR `companyfacts` | `sources/edgar_xbrl.py` | `data/financials/<cik>.jsonl` |
+| **EU ESEF / IFRS** (Pillar B) | EU listed issuers | `filings.xbrl.org` json_url (Tier A) + local ESEF `.zip` via Arelle (Tier B) | `eu/financials.py` | `data/financials_eu/<lei>.jsonl` |
+| **Register financials** | Private / credit universe | 🇳🇴 NO Brreg structured JSON; 🇬🇧 UK Companies House iXBRL via Arelle | `registers/` | `data/financials_register/<entity_id>.jsonl` |
+
+All three emit the same `kind="reported"` / `kind="derived"` row model; the
+concept-mapping pack (US-GAAP, IFRS, or register-specific) is the only difference.
+The three output directories are **never merged** — they serve different universes
+and GAAP regimes (US-GAAP, IFRS, N-GAAP / FRS 102).
+
+**Register pillar specifics.** `registers/` targets non-listed issuers (bond
+obligors, private companies, bank counterparties) that never file ESEF. Each row
+carries a `basis` label (`"company"` = legal-entity standalone; `"consolidated"` =
+economic group). A **no-false-data** confidence gate suppresses any derived value it
+cannot confirm from structural anchors; the reason is recorded per key in
+`data/reports/register_coverage.jsonl`. Registers are balance-sheet-primary and
+leverage is liabilities-based (total liabilities, not pure financial borrowings).
+See [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md) for the full accounting of caveats.

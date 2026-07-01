@@ -21,6 +21,24 @@ The two pillars share the same discipline (official sources only, stable ids,
 exhaustive discovery, never silently partial) and feed the same RAG contract, but
 use different identity systems (CIK in the US; GLEIF LEI/ISIN in the EU).
 
+### Structured financials
+
+Beyond raw filings, a shared engine (`financials.py`) extracts curated metrics into
+a unified per-period row schema (see [`docs/FINANCIALS.md`](docs/FINANCIALS.md)):
+
+| Layer | Universe | Source | Status |
+|---|---|---|---|
+| **SEC XBRL** | US listed issuers | EDGAR `companyfacts` | ✅ done |
+| **EU ESEF / IFRS** (Pillar B) | EU listed issuers | `filings.xbrl.org` json_url + Arelle (Tier B) | ✅ done — [`EU_FINANCIALS.md`](docs/EU_FINANCIALS.md) |
+| **Register financials** | Private / credit universe (non-listed) | 🇳🇴 NO Brreg + 🇬🇧 UK Companies House | 🇳🇴 #57 merged; 🇬🇧 #58 open — [`REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) |
+
+The register pillar targets issuers that never file ESEF — bond obligors, private
+companies, bank counterparties. Output lands in `data/financials_register/` (never
+merged with `data/financials_eu/`), labelled by `basis` (legal-entity vs.
+consolidated). It is governed by a **no-false-data** discipline: registers are
+balance-sheet-primary and leverage is liabilities-based; any value that cannot be
+confirmed from structural anchors is suppressed, not guessed.
+
 ## Quick start
 
 ```bash
@@ -43,6 +61,11 @@ python -m bottom_up_corpus discover --universe demo --download --since 2015-01-0
 python -c "from bottom_up_corpus.http import Fetcher; from bottom_up_corpus.config import Config; \
 from bottom_up_corpus.eu.acquire import acquire; cfg=Config(contact='you@example.com'); \
 print(acquire([{'isin':'FR0010193052'}], fetcher=Fetcher(cfg), config=cfg, download=True))"
+
+# Register financials: Norwegian statutory accounts (Brreg, no key required)
+python -m bottom_up_corpus register-financials --orgnrs 923609016 --write
+# UK Companies House bulk iXBRL (Arelle required; --limit for a bounded test run)
+python -m bottom_up_corpus register-financials --ch-bulk accounts_monthly_2024_01.zip --limit 100
 ```
 
 ## Documentation
@@ -53,7 +76,9 @@ print(acquire([{'isin':'FR0010193052'}], fetcher=Fetcher(cfg), config=cfg, downl
 | [`docs/SEC_PILLAR.md`](docs/SEC_PILLAR.md) | 🇺🇸 SEC guide: taxonomy, storage layout & naming, the full CLI, identity (rename/merger), ownership & XBRL financials |
 | [`docs/EU_PILLAR.md`](docs/EU_PILLAR.md) | 🇪🇺 EU guide: the "European EDGAR" — `OamSource` architecture, identity resolution (LEI/ISIN/OpenFIGI/name), listing dispatch, cross-backend dedup, how to run `acquire` |
 | [`docs/EU_BACKENDS.md`](docs/EU_BACKENDS.md) | Per-country backend reference (source API, identity key, doc types, pagination caps) |
-| [`docs/FINANCIALS.md`](docs/FINANCIALS.md) | The XBRL financials model (reported + derived metrics) |
+| [`docs/FINANCIALS.md`](docs/FINANCIALS.md) | The shared financials engine (reported + derived metrics, ~60 curated concepts) |
+| [`docs/EU_FINANCIALS.md`](docs/EU_FINANCIALS.md) | Structured EU ESEF/IFRS financials — json_url stdlib (Tier A) + Arelle (Tier B) |
+| [`docs/REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) | Statutory financials from national registers — 🇳🇴 NO Brreg + 🇬🇧 UK Companies House; no-false-data gate |
 | [`docs/INGESTION_RAG.md`](docs/INGESTION_RAG.md) | The RAG ingestion contract + a ready-to-paste orchestrator connector |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status & next steps |
 
@@ -68,6 +93,9 @@ print(acquire([{'isin':'FR0010193052'}], fetcher=Fetcher(cfg), config=cfg, downl
   dropped** (a backend that caps a page records a `truncated` error).
 - **No-guess identity** — an issuer is bound only on an exact/verified match
   (CIK, LEI, or ISIN); an ambiguous match is left unresolved, never guessed.
+- **No-false-data** — in the register-financials pillar, any value that cannot be
+  confirmed from structural anchors is suppressed and the reason recorded; a missing
+  number beats a wrong one.
 
 ## Fair access
 

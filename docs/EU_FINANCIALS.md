@@ -213,13 +213,15 @@ extracting them requires OCR or PDF-table parsing. Swiss issuers have no OAM and
 their historical filings predate ESEF entirely. A future OCR-based extraction
 phase would extend the time series back and add semi-annual frequency rows.
 
-**3. Register open-data backends — statutory accounts for the credit/private universe.**
-For the credit and private-company universe (non-listed issuers, bank
-counterparties), statutory accounts filed with national business registers
-(Companies House in the UK, Infogreffe/BODACC in France, Handelsregister in DE,
-etc.) are the primary data source. Wiring those as `OamSource` backends — or as a
-parallel "statutory accounts" pillar — is the path to structured financials for
-issuers that never file ESEF.
+**3. Register open-data backends — statutory accounts for the credit/private universe. ✅ Now a separate pillar.**
+For the credit and private-company universe (non-listed issuers, bond obligors,
+bank counterparties) that never files ESEF, statutory accounts filed with national
+business registers are the primary source. This is now built as the
+**register-financials pillar** — a separate `data/financials_register/` output,
+`basis`-labelled, governed by the no-false-data confidence gate: 🇳🇴 Norway
+(Brønnøysund/Brreg, structured JSON — merged) and 🇬🇧 UK Companies House (iXBRL via
+Arelle — PR #58); 🇧🇪 BE BNB / 🇩🇰 DK and others next. See
+[`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md).
 
 ## Honest limitations
 

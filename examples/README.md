@@ -12,11 +12,14 @@ export BOTTOM_UP_CORPUS_CONTACT="you@example.com"
 
 Scripts that hit SEC EDGAR are bounded (one issuer, a filing or two) and write any
 artifacts to a temporary directory, so they leave the repo's `data/` untouched.
-Several run **fully offline** (no network): `06`, `08`, `11`, `15`, `23`, `24`.
+Several run **fully offline** (no network): `06`, `08`, `11`, `15`, `23`, `24`, `25`, `28`.
 
 Scripts `01`–`15` cover the 🇺🇸 **SEC** pillar; `16`–`24` cover the 🇪🇺 **EU**
-pillar. See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for how the pieces
-fit together, and [`../docs/EU_PILLAR.md`](../docs/EU_PILLAR.md) for the EU design.
+pillar; `25`–`29` cover the register-financials pillar (🇳🇴 Brreg + 🇬🇧 Companies
+House). See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for how the pieces
+fit together, [`../docs/EU_PILLAR.md`](../docs/EU_PILLAR.md) for the EU design, and
+[`../docs/REGISTER_FINANCIALS.md`](../docs/REGISTER_FINANCIALS.md) for the register
+pillar.
 
 **Core pipeline**
 
@@ -66,3 +69,18 @@ behind one `acquire()` call, keyed on the GLEIF LEI/ISIN. See
 | `22_eu_listing_dispatch.py` | Dispatch by **listing** not home country — cover an issuer with no national OAM via Euronext |
 | `23_eu_dedup.py` | Cross-backend dedup — the same ESEF report from two backends collapses to one *(offline)* |
 | `24_eu_backends_catalog.py` | The coverage catalog — backends, Euronext markets, doc-type taxonomy *(offline)* |
+
+## 🇳🇴🇬🇧 Register-financials pillar — statutory accounts from national registers
+
+Open statutory accounts for the private-company universe — keyed on orgnr (Norway)
+or CH number (UK). Output goes to `data/financials_register/` (separate from the
+EU and SEC pillars). See [`../docs/REGISTER_FINANCIALS.md`](../docs/REGISTER_FINANCIALS.md)
+for sources, schema, confidence gate, and caveats.
+
+| Script | Shows |
+|---|---|
+| `25_register_catalog.py` | Tour of the two sources, concept packs (NO_FIELDS / UK_FIELDS), and output layout *(offline)* |
+| `26_no_brreg_financials.py` | Equinor SELSKAP/KONSERN multi-year via Brreg open JSON — revenue / net_income / equity / D/E |
+| `27_register_identity.py` | NO/GB identity — direct orgnr, LEI→GLEIF→orgnr, LEI→GLEIF→ch_number, non-NO/GB→unresolved |
+| `28_uk_confidence_gate.py` | The four confidence-gate cases: emit / suppress / unbalanced — NO FALSE DATA *(offline)* |
+| `29_uk_companies_house_financials.py` | CH iXBRL bulk parse — FRS 105 micro + FRS 102 P&L filer *(needs `.[eu-financials]` Arelle extra)* |
