@@ -990,6 +990,47 @@ def _dk_esef_pipeline(
     _emit_entity_rows(entity_id, rows, n, cov, storage, out, coverage, write=write)
 
 
+def _select_best_dk_doc(
+    filings: list[dict],
+) -> "tuple[str, str] | tuple[None, None]":
+    """Return (route, url) for the best document URL found across all filings.
+
+    Scans every filing's ``dokumenter`` list (filings assumed newest-first) and
+    collects the first ESEF URL and the first FSA URL.  Returns ESEF when one
+    exists; falls back to FSA otherwise.  Returns ``(None, None)`` when nothing
+    routable is found.
+
+    This preference is critical for **listed companies** whose annual-report
+    filing carries both an ``AARSRAPPORT`` (DK-GAAP management-review, XML but
+    no balance-sheet / P&L facts) *and* an ``AARSRAPPORT_ESEF`` (the real IFRS
+    financials).  The old code picked the first routable document — typically the
+    FSA one — and silently yielded no-financials.  Preferring ESEF guarantees
+    Path A (``source="erst-ifrs"``) is always used for listed issuers while the
+    FSA fallback is preserved for private companies that only file DK-GAAP.
+    """
+    from .virk_api import route_document
+
+    esef_url: "str | None" = None
+    fsa_url: "str | None" = None
+
+    for filing in filings:
+        for doc in filing.get("dokumenter", []):
+            r = route_document(doc)
+            url = doc.get("dokumentUrl")
+            if not url:
+                continue
+            if r == "esef" and esef_url is None:
+                esef_url = url
+            elif r == "fsa" and fsa_url is None:
+                fsa_url = url
+
+    if esef_url is not None:
+        return "esef", esef_url
+    if fsa_url is not None:
+        return "fsa", fsa_url
+    return None, None
+
+
 def build_dk_financials_from_files(
     paths,
     *,
@@ -1102,7 +1143,7 @@ def build_dk_financials(
     write:
         Persist rows + coverage (default True); False for dry-run.
     """
-    from .virk_api import fetch_virk_document, route_document, search_virk_filings
+    from .virk_api import fetch_virk_document, search_virk_filings
 
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
@@ -1130,25 +1171,15 @@ def build_dk_financials(
                 out["no_financials"] += 1
                 continue
 
-            # Iterate filings (newest first) and pick the first routable document.
-            xml_bytes_dk: "bytes | None" = None
-            route_dk: "str | None" = None
-            for filing in filings:
-                for doc in filing.get("dokumenter", []):
-                    doc_route = route_document(doc)
-                    if doc_route is None:
-                        continue
-                    url = doc.get("dokumentUrl")
-                    if not url:
-                        continue
-                    fetched = fetch_virk_document(url, fetcher=fetcher)
-                    if fetched is None:
-                        continue
-                    xml_bytes_dk = fetched
-                    route_dk = doc_route
-                    break
-                if xml_bytes_dk is not None:
-                    break
+            # Select best document: ESEF preferred over FSA across all filings.
+            # Listed companies file both AARSRAPPORT (management-review, no
+            # balance-sheet facts) and AARSRAPPORT_ESEF (real IFRS financials);
+            # we must pick the ESEF first to reach Path A (source="erst-ifrs").
+            route_dk, _best_url = _select_best_dk_doc(filings)
+            xml_bytes_dk: "bytes | None" = (
+                fetch_virk_document(_best_url, fetcher=fetcher)
+                if _best_url is not None else None
+            )
 
             if xml_bytes_dk is None or route_dk is None:
                 coverage.append({**cov_base, "status": "no-financials"})

@@ -807,6 +807,109 @@ def test_build_dk_financials_api_stub(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Task 6 fix — ESEF preference when both AARSRAPPORT and AARSRAPPORT_ESEF exist
+# ---------------------------------------------------------------------------
+
+_FSA_DOC_URL = "http://distribution.virk.dk/doc/fsa_management_review"
+_ESEF_DOC_URL = "http://distribution.virk.dk/doc/esef_ifrs"
+
+
+class _VirkBothDocsFetcher:
+    """Stub for build_dk_financials: a filing carries BOTH an AARSRAPPORT (FSA
+    management-review, no balance-sheet facts) AND an AARSRAPPORT_ESEF (real IFRS).
+
+    Tracks whether the FSA URL was ever fetched so tests can assert it was NOT
+    accessed after the ESEF-preference fix.
+    """
+
+    def __init__(self, cvr: str, esef_bytes: bytes):
+        self._cvr = cvr
+        self._esef_bytes = esef_bytes
+        self.fsa_fetched = False
+
+    def post_json(self, url, body, **kw):
+        return {
+            "hits": {"hits": [{"_source": {
+                "cvrNummer": int(self._cvr),
+                "offentliggoerelsesTidspunkt": "2025-11-01T00:00:00",
+                "offentliggoerelsestype": "AARSRAPPORT",
+                "dokumenter": [
+                    {
+                        # Listed annual report → management-review XML, no BS/P&L facts.
+                        "dokumentType": "AARSRAPPORT",
+                        "dokumentMimeType": "application/xml",
+                        "dokumentUrl": _FSA_DOC_URL,
+                    },
+                    {
+                        # Real IFRS XBRL for the same filing.
+                        "dokumentType": "AARSRAPPORT_ESEF",
+                        "dokumentMimeType": "application/xml",
+                        "dokumentUrl": _ESEF_DOC_URL,
+                    },
+                ],
+            }}]}
+        }
+
+    def get(self, url, **kw):
+        class _Resp:
+            def __init__(self, b): self.content = b
+
+        if url == _FSA_DOC_URL:
+            self.fsa_fetched = True
+            # Return a non-FSA/non-ESEF XML that produces no financial facts.
+            return _Resp(b"<?xml version='1.0'?><root/>")
+        if url == _ESEF_DOC_URL:
+            return _Resp(self._esef_bytes)
+        return _Resp(b"")
+
+    def get_json(self, url, **kw):
+        return {}  # GLEIF lookup not needed for direct cvr path
+
+
+def test_build_dk_financials_api_prefers_esef_over_fsa_management_review(tmp_path):
+    """When a filing has BOTH AARSRAPPORT (FSA, management-review, no financials)
+    and AARSRAPPORT_ESEF, build_dk_financials must select the ESEF document first
+    and emit source='erst-ifrs'. The FSA URL must not be fetched at all.
+
+    Regression for the scale-validation gap: Novo Nordisk (24256790), Mærsk
+    (22756214), Ørsted (36213728), Arla (25313763) all returned no-financials
+    because the old code picked AARSRAPPORT before AARSRAPPORT_ESEF.
+    """
+    esef_bytes = open(ESEF_SLICE, "rb").read()
+    stub = _VirkBothDocsFetcher("24256790", esef_bytes)
+    cfg = Config(data_dir=tmp_path)
+
+    out = build_dk_financials(
+        [{"cvr": "24256790"}],
+        fetcher=stub,
+        config=cfg,
+        write=True,
+    )
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["no_financials"] == 0
+    assert out["errors"] == 0
+
+    # The FSA management-review URL must NOT have been accessed.
+    assert not stub.fsa_fetched, (
+        "ESEF should have been selected first; FSA URL should never be fetched."
+    )
+
+    # All rows must carry source='erst-ifrs' — never 'erst-fsa'.
+    jsonl_files = list((tmp_path / "financials_register").glob("*.jsonl"))
+    assert jsonl_files, "Expected at least one JSONL written"
+    rows = [
+        _json.loads(ln)
+        for f in jsonl_files
+        for ln in f.read_text().splitlines()
+        if ln.strip()
+    ]
+    assert any(r["source"] == "erst-ifrs" for r in rows)
+    assert not any(r["source"] == "erst-fsa" for r in rows)
+
+
+# ---------------------------------------------------------------------------
 # CLI — --dk-file / --dk-cvr
 # ---------------------------------------------------------------------------
 
