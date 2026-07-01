@@ -42,3 +42,39 @@ PRH codelist later confirms the x583/x816 assignment, the split can be enabled i
 `concepts_fi.py` under the already-present reconciliation gate.
 
 **Report path:** `.superpowers/sdd/task-2-report.md`
+
+---
+
+## Review fixes — commit 6553eaa
+
+**Status:** DONE — 728 passed, 2 skipped, 0 failed.
+
+**Commit:** `6553eaa` — `fix(registers): FI canonical concept keys (restore roa/op_margin/interest_coverage) + P&L waterfall leg 1 + honest docstring`
+
+### I1 (canonical concept keys)
+Renamed in `FI_PACK`, `_GATED`, the asset-components loop, and all test
+assertions: `total_assets→assets`, `operating_profit→operating_income`,
+`current_assets→assets_current`. `compute_derived` now receives the engine's
+canonical keys and produces `roa`, `operating_margin`, `interest_coverage` on the
+full_2024 fixture (previously silently skipped). New test
+`test_compute_derived_produces_roa_operating_margin_interest_coverage` proves all
+three are present. `personnel_costs` kept (non-engine extra row, harmless).
+
+### I2 (P&L waterfall leg 1)
+Added leg 1: when x12 (net financial items) and x738 are both present, require
+`|x689 + x12 − x738| ≤ tol`; failure suppresses `net_income` with a "leg-1 fails"
+reason. All three real fixtures reconcile exactly (full 0.00, abbrev 0.00, housing
+0.00 delta). New test `test_synthetic_pnl_leg1_failure_suppresses_net_income`
+proves a synthetic mismatch (x689=100k + x12=50k ≠ x738=200k) suppresses
+`net_income` even when leg 2 would pass alone.
+
+### M1 (docstring honesty)
+Removed "leverage stays liabilities-based via x513" from the module docstring and
+the inline `lev_reason` string. Replacement text: FI emits `liabilities` as a raw
+reported value but produces **no** `total_debt`/`debt_to_equity` (the engine's
+leverage ratios require the suppressed long_term_debt/short_term_debt split); a
+codelist confirming the assignment would re-enable it.
+
+**Concern (unchanged):** FI still emits no `long_term_debt` → no engine leverage
+ratios for FI filings. Honest and deliberate; a future PRH codelist can re-enable
+under the existing reconciliation gate.
