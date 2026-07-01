@@ -403,6 +403,186 @@ def test_map_dk_esef_balance_gate_holds():
 
 
 # ===========================================================================
+# Task 5 — keyless Virk acquisition (virk_api.py)
+# ===========================================================================
+
+import gzip as _gzip
+
+from bottom_up_corpus.registers.virk_api import (
+    fetch_virk_document,
+    route_document,
+    search_virk_filings,
+)
+
+
+# --- stub fetchers -----------------------------------------------------------
+
+class _VirkSearchFetcher:
+    """Stub for search_virk_filings: returns a canned ES response."""
+    ES_RESPONSE = {
+        "hits": {
+            "hits": [
+                {"_source": {
+                    "cvrNummer": 24256790,
+                    "offentliggoerelsesTidspunkt": "2024-10-01T00:00:00",
+                    "offentliggoerelsestype": "AARSRAPPORT",
+                    "regnskab": {
+                        "regnskabsperiode": {
+                            "startDato": "2023-01-01",
+                            "slutDato": "2023-12-31",
+                        }
+                    },
+                    "dokumenter": [
+                        {
+                            "dokumentType": "AARSRAPPORT",
+                            "dokumentMimeType": "application/xml",
+                            "dokumentUrl": "http://distribution.virk.dk/doc/123",
+                        },
+                        {
+                            "dokumentType": "AARSRAPPORT",
+                            "dokumentMimeType": "application/pdf",
+                            "dokumentUrl": "http://distribution.virk.dk/doc/123.pdf",
+                        },
+                    ],
+                }},
+                {"_source": {
+                    "cvrNummer": 24256790,
+                    "offentliggoerelsesTidspunkt": "2023-09-15T00:00:00",
+                    "offentliggoerelsestype": "AARSRAPPORT",
+                    "regnskab": {
+                        "regnskabsperiode": {
+                            "startDato": "2022-01-01",
+                            "slutDato": "2022-12-31",
+                        }
+                    },
+                    "dokumenter": [],
+                }},
+            ]
+        }
+    }
+
+    def post_json(self, url, body, **kw):
+        return self.ES_RESPONSE
+
+
+class _VirkDocFetcher:
+    """Stub for fetch_virk_document: returns pre-set bytes."""
+    def __init__(self, response_bytes: bytes):
+        self._bytes = response_bytes
+
+    def get(self, url, **kw):
+        class _Resp:
+            def __init__(self, b): self.content = b
+        return _Resp(self._bytes)
+
+
+class _VirkErrorFetcher:
+    """Stub that always raises, to test batch-safe [] return."""
+    def post_json(self, url, body, **kw):
+        raise RuntimeError("network error")
+
+
+# --- tests -------------------------------------------------------------------
+
+def test_search_virk_filings_returns_sources():
+    """search_virk_filings POSTs the ES body and returns hits._source list."""
+    results = search_virk_filings("24256790", fetcher=_VirkSearchFetcher())
+    assert len(results) == 2
+    first = results[0]
+    assert first["cvrNummer"] == 24256790
+    assert first["offentliggoerelsesTidspunkt"] == "2024-10-01T00:00:00"
+    assert len(first["dokumenter"]) == 2
+    assert first["regnskab"]["regnskabsperiode"]["slutDato"] == "2023-12-31"
+
+
+def test_search_virk_filings_batch_safe_on_error():
+    """search_virk_filings returns [] on any network error (batch-safe)."""
+    results = search_virk_filings("24256790", fetcher=_VirkErrorFetcher())
+    assert results == []
+
+
+def test_fetch_virk_document_gunzips_gzip_response():
+    """fetch_virk_document decompresses the payload when magic bytes == 0x1f 0x8b.
+
+    The server sends gzip WITHOUT Content-Encoding: gzip, so the HTTP layer
+    does NOT auto-decompress. We compress a real DK fixture in-test, hand the
+    raw gz bytes to the stub fetcher, and assert we get back the original XML.
+    """
+    original_xml = open(
+        "tests/fixtures/dk/dk_30830725_microB_2025.xml", "rb"
+    ).read()
+    gz_bytes = _gzip.compress(original_xml)
+    # Sanity: ensure we created valid gzip with the right magic
+    assert gz_bytes[:2] == b"\x1f\x8b"
+
+    result = fetch_virk_document(
+        "http://distribution.virk.dk/doc/123",
+        fetcher=_VirkDocFetcher(gz_bytes),
+    )
+    assert result == original_xml
+
+
+def test_fetch_virk_document_returns_raw_when_not_gzip():
+    """fetch_virk_document returns raw bytes when the payload is not gzip."""
+    raw_xml = b"<?xml version='1.0'?><root/>"
+    result = fetch_virk_document(
+        "http://distribution.virk.dk/doc/456",
+        fetcher=_VirkDocFetcher(raw_xml),
+    )
+    assert result == raw_xml
+
+
+def test_fetch_virk_document_returns_none_on_error():
+    """fetch_virk_document returns None on any fetch error (batch-safe)."""
+    class _ErrFetcher:
+        def get(self, url, **kw): raise RuntimeError("network error")
+
+    result = fetch_virk_document("http://distribution.virk.dk/doc/x",
+                                 fetcher=_ErrFetcher())
+    assert result is None
+
+
+def test_route_document_esef_xml():
+    """AARSRAPPORT_ESEF + application/xml -> 'esef'."""
+    assert route_document({
+        "dokumentType": "AARSRAPPORT_ESEF",
+        "dokumentMimeType": "application/xml",
+    }) == "esef"
+
+
+def test_route_document_fsa_xml():
+    """AARSRAPPORT + application/xml -> 'fsa'."""
+    assert route_document({
+        "dokumentType": "AARSRAPPORT",
+        "dokumentMimeType": "application/xml",
+    }) == "fsa"
+
+
+def test_route_document_pdf_returns_none():
+    """AARSRAPPORT + application/pdf -> None (management report PDF)."""
+    assert route_document({
+        "dokumentType": "AARSRAPPORT",
+        "dokumentMimeType": "application/pdf",
+    }) is None
+
+
+def test_route_document_xhtml_returns_none():
+    """AARSRAPPORT_ESEF + application/xhtml+xml -> None (iXBRL viewer, not bare XML)."""
+    assert route_document({
+        "dokumentType": "AARSRAPPORT_ESEF",
+        "dokumentMimeType": "application/xhtml+xml",
+    }) is None
+
+
+def test_route_document_unknown_type_returns_none():
+    """Unknown dokumentType -> None."""
+    assert route_document({
+        "dokumentType": "LEDELSESBERETNING",
+        "dokumentMimeType": "application/pdf",
+    }) is None
+
+
+# ===========================================================================
 # Task 4 — DK identity (CVR / LEI->GLEIF registeredAs)
 # ===========================================================================
 
