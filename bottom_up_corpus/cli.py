@@ -29,7 +29,12 @@ from .pipeline import (
     render_universe,
 )
 from .eu.financials import build_eu_financials
-from .registers.financials import build_ch_financials, build_register_financials
+from .registers.financials import (
+    build_be_financials,
+    build_be_financials_from_files,
+    build_ch_financials,
+    build_register_financials,
+)
 from .openfigi import coverage_hint, map_identifiers
 from .rag import iter_items
 from .sources.cik_lookup import fetch_cik_lookup, parse_cik_lookup
@@ -518,6 +523,40 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
     cfg = _config(args)
     if getattr(args, "limit", None) is not None and not getattr(args, "ch_bulk", None):
         raise SystemExit("error: --limit requires --ch-bulk")
+
+    # --- Belgium keyless path: one or more local .xbrl / .zip files ---
+    if getattr(args, "be_file", None):
+        rep = build_be_financials_from_files(args.be_file, config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- Belgium API path: KBO numbers resolved via the CBSO API ---
+    if getattr(args, "be_numbers", None):
+        be_key = os.environ.get("BNB_CBSO_KEY") or ""
+        if not be_key:
+            raise SystemExit(
+                "error: --be-numbers requires a CBSO API key — "
+                "set the BNB_CBSO_KEY environment variable"
+            )
+        specs = [{"be_number": k} for k in args.be_numbers]
+        rep = build_be_financials(
+            specs, fetcher=Fetcher(cfg), config=cfg, key=be_key, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- UK Companies House bulk path ---
     if getattr(args, "ch_bulk", None):
         rep = build_ch_financials(
             args.ch_bulk, config=cfg, write=args.write,
@@ -530,6 +569,8 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
         if rep.get("coverage_path"):
             print(f"  coverage: {rep['coverage_path']}")
         return 0
+
+    # --- Norway / LEI path ---
     rep = build_register_financials(
         _register_specs(args), fetcher=Fetcher(cfg), config=cfg, write=args.write)
     mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
@@ -811,6 +852,10 @@ def build_parser() -> argparse.ArgumentParser:
     rfsrc.add_argument("--leis", help="comma-separated LEIs (resolved to orgnr via GLEIF)")
     rfsrc.add_argument("--ch-bulk", metavar="ZIP", dest="ch_bulk",
                        help="UK Companies House Accounts Bulk Data .zip file (GB)")
+    rfsrc.add_argument("--be-file", nargs="+", metavar="PATH", dest="be_file",
+                       help="one or more BNB -data.xbrl or deposit .zip files (BE, keyless parse)")
+    rfsrc.add_argument("--be-numbers", nargs="+", metavar="KBO", dest="be_numbers",
+                       help="one or more KBO numbers (BE, CBSO API; key via $BNB_CBSO_KEY)")
     rf.add_argument("--limit", type=int, default=None,
                     help="cap number of entities processed (--ch-bulk only)")
     rf.add_argument("--write", action="store_true", help="persist tables (else dry-run)")

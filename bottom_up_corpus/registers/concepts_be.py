@@ -70,7 +70,7 @@ BE_PACK: dict[str, tuple[str, str, dict[str, str]]] = {
     "revenue":             ("m53", "m4", {"ntr": "m6"}),
     "net_income":          ("m59", "m4", {}),
     "income_tax":          ("m60", "m4", {"spec": "m17"}),
-    "depreciation":        ("m2",  "m4", {"ntr": "m6", "mdp": "m1"}),
+    "dep_amort":           ("m2",  "m4", {"ntr": "m6", "mdp": "m1"}),
 }
 
 # Concepts we never emit, with the reason recorded in ``suppressed``.
@@ -150,6 +150,18 @@ def _emit_financial_debt(flat: list[dict], emit, suppressed: list) -> None:
         suppress("no m51 financial-borrowings facts on the balance sheet")
         return
 
+    # Dedup by full dim-tuple before any validation or summing: a malformed
+    # filing can duplicate the same context, which would otherwise double-count
+    # the borrowings total. Keep the first occurrence (order is document order).
+    _seen_b: set[frozenset] = set()
+    _deduped: list[dict] = []
+    for f in borrow:
+        _k = frozenset(f["dims"].items())
+        if _k not in _seen_b:
+            _seen_b.add(_k)
+            _deduped.append(f)
+    borrow = _deduped
+
     # Every remaining fact must be a clean maturity×type tranche. A deviating
     # structure (a breakdown-free subtotal without typ that would double-count, a
     # further sub-breakdown, or an unexpected maturity bucket) means we cannot
@@ -166,8 +178,10 @@ def _emit_financial_debt(flat: list[dict], emit, suppressed: list) -> None:
 
     # Independent witness: the financial-nature slice of total liabilities
     # (bas=m50, ntr=m3), breakdown-free rst=m1 + rst=m2 on the passif (part=m3).
+    # Dedup by full dim-tuple to guard against malformed duplicate contexts.
     witness = 0.0
     seen = False
+    _seen_w: set[frozenset] = set()
     for fact in flat:
         dims = fact["dims"]
         if (fact.get("unit") == "EUR"
@@ -177,6 +191,10 @@ def _emit_financial_debt(flat: list[dict], emit, suppressed: list) -> None:
                 and dims.get("rst") in ("m1", "m2")
                 and set(dims) == {"bas", "ntr", "part", "prd", "rst"}
                 and dims["prd"] == "m1"):
+            _wk = frozenset(dims.items())
+            if _wk in _seen_w:
+                continue
+            _seen_w.add(_wk)
             witness += fact["value"]
             seen = True
     if not seen:

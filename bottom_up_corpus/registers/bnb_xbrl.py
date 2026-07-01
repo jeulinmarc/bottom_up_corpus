@@ -29,6 +29,9 @@ _NS_XBRLDI = "http://xbrl.org/2006/xbrldi"
 _NS_XSI = "http://www.w3.org/2001/XMLSchema-instance"
 
 _TAG_CONTEXT = f"{{{_NS_XBRLI}}}context"
+_TAG_PERIOD = f"{{{_NS_XBRLI}}}period"
+_TAG_END_DATE = f"{{{_NS_XBRLI}}}endDate"
+_TAG_INSTANT = f"{{{_NS_XBRLI}}}instant"
 _TAG_SCENARIO = f"{{{_NS_XBRLI}}}scenario"
 _TAG_EXPLICIT = f"{{{_NS_XBRLDI}}}explicitMember"
 _ATTR_NIL = f"{{{_NS_XSI}}}nil"
@@ -116,6 +119,49 @@ def parse_bnb_data_xbrl(source: Union[str, bytes, Path]) -> list[dict]:
         facts.append({"dims": dims, "value": value, "unit": unit_ref})
 
     return facts
+
+
+def period_end_of(source: Union[str, bytes, Path]) -> "str | None":
+    """Return the filing's reporting date as the max of all context period dates.
+
+    Iterates every ``xbrli:context/xbrli:period`` in the instance document and
+    returns the maximum ``endDate`` or ``instant`` as an ISO-8601 string
+    (``"YYYY-MM-DD"``).  Returns ``None`` when no dated period is found.
+
+    For a BNB filing the ``prd`` dimension selects current vs prior year *within*
+    one exercise date, so all dated periods resolve to the same end date (the
+    filing's reporting date).  Taking the max is therefore equivalent to reading
+    any one of them, but is robust against filings that might contain multiple
+    distinct dates.
+
+    Parameters
+    ----------
+    source:
+        A file path (str or Path) or raw bytes of the -data.xbrl document.
+
+    Returns
+    -------
+    str or None
+        The max reporting date as ``"YYYY-MM-DD"``, or ``None``.
+    """
+    if isinstance(source, (str, Path)):
+        tree = ET.parse(str(source))
+        root = tree.getroot()
+    else:
+        root = ET.fromstring(source)
+
+    dates: list[str] = []
+    for ctx in root.iter(_TAG_CONTEXT):
+        period = ctx.find(_TAG_PERIOD)
+        if period is None:
+            continue
+        end = period.find(_TAG_END_DATE)
+        if end is not None and end.text and end.text.strip():
+            dates.append(end.text.strip())
+        instant = period.find(_TAG_INSTANT)
+        if instant is not None and instant.text and instant.text.strip():
+            dates.append(instant.text.strip())
+    return max(dates) if dates else None
 
 
 def open_bnb_deposit(zip_bytes: bytes) -> bytes:

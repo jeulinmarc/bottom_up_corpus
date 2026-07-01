@@ -75,7 +75,7 @@ def test_map_bnb_m02_core_values():
         "liabilities": 7298623904,
         "provisions": 307142707,
         "income_tax": 36038793,
-        "depreciation": 63038416,
+        "dep_amort": 63038416,
         "inventory": 4606684,
         "receivables": 232625124,
     }
@@ -185,7 +185,7 @@ def test_map_bnb_debt_block_suppressed_when_tranche_lacks_typ():
 def test_be_pack_shape():
     """The pack is (bas, part, required-members) triples for the documented keys."""
     for key in ("assets", "equity", "revenue", "net_income", "income_tax",
-                "depreciation", "inventory", "receivables", "liabilities",
+                "dep_amort", "inventory", "receivables", "liabilities",
                 "liabilities_current", "provisions", "cash", "assets_fixed",
                 "assets_current"):
         assert key in BE_PACK
@@ -360,3 +360,252 @@ def test_fetch_bnb_deposit_acct_error_returns_none():
 
     result = fetch_bnb_deposit("0648822310", fetcher=_AcErrFetcher(), key="k")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5 additions: period_end_of, dep_amort rename, tranche-dedup, producers,
+# and CLI. All tests are written BEFORE their implementations (TDD Red phase).
+# ---------------------------------------------------------------------------
+
+# --- A. period_end_of -------------------------------------------------------
+
+def test_period_end_of_m02_returns_2020_12_31():
+    """period_end_of returns the max period date from the m02 fixture = 2020-12-31."""
+    from bottom_up_corpus.registers.bnb_xbrl import period_end_of
+    result = period_end_of(FIXTURE)
+    assert result == "2020-12-31"
+
+
+def test_period_end_of_from_bytes():
+    """period_end_of also works when passed raw bytes."""
+    from bottom_up_corpus.registers.bnb_xbrl import period_end_of
+    data = Path(FIXTURE).read_bytes()
+    result = period_end_of(data)
+    assert result == "2020-12-31"
+
+
+def test_period_end_of_empty_returns_none():
+    """period_end_of returns None when no period dates are found."""
+    from bottom_up_corpus.registers.bnb_xbrl import period_end_of
+    minimal = b"<xbrl><context id='c1'><entity/></context></xbrl>"
+    assert period_end_of(minimal) is None
+
+
+# --- D1. dep_amort rename ---------------------------------------------------
+
+def test_dep_amort_in_be_pack_not_depreciation():
+    """After the rename dep_amort is the pack key; depreciation must not appear."""
+    assert "dep_amort" in BE_PACK
+    assert "depreciation" not in BE_PACK
+
+
+def test_dep_amort_present_in_mapped_values():
+    """map_bnb_facts emits dep_amort (not depreciation) for the m02 fixture."""
+    res = _map_fixture(FIXTURE)
+    assert "dep_amort" in res["values"]
+    assert "depreciation" not in res["values"]
+    assert round(_val(res, "dep_amort")) == 63038416
+
+
+# --- D2. Tranche-dedup hardening -------------------------------------------
+
+def test_tranche_dedup_prevents_double_count():
+    """Duplicate m51 facts with identical dim-tuples must only count once (not
+    double-count the borrowings total)."""
+    flat = _balanced_base() + [
+        # This tranche appears TWICE with the same dims — a malformed filing.
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1", "typ": "m1"}, "value": 1_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1", "typ": "m1"}, "value": 1_000.0, "unit": "EUR"},  # duplicate
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2", "typ": "m1"}, "value": 500.0, "unit": "EUR"},
+        # Witness reconciles against deduplicated sum (1000+500=1500).
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 1_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2"}, "value": 500.0, "unit": "EUR"},
+    ]
+    res = map_bnb_facts(flat)
+    # After dedup: LT=1000, ST=500, total=1500 — matches witness, so emitted.
+    assert round(_val(res, "long_term_debt")) == 1_000
+    assert round(_val(res, "short_term_debt")) == 500
+
+
+def test_witness_dedup_prevents_double_count():
+    """Duplicate m50[ntr=m3] witness facts with identical dim-tuples must only
+    count once so the cross-check is not falsely satisfied."""
+    flat = _balanced_base() + [
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1", "typ": "m1"}, "value": 1_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2", "typ": "m1"}, "value": 500.0, "unit": "EUR"},
+        # Witness says 1500 total but with a DUPLICATE — without dedup it would sum to 3000.
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 1_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 1_000.0, "unit": "EUR"},  # duplicate
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2"}, "value": 500.0, "unit": "EUR"},
+    ]
+    res = map_bnb_facts(flat)
+    # After dedup: borrow=1500, witness=1500 → emitted.
+    assert round(_val(res, "long_term_debt")) == 1_000
+    assert round(_val(res, "short_term_debt")) == 500
+
+
+# --- B. Producers -----------------------------------------------------------
+
+def test_build_be_financials_from_files_writes_jsonl(tmp_path):
+    """from_files with write=True writes data/financials_register/0648822310.jsonl
+    and rows carry the expected identity + values."""
+    import json
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_be_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_be_financials_from_files([FIXTURE], config=cfg, write=True)
+
+    # Summary counters
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["no_financials"] == 0
+    assert out["errors"] == 0
+
+    # File written
+    out_file = tmp_path / "financials_register" / "0648822310.jsonl"
+    assert out_file.exists(), f"Expected {out_file} to be written"
+
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert rows, "JSONL must not be empty"
+
+    # Identity columns on every row
+    for row in rows:
+        assert row["source"] == "bnb"
+        assert row["country"] == "BE"
+        assert row["basis"] == "company"
+        assert row["period_end"] == "2020-12-31"
+        assert row["fy"] == 2020
+        assert row["currency"] == "EUR"
+
+    # Reported equity present
+    eq_rows = [r for r in rows if r["concept"] == "equity" and r["kind"] == "reported"]
+    assert eq_rows, "equity row missing"
+    assert round(eq_rows[0]["value"]) == 6_734_534_627
+
+    # dep_amort present (not depreciation)
+    dep_rows = [r for r in rows if r["concept"] == "dep_amort" and r["kind"] == "reported"]
+    assert dep_rows, "dep_amort row missing"
+    assert "depreciation" not in {r["concept"] for r in rows}
+
+    # Borrowings-based debt_to_equity derived concept present
+    dte_rows = [r for r in rows if r["concept"] == "debt_to_equity" and r["kind"] == "derived"]
+    assert dte_rows, "debt_to_equity derived row missing"
+
+    # total_debt derived = 6_639_783_828
+    td_rows = [r for r in rows if r["concept"] == "total_debt" and r["kind"] == "derived"]
+    assert td_rows, "total_debt derived row missing"
+    assert round(td_rows[0]["value"]) == 6_639_783_828
+
+
+def test_build_be_financials_from_files_dry_run(tmp_path):
+    """write=False (dry-run): no file written, but counters correct."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_be_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_be_financials_from_files([FIXTURE], config=cfg, write=False)
+
+    assert out["with_financials"] == 1
+    out_file = tmp_path / "financials_register" / "0648822310.jsonl"
+    assert not out_file.exists(), "Dry-run must not write any file"
+    assert out["paths"] == []
+
+
+def test_build_be_financials_from_files_error_isolation(tmp_path):
+    """A path that raises must be counted as an error without aborting the batch."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_be_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_be_financials_from_files(
+        ["/nonexistent/path/0123456789.xbrl", FIXTURE],
+        config=cfg, write=False,
+    )
+    assert out["errors"] == 1
+    assert out["with_financials"] == 1
+
+
+def test_build_be_financials_api_stub(tmp_path):
+    """API path: stubbed fetcher returning fixture bytes → same rows as from_files."""
+    import json
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_be_financials
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_be_financials(
+        [{"be_number": "0648822310"}],
+        fetcher=_CbsoFetcherOK(),
+        config=cfg,
+        key="test-key",
+        write=True,
+    )
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["errors"] == 0
+
+    out_file = tmp_path / "financials_register" / "0648822310.jsonl"
+    assert out_file.exists()
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert any(r["concept"] == "equity" and r["kind"] == "reported" for r in rows)
+    assert any(r["source"] == "bnb" for r in rows)
+    assert any(r["country"] == "BE" for r in rows)
+
+
+# --- C. CLI -----------------------------------------------------------------
+
+def test_cli_be_file_dry_run(tmp_path):
+    """--be-file dry-run: build_be_financials_from_files called with write=False."""
+    import io
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--be-file", FIXTURE,
+    ])
+    assert rc == 0
+    # Dry-run: no file written
+    out_file = tmp_path / "financials_register" / "0648822310.jsonl"
+    assert not out_file.exists()
+
+
+def test_cli_be_file_write(tmp_path):
+    """--be-file --write: writes the JSONL."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--be-file", FIXTURE,
+        "--write",
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "0648822310.jsonl"
+    assert out_file.exists()
+
+
+def test_cli_be_numbers_dry_run(tmp_path):
+    """--be-numbers dry-run prints without raising (needs BNB_CBSO_KEY env or config)."""
+    import os
+    from bottom_up_corpus.cli import main
+
+    # We set a dummy key so the CLI doesn't error on missing key.
+    old_key = os.environ.get("BNB_CBSO_KEY")
+    os.environ["BNB_CBSO_KEY"] = "dummy"
+    try:
+        # The fetcher will fail to reach the real API in tests, so the result
+        # is 1 entity counted as an error (network unreachable) — but the CLI
+        # must NOT raise an exception.
+        rc = main([
+            "--data-dir", str(tmp_path),
+            "register-financials",
+            "--be-numbers", "0648822310",
+        ])
+    finally:
+        if old_key is None:
+            del os.environ["BNB_CBSO_KEY"]
+        else:
+            os.environ["BNB_CBSO_KEY"] = old_key
+    assert rc == 0
