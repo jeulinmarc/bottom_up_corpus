@@ -2,10 +2,13 @@
 
 > Living plan for what's done and what's next.
 
-## Status — both pillars built
+## Status — document pillars + structured financials + register pillar
 
-🇺🇸 **SEC** pillar complete + 🇪🇺 **EU** pillar built (14 jurisdictions). All merged
-to `main`. See [`SEC_PILLAR.md`](SEC_PILLAR.md) and [`EU_PILLAR.md`](EU_PILLAR.md).
+🇺🇸 **SEC** pillar complete + 🇪🇺 **EU** document pillar built (14 jurisdictions) +
+EU ESEF structured financials done (Pillar B, PRs #55–56) + register-financials
+pillar started. All merged to `main` except UK (#58, open). See
+[`SEC_PILLAR.md`](SEC_PILLAR.md), [`EU_PILLAR.md`](EU_PILLAR.md),
+[`EU_FINANCIALS.md`](EU_FINANCIALS.md), [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md).
 
 | Area | Status |
 |---|---|
@@ -18,6 +21,9 @@ to `main`. See [`SEC_PILLAR.md`](SEC_PILLAR.md) and [`EU_PILLAR.md`](EU_PILLAR.m
 | Phase 6 — PDF batch (render, `render-pdf`) | ✅ |
 | Cross-CIK entities; S&P 500 historical universe; CODEOWNERS | ✅ |
 | Hardening (PRs #15–18) + docs reconciliation (#19) | ✅ |
+| **EU ESEF/IFRS structured financials (Pillar B)** — json_url stdlib (#55) + Arelle Tier B (#56) | ✅ |
+| **Register financials** — 🇳🇴 NO Brreg JSON (#57, merged) | ✅ |
+| **Register financials** — 🇬🇧 UK Companies House iXBRL, `--ch-bulk` (#58, open) | 🔄 |
 
 **Phase 5 (international) — EU pillar built.** The `bottom_up_corpus/eu/` package
 federates 13 national OAMs + Euronext + filings.xbrl.org behind a pluggable
@@ -45,9 +51,7 @@ multi-MB submissions) — bound by `--years`/`--since` and/or `--limit` as neede
 The European pillar (`bottom_up_corpus/eu/`) is built and live-validated across 14
 jurisdictions ([`EU_PILLAR.md`](EU_PILLAR.md)). Remaining EU follow-ups:
 
-- **Pillar B — structured ESEF/IFRS extraction.** Pillar A (download every file)
-  is done; parse the ESEF/iXBRL packages into structured financials (an EU analog
-  of the SEC F1 layer) via Arelle.
+- ✅ **Pillar B — structured ESEF/IFRS extraction.** Done: json_url stdlib path (#55, merged) + Arelle Tier B (#56, merged). See [`EU_FINANCIALS.md`](EU_FINANCIALS.md). Remaining follow-up: acquisition-side fix for DE/FR/SE (fetching ESEF zips for backends that do not yet download them) — a separate PR.
 - **Euronext `company-news`** — issuer press releases (results, incl. PDFs) on top
   of the corporate-event *notices* the Euronext backend already captures.
 - **CMVM Portugal-direct** — only if an authenticated route to its OutSystems
@@ -55,6 +59,25 @@ jurisdictions ([`EU_PILLAR.md`](EU_PILLAR.md)). Remaining EU follow-ups:
 - **Richer Oslo coverage** — a reliable ISIN→issuerSign mapping (OpenFIGI's Oslo
   ticker coverage is spotty); foreign-domiciled Oslo issuers are covered today via
   the corroborated name path.
+
+## Register-financials pillar
+
+National business registers → the same curated financial schema as SEC XBRL and EU ESEF,
+targeting the **private / credit universe** (non-listed issuers that never file ESEF).
+Output: `data/financials_register/`, labelled by `basis`. Governed by a **no-false-data**
+confidence gate — a derived value that cannot be confirmed from structural anchors is
+suppressed, not guessed; the reason is recorded per key in the coverage report.
+Registers are balance-sheet-primary; leverage is liabilities-based (total liabilities,
+not pure financial borrowings).
+
+| Register | Method | Status |
+|---|---|---|
+| 🇳🇴 NO Brønnøysund (Brreg) | structured JSON, no XBRL | ✅ merged #57 |
+| 🇬🇧 UK Companies House | iXBRL via Arelle, `--ch-bulk` | 🔄 PR #58 open |
+
+Next: 🇧🇪 BE BNB / 🇩🇰 DK Erhvervsstyrelsen (both XBRL; reuse the Arelle path); UK
+targeted REST API (per-CH-number named-entity lookup); historic monthly backfill
+(multi-year history per entity); OCR for the non-ESEF / pre-2020 tail.
 
 ## Other jurisdictions (future)
 
