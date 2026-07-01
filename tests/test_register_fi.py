@@ -407,11 +407,18 @@ def test_fetch_fi_financial_uses_correct_url_and_params():
 
 
 def test_list_fi_dates_returns_list():
-    """Stub returns a list of date strings → list_fi_dates passes it through."""
-    dates = ["2022-12-31", "2023-12-31", "2024-12-31"]
-    stub = _StubFetcher(json_response=dates)
+    """Stub returns the real envelope → list_fi_dates extracts financialDate strings."""
+    envelope = {
+        "totalResults": 3,
+        "financials": [
+            {"businessId": "2919415-2", "financialDate": "2022-12-31"},
+            {"businessId": "2919415-2", "financialDate": "2023-12-31"},
+            {"businessId": "2919415-2", "financialDate": "2024-12-31"},
+        ],
+    }
+    stub = _StubFetcher(json_response=envelope)
     result = list_fi_dates("2919415-2", fetcher=stub)
-    assert result == dates
+    assert result == ["2022-12-31", "2023-12-31", "2024-12-31"]
 
 
 def test_list_fi_dates_error_returns_empty_list():
@@ -423,7 +430,7 @@ def test_list_fi_dates_error_returns_empty_list():
 
 def test_list_fi_dates_uses_correct_url_and_params():
     """GET BASE/financials?businessId=…"""
-    stub = _StubFetcher(json_response=[])
+    stub = _StubFetcher(json_response={"totalResults": 0, "financials": []})
     list_fi_dates("2919415-2", fetcher=stub)
     call = stub.calls[0]
     assert call["url"].endswith("/financials")
@@ -497,7 +504,11 @@ class _PrhApiFetcher:
         if "gleif" in url:
             return {}
         # list_fi_dates call: /financials?businessId=…
-        return [self._date]
+        # Real API returns an envelope, not a bare list.
+        return {
+            "totalResults": 1,
+            "financials": [{"businessId": self._bid, "financialDate": self._date}],
+        }
 
 
 def test_build_fi_financials_from_files_writes_jsonl(tmp_path):

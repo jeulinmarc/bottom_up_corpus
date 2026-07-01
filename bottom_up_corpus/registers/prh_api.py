@@ -96,7 +96,18 @@ def list_fi_dates(business_id: str, *, fetcher) -> list[str]:
     url = f"{BASE}/financials"
     try:
         data = fetcher.get_json(url, params={"businessId": business_id})
-        return data if isinstance(data, list) else []
+        # Real API: {"totalResults": N, "financials": [{"businessId": …, "financialDate": …}, …]}
+        if isinstance(data, dict):
+            items = data.get("financials") or []
+            return [
+                it["financialDate"]
+                for it in items
+                if isinstance(it, dict) and it.get("financialDate")
+            ]
+        # Defensive fallback for any hypothetical bare-list response
+        if isinstance(data, list):
+            return [it for it in data if isinstance(it, str)]
+        return []
     except Exception:  # noqa: BLE001
         log.debug("PRH list_fi_dates failed for %s", business_id, exc_info=True)
         return []

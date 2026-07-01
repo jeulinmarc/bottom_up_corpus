@@ -838,7 +838,7 @@ keyless. Two supporting endpoints cover entity history and population traversal:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v3/financials?businessId=…` | List all available `financialDate` strings for one entity |
+| `GET /v3/financials?businessId=…` | List available periods for one entity — returns `{"totalResults": N, "financials": [{"businessId": …, "financialDate": "YYYY-MM-DD"}, …]}` |
 | `GET /v3/all_financials?financialDate=…` | Iterate all companies that filed for a given date (paginated, 100/page) |
 
 The XBRL model is dimensional: every monetary fact sits in an element of the
@@ -1048,10 +1048,11 @@ the entity / period / unbalanced counts without touching disk. The `--fi-file` a
 `--fi-businessid` flags are mutually exclusive with each other and with `--orgnrs`,
 `--leis`, `--ch-bulk`, `--be-file`, and `--be-numbers`.
 
-**API path behaviour:** for each Y-tunnus, the engine calls `GET /v3/financials` to
-list available dates, picks the latest, then fetches that period's XBRL via
-`GET /v3/financial`. A missing or erroring entity is recorded as `"no-financials"`
-or `"error"` in the coverage report and never silently dropped.
+**API path behaviour:** for each Y-tunnus, the engine calls `GET /v3/financials` which
+returns a `{"totalResults": N, "financials": [{"businessId": …, "financialDate": "YYYY-MM-DD"}, …]}`
+envelope. The engine extracts the `financialDate` strings, picks the latest, then fetches
+that period's XBRL via `GET /v3/financial`. A missing or erroring entity is recorded as
+`"no-financials"` or `"error"` in the coverage report and never silently dropped.
 
 ## Honest caveats — FI
 
