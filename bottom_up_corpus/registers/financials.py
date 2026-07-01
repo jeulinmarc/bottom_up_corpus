@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -24,10 +25,16 @@ from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
 from .ch_ixbrl import oim_from_ch_html
 from .concepts_be import map_bnb_facts
+from .concepts_fi import map_fi_facts
 from .concepts_no import map_brreg_entry
 from .concepts_uk import map_ch_facts
+from .fi_prh_xbrl import parse_fi_facts
 from .identity import resolve_register_specs
 from .no_brreg import fetch_brreg_accounts
+from .prh_api import fetch_fi_financial, list_fi_dates
+
+# Y-tunnus pattern: NNNNNNN-N (7 digits, hyphen, 1 check digit)
+_YTUNNUS_RE = re.compile(r"(\d{7}-\d)")
 
 # Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
 # never breaks out goodwill / intangibles, so the engine's tangible_book_value
@@ -481,6 +488,218 @@ def build_be_financials(
 
             _be_pipeline(
                 xbrl_bytes, be_number, r.get("lei"), r.get("name") or be_number,
+                storage=storage, out=out, coverage=coverage, write=write,
+            )
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Finland PRH open-data XBRL register producer
+# ---------------------------------------------------------------------------
+# Keyless open API — no subscription key required.  The XBRL instance document
+# uses a dimensional model (fi_MC metric codes); ``parse_fi_facts`` (stdlib,
+# no Arelle) + ``map_fi_facts`` (NO-FALSE-DATA gate) handle parsing/mapping.
+# ``basis="company"`` (FAS individual statutory accounts). EUR only.
+#
+# net_income = x740 (FINAL, after appropriations), NEVER x738.
+# Liabilities-based leverage: total liabilities (x513) emitted; the long/short
+# maturity split (x583/x816) is suppressed because the label linkbase is not
+# included in the instance — no-false-data prevents guessing which is LT vs ST.
+
+
+def _fi_entity_id(path_obj: Path) -> str:
+    """Extract Y-tunnus (NNNNNNN-N) from the filename stem.
+
+    E.g. ``fi_2919415-2_full_2024.xml`` → ``"2919415-2"``.  Falls back to the
+    full stem when no match is found.
+    """
+    m = _YTUNNUS_RE.search(path_obj.stem)
+    return m.group(1) if m else path_obj.stem
+
+
+def _fi_pipeline(
+    xbrl_source,
+    entity_id: str,
+    lei,
+    name: str,
+    *,
+    storage: Storage,
+    out: dict,
+    coverage: list[dict],
+    write: bool,
+) -> None:
+    """Parse, map, and emit rows for one PRH XBRL source (shared by both FI paths).
+
+    ``xbrl_source`` is a :class:`pathlib.Path` (keyless file path) or ``bytes``
+    (API path).  Raises on any parse or mapping error — callers must wrap in
+    ``try/except``.
+    """
+    parsed = parse_fi_facts(xbrl_source)
+    mapped = map_fi_facts(parsed)
+
+    cov_base: dict = {"business_id": entity_id, "lei": lei}
+
+    if mapped["unbalanced"]:
+        cov = {**cov_base, "status": "unbalanced"}
+        if mapped.get("suppressed"):
+            cov["suppressed"] = mapped["suppressed"]
+        coverage.append(cov)
+        out["unbalanced"] += 1
+        return
+
+    if not mapped.get("values"):
+        cov = {**cov_base, "status": "no-financials"}
+        if mapped.get("suppressed"):
+            cov["suppressed"] = mapped["suppressed"]
+        coverage.append(cov)
+        out["no_financials"] += 1
+        return
+
+    s = _summary(
+        mapped, name or entity_id,
+        sec_form="prh",
+        accession=f"prh-{entity_id}-{mapped['period_end']}",
+    )
+    base = _base(entity_id, lei, mapped, s, country="FI", source="prh")
+    rows = list(rows_from_base(base, s))
+
+    cov = dict(cov_base)
+    if mapped.get("suppressed"):
+        cov["suppressed"] = mapped["suppressed"]
+    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+
+
+def build_fi_financials_from_files(
+    paths,
+    *,
+    config: Config,
+    write: bool = True,
+) -> dict:
+    """Parse a list of local PRH XBRL ``.xml`` files → the curated schema.
+
+    The entity identifier (Y-tunnus) is extracted from the filename using the
+    ``NNNNNNN-N`` pattern (e.g. ``fi_2919415-2_full_2024.xml`` → ``"2919415-2"``).
+
+    Parameters
+    ----------
+    paths:
+        Iterable of file paths (str or Path) pointing to PRH XBRL ``.xml`` files.
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for path in paths:
+        out["entities"] += 1
+        path_obj = Path(str(path))
+        entity_id = _fi_entity_id(path_obj)
+        cov_base: dict = {"business_id": entity_id, "lei": None}
+
+        try:
+            _fi_pipeline(
+                path_obj, entity_id, None, entity_id,
+                storage=storage, out=out, coverage=coverage, write=write,
+            )
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_fi_financials(
+    specs,
+    *,
+    fetcher,
+    config: Config,
+    write: bool = True,
+) -> dict:
+    """Fetch PRH XBRL via the open API and emit the curated schema.
+
+    Resolves each spec to a Y-tunnus via :func:`resolve_register_specs`, then
+    calls :func:`list_fi_dates` to find the latest available date and
+    :func:`fetch_fi_financial` to retrieve the XBRL bytes.
+
+    Keyless — no API key required.  Live / scale validation — rate limits,
+    pagination behaviour, filing completeness for a given date — is a
+    **controller step** and is intentionally out of scope for this function.
+    Unit-test with a stubbed fetcher returning fixture bytes.
+
+    Parameters
+    ----------
+    specs:
+        List of spec dicts accepted by :func:`resolve_register_specs` (e.g.
+        ``[{"business_id": "2919415-2"}]`` or ``[{"lei": "…"}]``).
+    fetcher:
+        A :class:`bottom_up_corpus.http.Fetcher` instance (or any object that
+        exposes ``get_json`` and ``get``).
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    resolved = resolve_register_specs(specs, fetcher=fetcher)
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for r in resolved:
+        out["entities"] += 1
+        business_id = r.get("business_id")
+        cov_base: dict = {"business_id": business_id, "lei": r.get("lei")}
+
+        if not business_id:
+            coverage.append({**cov_base, "status": "unresolved"})
+            out["no_financials"] += 1
+            continue
+
+        try:
+            dates = list_fi_dates(business_id, fetcher=fetcher)
+            if not dates:
+                coverage.append({**cov_base, "status": "no-financials"})
+                out["no_financials"] += 1
+                continue
+
+            latest_date = max(dates)
+            xbrl_bytes = fetch_fi_financial(business_id, latest_date, fetcher=fetcher)
+            if xbrl_bytes is None:
+                coverage.append({**cov_base, "status": "no-financials"})
+                out["no_financials"] += 1
+                continue
+
+            _fi_pipeline(
+                xbrl_bytes, business_id, r.get("lei"), r.get("name") or business_id,
                 storage=storage, out=out, coverage=coverage, write=write,
             )
 

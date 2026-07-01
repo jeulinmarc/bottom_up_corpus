@@ -457,3 +457,190 @@ def test_iter_fi_all_error_stops_gracefully():
     stub = _StubFetcher(raises=True)
     result = list(iter_fi_all("2024-12-31", fetcher=stub))
     assert result == []
+
+
+# ===========================================================================
+# Task 5 — producer + CLI
+# ===========================================================================
+
+import json
+from bottom_up_corpus.config import Config
+from bottom_up_corpus.registers.financials import (
+    build_fi_financials_from_files,
+    build_fi_financials,
+)
+
+
+class _PrhApiFetcher:
+    """Stub for the PRH API (keyless): list_fi_dates + fetch_fi_financial."""
+
+    def __init__(self, business_id: str, financial_date: str, xbrl_bytes: bytes):
+        self._bid = business_id
+        self._date = financial_date
+        self._bytes = xbrl_bytes
+
+    def get(self, url, *, headers=None, params=None, **kw):
+        class _Resp:
+            def __init__(self, content):
+                self.content = content
+
+        return _Resp(self._bytes)
+
+    def get_json(self, url, *, headers=None, params=None, **kw):
+        # GLEIF lookup (resolve_register_specs) — not needed for direct business_id
+        # path, but must not crash if called.
+        if "gleif" in url:
+            return {}
+        # list_fi_dates call: /financials?businessId=…
+        return [self._date]
+
+
+def test_build_fi_financials_from_files_writes_jsonl(tmp_path):
+    """from_files with write=True writes data/financials_register/2919415-2.jsonl
+    and rows carry source='prh', country='FI', basis='company', period_end, fy=2024."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_fi_financials_from_files([FIXTURE], config=cfg, write=True)
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["no_financials"] == 0
+    assert out["errors"] == 0
+
+    out_file = tmp_path / "financials_register" / "2919415-2.jsonl"
+    assert out_file.exists(), f"Expected {out_file} to be written"
+
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert rows, "JSONL must not be empty"
+
+    for row in rows:
+        assert row["source"] == "prh"
+        assert row["country"] == "FI"
+        assert row["basis"] == "company"
+        assert row["period_end"] == "2024-12-31"
+        assert row["fy"] == 2024
+        assert row["currency"] == "EUR"
+
+    # equity reported
+    eq_rows = [r for r in rows if r["concept"] == "equity" and r["kind"] == "reported"]
+    assert eq_rows, "equity reported row missing"
+    assert abs(eq_rows[0]["value"] - 185_650.88) < 0.01
+
+    # revenue reported
+    rev_rows = [r for r in rows if r["concept"] == "revenue" and r["kind"] == "reported"]
+    assert rev_rows, "revenue reported row missing"
+    assert abs(rev_rows[0]["value"] - 481_773.33) < 0.01
+
+    # derived ratios
+    derived_concepts = {r["concept"] for r in rows if r["kind"] == "derived"}
+    assert "roa" in derived_concepts, "roa derived ratio missing"
+    assert "operating_margin" in derived_concepts, "operating_margin derived ratio missing"
+    assert "interest_coverage" in derived_concepts, "interest_coverage derived ratio missing"
+
+
+def test_build_fi_financials_from_files_dry_run(tmp_path):
+    """write=False: no file written, counters correct."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_fi_financials_from_files([FIXTURE], config=cfg, write=False)
+
+    assert out["with_financials"] == 1
+    out_file = tmp_path / "financials_register" / "2919415-2.jsonl"
+    assert not out_file.exists(), "Dry-run must not write any file"
+    assert out["paths"] == []
+
+
+def test_build_fi_financials_from_files_error_isolation(tmp_path):
+    """A path that raises must be counted as an error without aborting the batch."""
+    cfg = Config(data_dir=tmp_path)
+    out = build_fi_financials_from_files(
+        ["/nonexistent/fi_9999999-9_full_2024.xml", FIXTURE],
+        config=cfg, write=False,
+    )
+    assert out["errors"] == 1
+    assert out["with_financials"] == 1
+
+
+def test_build_fi_financials_api_stub(tmp_path):
+    """API path: stubbed fetcher → same rows as from_files (source='prh', country='FI')."""
+    raw = open(FIXTURE, "rb").read()
+    stub = _PrhApiFetcher("2919415-2", "2024-12-31", raw)
+    cfg = Config(data_dir=tmp_path)
+    out = build_fi_financials(
+        [{"business_id": "2919415-2"}],
+        fetcher=stub,
+        config=cfg,
+        write=True,
+    )
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["errors"] == 0
+
+    out_file = tmp_path / "financials_register" / "2919415-2.jsonl"
+    assert out_file.exists()
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert any(r["concept"] == "equity" and r["kind"] == "reported" for r in rows)
+    assert any(r["source"] == "prh" for r in rows)
+    assert any(r["country"] == "FI" for r in rows)
+
+
+# --- CLI -------------------------------------------------------------------
+
+def test_cli_fi_file_dry_run(tmp_path):
+    """--fi-file dry-run: build_fi_financials_from_files called with write=False."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--fi-file", FIXTURE,
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "2919415-2.jsonl"
+    assert not out_file.exists(), "Dry-run must not write any file"
+
+
+def test_cli_fi_file_write(tmp_path):
+    """--fi-file --write: writes the JSONL."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--fi-file", FIXTURE,
+        "--write",
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "2919415-2.jsonl"
+    assert out_file.exists()
+
+
+def test_cli_fi_businessid_dry_run(tmp_path, monkeypatch):
+    """--fi-businessid dry-run: API is stubbed → offline; no file written.
+
+    Patches ``build_fi_financials`` at the CLI module level (the name the CLI
+    imported), mirroring how the BE test patches ``_fetch_bnb_deposit`` inside
+    ``registers.financials`` rather than at the CLI level.
+    """
+    import bottom_up_corpus.cli as _cli
+    from bottom_up_corpus.cli import main
+
+    calls: list[str] = []
+
+    def _stub_build(specs, *, fetcher, config, write):
+        for s in specs:
+            calls.append(s.get("business_id"))
+        return {"entities": len(specs), "with_financials": 0, "no_financials": len(specs),
+                "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+                "coverage_path": None}
+
+    monkeypatch.setattr(_cli, "build_fi_financials", _stub_build)
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--fi-businessid", "2919415-2",
+    ])
+    assert rc == 0
+    assert calls == ["2919415-2"]
+    out_file = tmp_path / "financials_register" / "2919415-2.jsonl"
+    assert not out_file.exists()
