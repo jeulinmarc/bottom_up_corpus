@@ -33,6 +33,8 @@ from .registers.financials import (
     build_be_financials,
     build_be_financials_from_files,
     build_ch_financials,
+    build_fi_financials,
+    build_fi_financials_from_files,
     build_lu_financials_from_files,
     build_register_financials,
 )
@@ -525,6 +527,32 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
     if getattr(args, "limit", None) is not None and not getattr(args, "ch_bulk", None):
         raise SystemExit("error: --limit requires --ch-bulk")
 
+    # --- Finland keyless path: one or more local PRH XBRL .xml files ---
+    if getattr(args, "fi_file", None):
+        rep = build_fi_financials_from_files(args.fi_file, config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- Finland API path: Y-tunnus resolved via PRH XBRL API (keyless) ---
+    if getattr(args, "fi_businessid", None):
+        specs = [{"business_id": bid} for bid in args.fi_businessid]
+        rep = build_fi_financials(
+            specs, fetcher=Fetcher(cfg), config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
     # --- Belgium keyless path: one or more local .xbrl / .zip files ---
     if getattr(args, "be_file", None):
         rep = build_be_financials_from_files(args.be_file, config=cfg, write=args.write)
@@ -871,6 +899,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="one or more BNB -data.xbrl or deposit .zip files (BE, keyless parse)")
     rfsrc.add_argument("--be-numbers", nargs="+", metavar="KBO", dest="be_numbers",
                        help="one or more KBO numbers (BE, CBSO API; key via $BNB_CBSO_KEY)")
+    rfsrc.add_argument("--fi-file", nargs="+", metavar="PATH", dest="fi_file",
+                       help="one or more PRH XBRL .xml files (FI, keyless local parse)")
+    rfsrc.add_argument("--fi-businessid", nargs="+", metavar="Y_TUNNUS",
+                       dest="fi_businessid",
+                       help="one or more Finnish Y-tunnus values (FI, PRH open API, keyless)")
     rfsrc.add_argument("--lu-file", nargs="+", metavar="PATH", dest="lu_file",
                        help="one or more LBR eCDF XML files (LU, keyless parse)")
     rf.add_argument("--rcs", nargs="+", metavar="RCS", dest="rcs",
