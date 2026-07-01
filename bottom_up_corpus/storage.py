@@ -279,6 +279,12 @@ class Storage:
         _atomic_write_text(path, _jsonl(rows))
         return self._rel(path)
 
+    def write_register_financials_table(self, entity_id: str, rows: "Iterable[dict]") -> str:
+        """Write the register financials table data/financials_register/<entity_id>.jsonl."""
+        path = self.config.data_dir / "financials_register" / f"{entity_id}.jsonl"
+        _atomic_write_text(path, _jsonl(rows))
+        return self._rel(path)
+
     def write_financial_summary(self, record: FilingRecord, html: str, text: str) -> None:
         """Write a period summary's HTML (primary) + clean text; mutate record paths."""
         dest_dir = self.raw_dir_for(record)
