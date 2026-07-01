@@ -17,10 +17,15 @@ never default a missing balance-sheet item to zero.
 The confidence gate (independently-tagged anchors only):
 - **Primary:** ``NetAssetsLiabilities == Equity`` within tolerance. If they
   disagree the whole filing is untrustworthy -> ``unbalanced=True``, no values.
-- **Anchor / cross-check:** when ``FixedAssets`` is tagged, verify
-  ``TotalAssetsLessCurrentLiabilities == FixedAssets + NetCurrentAssets`` and
-  ``assets == FixedAssets + CurrentAssets``; on mismatch, suppress the ``assets``
-  and ``liabilities`` totals (the P&L and directly-tagged items still stand).
+- **Anchor:** when ``FixedAssets`` is tagged, verify
+  ``TotalAssetsLessCurrentLiabilities == FixedAssets + NetCurrentAssets``; on
+  mismatch the inputs are proven inconsistent, so EVERY derived balance item
+  (assets, liabilities, liabilities_current, short/long-term debt) is suppressed
+  — the P&L and directly-tagged equity/net_assets/cash still stand.
+- **Completeness:** the derived liability/debt block is emitted atomically, only
+  when BOTH the current (``CA − NCA``) and long-term (``TALCL − NetAssets``)
+  halves are derivable; if only one is, the whole block is withheld so the
+  engine's ``total_debt`` is never silently understated.
 
 ``assets`` is derived from ``TotalAssetsLessCurrentLiabilities + current
 liabilities`` (a robust structural anchor) rather than ``FixedAssets +
@@ -128,71 +133,58 @@ def map_ch_facts(flat: dict[str, list[dict]]) -> dict | None:
             "unbalanced": True,
         }
 
-    # Anchor: when FixedAssets is tagged, TALCL must reconcile to FA + NCA.
+    # Anchor: when FixedAssets is tagged, TALCL must reconcile to FA + NCA. On
+    # mismatch the balance-sheet inputs are proven inconsistent, so EVERY derived
+    # balance item is suppressed below (recorded per-key), keeping only the P&L
+    # and directly-tagged equity / net_assets / cash.
     suppress_balance = False
     if FA is not None and TALCL is not None and NCA is not None:
         if abs(TALCL - (FA + NCA)) > _tol(TALCL):
             suppress_balance = True
-            suppressed.append(("assets", "gate: TALCL != FixedAssets + NetCurrentAssets"))
-            suppressed.append(("liabilities", "gate: TALCL != FixedAssets + NetCurrentAssets"))
 
     NAeff = NA if NA is not None else E       # Primary guarantees NA == E when both present
 
-    # 4. Derivations — emit only when inputs present AND not gate-suppressed.
-    liabilities_current = None
-    if CA is not None and NCA is not None:
-        liabilities_current = CA - NCA
-        tag = "CurrentAssets − NetCurrentAssetsLiabilities (derived)"
-        emit("liabilities_current", liabilities_current, tag)
+    # 4. Derivations. The derived liability/debt block is emitted ATOMICALLY —
+    # all five items or none — and only when NEITHER integrity concern applies:
+    #   (a) suppress_balance — the FixedAssets reconciliation failed, so the
+    #       inputs are proven inconsistent (a bad NetCurrentAssets would poison
+    #       liabilities_current / total_debt / current_ratio downstream); and
+    #   (b) the liability picture is incomplete — the engine computes
+    #       total_debt = long_term_debt + short_term_debt, so emitting only one
+    #       half would silently UNDERSTATE liabilities (a wrong number). Emit the
+    #       block only when BOTH halves are derivable.
+    DERIVED_BALANCE = ("liabilities_current", "short_term_debt", "long_term_debt",
+                       "assets", "liabilities")
+    liabilities_current = (CA - NCA) if (CA is not None and NCA is not None) else None
+    long_term_debt = (TALCL - NAeff) if (TALCL is not None and NAeff is not None) else None
+
+    if suppress_balance:
+        for key in DERIVED_BALANCE:
+            suppressed.append((key, "gate: TALCL != FixedAssets + NetCurrentAssets"))
+    elif liabilities_current is None or long_term_debt is None:
+        missing = []
+        if liabilities_current is None:
+            missing.append("CurrentAssets/NetCurrentAssetsLiabilities")
+        if long_term_debt is None:
+            missing.append("TotalAssetsLessCurrentLiabilities/NetAssets")
+        reason = "incomplete liabilities (total_debt would understate): missing " + " + ".join(missing)
+        for key in DERIVED_BALANCE:
+            suppressed.append((key, reason))
+    else:
+        lc_tag = "CurrentAssets − NetCurrentAssetsLiabilities (derived)"
+        emit("liabilities_current", liabilities_current, lc_tag)
         # short_term_debt mirrors current liabilities so the engine's total_debt
         # (= long_term_debt + short_term_debt) reconstructs TOTAL liabilities —
         # the liabilities-basis leverage, consistent with the NO register.
-        emit("short_term_debt", liabilities_current, tag)
-    else:
-        suppressed.append(("liabilities_current",
-                           "missing CurrentAssets or NetCurrentAssetsLiabilities"))
-
-    long_term_debt = None
-    if TALCL is not None and NAeff is not None:
-        long_term_debt = TALCL - NAeff
+        emit("short_term_debt", liabilities_current, lc_tag)
         emit("long_term_debt", long_term_debt,
              "TotalAssetsLessCurrentLiabilities − NetAssets (derived)")
-    else:
-        suppressed.append(("long_term_debt", "missing TotalAssetsLessCurrentLiabilities "
-                                             "or NetAssets/Equity"))
-
-    # assets = TALCL + current liabilities (robust; NEVER FixedAssets + CurrentAssets,
-    # which understates when FixedAssets is untagged/dimensioned-away).
-    assets = None
-    if TALCL is not None and liabilities_current is not None:
-        assets = TALCL + liabilities_current
-        # Cross-check against FixedAssets + CurrentAssets when FixedAssets is tagged.
-        if FA is not None and CA is not None and abs(assets - (FA + CA)) > _tol(assets):
-            if not suppress_balance:
-                suppressed.append(("assets", "gate: assets != FixedAssets + CurrentAssets"))
-                suppressed.append(("liabilities", "gate: assets != FixedAssets + CurrentAssets"))
-            suppress_balance = True
-    if assets is not None and not suppress_balance:
-        emit("assets", assets, "TotalAssetsLessCurrentLiabilities + current liabilities (derived)")
-    elif assets is None:
-        suppressed.append(("assets", "missing TotalAssetsLessCurrentLiabilities / current liabilities"))
-
-    # liabilities (total) = current + long-term liabilities.
-    liabilities = None
-    if liabilities_current is not None and long_term_debt is not None:
-        liabilities = liabilities_current + long_term_debt
-    if liabilities is not None and not suppress_balance:
-        emit("liabilities", liabilities, "current + long-term liabilities (derived)")
-    elif liabilities is None:
-        suppressed.append(("liabilities", "missing current or long-term liabilities"))
-
-    # NO-I2 safety net: keep the engine's total_debt computable. If a total
-    # `liabilities` survived but `long_term_debt` did not, back it out from the
-    # current portion. (In the UK flow `liabilities` is only ever the sum of its
-    # two components, so this cannot fire; it guards future direct-liabilities tags.)
-    if "liabilities" in values and "long_term_debt" not in values and liabilities_current is not None:
-        emit("long_term_debt", values["liabilities"]["value"] - liabilities_current,
-             "liabilities − liabilities_current (derived)")
+        # assets = TALCL + current liabilities (robust; NEVER FixedAssets +
+        # CurrentAssets, which understates when FixedAssets is untagged).
+        emit("assets", TALCL + liabilities_current,
+             "TotalAssetsLessCurrentLiabilities + current liabilities (derived)")
+        emit("liabilities", liabilities_current + long_term_debt,
+             "current + long-term liabilities (derived)")
 
     return {
         "period_end": pe, "basis": "company", "currency": currency,

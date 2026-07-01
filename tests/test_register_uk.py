@@ -51,16 +51,46 @@ def test_micro_balance_sheet():   # frs105 02855129
 
 
 def test_negative_equity_distressed():   # 11515034
+    # CurrentAssets absent -> liabilities_current not derivable. long_term_debt
+    # (= TALCL - NetAssets = 13002) IS derivable, but emitting it alone would let
+    # the engine compute total_debt = 13002, understating true total liabilities.
+    # Per the completeness rule the whole derived balance block is suppressed;
+    # only directly-tagged equity/net_assets and the P&L survive.
     m = map_ch_facts(flat(TurnoverRevenue=0, ProfitLoss=0, NetCurrentAssetsLiabilities=-10541,
         TotalAssetsLessCurrentLiabilities=-10541, NetAssetsLiabilities=-23543, Equity=-23543))
     v = {k: m["values"][k]["value"] for k in m["values"]}
-    assert v["equity"] == -23543 and v["long_term_debt"] == 13002 and v["revenue"] == 0
+    assert v["equity"] == -23543 and v["net_assets"] == -23543 and v["revenue"] == 0
+    for key in ("long_term_debt", "liabilities", "liabilities_current",
+                "short_term_debt", "assets"):
+        assert key not in v
+    suppressed_keys = {k for k, _ in m["suppressed"]}
+    assert {"long_term_debt", "liabilities_current"} <= suppressed_keys
+    assert not m["unbalanced"]
 
 
 def test_unbalanced_filing_suppressed():   # crafted: NA != E beyond tol
     m = map_ch_facts(flat(NetAssetsLiabilities=1000, Equity=1200, CurrentAssets=5000,
         NetCurrentAssetsLiabilities=1200, TotalAssetsLessCurrentLiabilities=1000))
     assert m["unbalanced"] is True and m["values"] == {}
+
+
+def test_reconciliation_mismatch_suppresses_all_derived_balance():   # crafted
+    # Primary NA==E passes (1100==1100) but the Anchor reconciliation fails:
+    # TALCL 1200 != FixedAssets 1000 + NetCurrentAssets 100. The inputs are
+    # proven inconsistent, so EVERY derived balance item is suppressed — not just
+    # assets/liabilities. Directly-tagged equity/net_assets still stand; this is a
+    # partial suppression, not a whole-filing reject (unbalanced stays False).
+    m = map_ch_facts(flat(FixedAssets=1000, CurrentAssets=500, NetCurrentAssetsLiabilities=100,
+        TotalAssetsLessCurrentLiabilities=1200, NetAssetsLiabilities=1100, Equity=1100))
+    v = {k: m["values"][k]["value"] for k in m["values"]}
+    for key in ("assets", "liabilities", "liabilities_current",
+                "short_term_debt", "long_term_debt"):
+        assert key not in v
+    assert v["equity"] == 1100 and v["net_assets"] == 1100
+    suppressed_keys = {k for k, _ in m["suppressed"]}
+    assert {"assets", "liabilities", "liabilities_current",
+            "short_term_debt", "long_term_debt"} <= suppressed_keys
+    assert m["unbalanced"] is False
 
 
 def test_oim_from_ch_html_parses_micro():
