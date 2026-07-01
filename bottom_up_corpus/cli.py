@@ -33,6 +33,8 @@ from .registers.financials import (
     build_be_financials,
     build_be_financials_from_files,
     build_ch_financials,
+    build_ee_financials,
+    build_ee_financials_from_files,
     build_fi_financials,
     build_fi_financials_from_files,
     build_lu_financials_from_files,
@@ -524,8 +526,50 @@ def _register_specs(args: argparse.Namespace) -> list[dict]:
 
 def _cmd_register_financials(args: argparse.Namespace) -> int:
     cfg = _config(args)
-    if getattr(args, "limit", None) is not None and not getattr(args, "ch_bulk", None):
-        raise SystemExit("error: --limit requires --ch-bulk")
+    if getattr(args, "limit", None) is not None and not (
+        getattr(args, "ch_bulk", None)
+        or getattr(args, "ee_file", None)
+        or getattr(args, "ee_year", None)
+    ):
+        raise SystemExit("error: --limit requires --ch-bulk, --ee-file, or --ee-year")
+
+    # --- Estonia keyless path: elements CSV + metadata CSV (local files or bytes) ---
+    if getattr(args, "ee_file", None):
+        elem_path, meta_path = args.ee_file
+        rep = build_ee_financials_from_files(
+            elem_path, meta_path,
+            config=cfg,
+            write=args.write,
+            limit=getattr(args, "limit", None),
+        )
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- Estonia online path: keyless bulk download for a given year ---
+    if getattr(args, "ee_year", None):
+        rep = build_ee_financials(
+            args.ee_year,
+            fetcher=Fetcher(cfg),
+            config=cfg,
+            write=args.write,
+            limit=getattr(args, "limit", None),
+            elem_url=getattr(args, "ee_elem_url", None),
+            meta_url=getattr(args, "ee_meta_url", None),
+        )
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
 
     # --- Finland keyless path: one or more local PRH XBRL .xml files ---
     if getattr(args, "fi_file", None):
@@ -906,10 +950,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="one or more Finnish Y-tunnus values (FI, PRH open API, keyless)")
     rfsrc.add_argument("--lu-file", nargs="+", metavar="PATH", dest="lu_file",
                        help="one or more LBR eCDF XML files (LU, keyless parse)")
+    rfsrc.add_argument("--ee-file", nargs=2, metavar=("ELEM", "META"), dest="ee_file",
+                       help="EE Äriregister: elements CSV/zip + metadata CSV/zip (EE, keyless)")
+    rfsrc.add_argument("--ee-year", type=int, metavar="YYYY", dest="ee_year",
+                       help="EE Äriregister: download bulk CSVs for this year (EE, keyless online)")
+    rf.add_argument("--ee-elem-url", metavar="URL", dest="ee_elem_url", default=None,
+                    help="explicit elements-zip URL (--ee-year; RIK snapshot date rotates)")
+    rf.add_argument("--ee-meta-url", metavar="URL", dest="ee_meta_url", default=None,
+                    help="explicit metadata-zip URL (--ee-year; RIK snapshot date rotates)")
     rf.add_argument("--rcs", nargs="+", metavar="RCS", dest="rcs",
                     help="filter to these RCS numbers (--lu-file only, e.g. B60814)")
     rf.add_argument("--limit", type=int, default=None,
-                    help="cap number of entities processed (--ch-bulk only)")
+                    help="cap number of entities/reports processed (--ch-bulk, --ee-file, --ee-year)")
     rf.add_argument("--write", action="store_true", help="persist tables (else dry-run)")
     rf.set_defaults(func=_cmd_register_financials)
 
