@@ -66,7 +66,9 @@ _TAG_CONTEXT = f"{{{_NS_XBRLI}}}context"
 _TAG_PERIOD = f"{{{_NS_XBRLI}}}period"
 _TAG_END_DATE = f"{{{_NS_XBRLI}}}endDate"
 _TAG_INSTANT = f"{{{_NS_XBRLI}}}instant"
+_TAG_ENTITY = f"{{{_NS_XBRLI}}}entity"
 _TAG_SCENARIO = f"{{{_NS_XBRLI}}}scenario"
+_TAG_SEGMENT = f"{{{_NS_XBRLI}}}segment"
 _TAG_EXPLICIT = f"{{{_NS_XBRLDI}}}explicitMember"
 _TAG_UNIT = f"{{{_NS_XBRLI}}}unit"
 _TAG_MEASURE = f"{{{_NS_XBRLI}}}measure"
@@ -132,24 +134,41 @@ def _classify_context(ctx: ET.Element) -> "str | None":
 
     'None' means the context has dimensional members that are not the
     ConsolidatedSoloDimension — these contexts are ignored.
+
+    XBRL 2.1 §4.7.3 permits dimensional members in EITHER ``xbrli:scenario``
+    OR ``xbrli:segment``.  Both are checked so a fact dimensioned via segment
+    is never silently promoted to no-dim (false top-line data).
     """
     scenario = ctx.find(_TAG_SCENARIO)
-    if scenario is None or len(list(scenario)) == 0:
+    # XBRL 2.1: xbrli:segment is a child of xbrli:entity (which is itself a
+    # child of xbrli:context).  Search via the entity element.
+    entity = ctx.find(_TAG_ENTITY)
+    segment = entity.find(_TAG_SEGMENT) if entity is not None else None
+    scenario_children = list(scenario) if scenario is not None else []
+    segment_children = list(segment) if segment is not None else []
+
+    if not scenario_children and not segment_children:
         return "nodim"
 
-    # Scan for an explicit ConsolidatedSoloDimension member
-    for member in scenario.iter(_TAG_EXPLICIT):
-        dim_qname = member.get("dimension", "")
-        dim_local = dim_qname.split(":")[-1]
-        if dim_local == _DIM_SOLO_LOCAL:
-            mem_text = (member.text or "").strip()
-            mem_local = mem_text.split(":")[-1]
-            if mem_local == _MEM_SOLO:
-                return "solo"
-            if mem_local == _MEM_CONSOLIDATED:
-                return "consolidated"
+    # Scan BOTH containers for an explicit ConsolidatedSoloDimension member.
+    # A consolidated/solo member in segment is correctly classified, not silently
+    # treated as no-dim.
+    for container in (scenario, segment):
+        if container is None:
+            continue
+        for member in container.iter(_TAG_EXPLICIT):
+            dim_qname = member.get("dimension", "")
+            dim_local = dim_qname.split(":")[-1]
+            if dim_local == _DIM_SOLO_LOCAL:
+                mem_text = (member.text or "").strip()
+                mem_local = mem_text.split(":")[-1]
+                if mem_local == _MEM_SOLO:
+                    return "solo"
+                if mem_local == _MEM_CONSOLIDATED:
+                    return "consolidated"
 
-    # Some other dimension (e.g. typed member for board members) — skip
+    # Some other dimension (e.g. typed member for board members, or a segment-
+    # scoped extension dimension) — exclude from context selection
     return None
 
 

@@ -112,7 +112,9 @@ def map_fsa_facts(parsed: dict) -> dict:
     suppressed: list[tuple[str, str]] = []
 
     def emit(key: str, value: float, tag: str, label: str) -> None:
-        values[key] = {"value": value, "unit": "DKK", "label": label, "tag": tag}
+        # ÅRL §16 permits DK annual reports in EUR; use the detected currency
+        # (never hardcode "DKK" — a per-value unit mismatch is false data).
+        values[key] = {"value": value, "unit": currency, "label": label, "tag": tag}
 
     def suppress(key: str, reason: str) -> None:
         suppressed.append((key, reason))
@@ -268,7 +270,9 @@ _TAG_PERIOD = f"{{{_NS_XBRLI}}}period"
 _TAG_START = f"{{{_NS_XBRLI}}}startDate"
 _TAG_END = f"{{{_NS_XBRLI}}}endDate"
 _TAG_INSTANT = f"{{{_NS_XBRLI}}}instant"
+_TAG_ENTITY = f"{{{_NS_XBRLI}}}entity"
 _TAG_SCENARIO = f"{{{_NS_XBRLI}}}scenario"
+_TAG_SEGMENT = f"{{{_NS_XBRLI}}}segment"
 _TAG_UNIT = f"{{{_NS_XBRLI}}}unit"
 _TAG_MEASURE = f"{{{_NS_XBRLI}}}measure"
 _ATTR_NIL = f"{{{_NS_XSI}}}nil"
@@ -315,7 +319,15 @@ def parse_virk_esef_xml(xml_bytes: bytes) -> "dict[str, list[dict]]":
     for ctx in root.iter(_TAG_CTX):
         ctx_id = ctx.get("id", "")
         scenario = ctx.find(_TAG_SCENARIO)
-        if scenario is not None and len(list(scenario)) > 0:
+        # XBRL 2.1: xbrli:segment is inside xbrli:entity (a child of xbrli:context),
+        # not a direct child of xbrli:context itself.
+        entity = ctx.find(_TAG_ENTITY)
+        segment = entity.find(_TAG_SEGMENT) if entity is not None else None
+        # Treat the context as dimensioned (exclude from the no-dim index) when
+        # EITHER xbrli:scenario OR xbrli:segment has element children, so a fact
+        # dimensioned via segment cannot leak as a top-line value.
+        if (scenario is not None and len(list(scenario)) > 0) or \
+                (segment is not None and len(list(segment)) > 0):
             continue                       # dimensioned — exclude
         period = ctx.find(_TAG_PERIOD)
         if period is None:

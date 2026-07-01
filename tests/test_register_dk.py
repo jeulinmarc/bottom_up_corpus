@@ -403,7 +403,147 @@ def test_map_dk_esef_balance_gate_holds():
 
 
 # ===========================================================================
-# Task 5 — keyless Virk acquisition (virk_api.py)
+# Fix 1 -- dimension detectors must check xbrli:segment, not only xbrli:scenario
+# ===========================================================================
+
+# Minimal ESEF XML: real no-dim Assets=1_000_000 + segment-dimensioned Assets=999_999.
+# Parser must admit only the no-dim context; the segment-dimensioned fact must be
+# excluded so that flat["Assets"] has exactly one datapoint (value 1_000_000).
+_ESEF_SEGMENT_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl
+    xmlns:xbrli="http://www.xbrl.org/2003/instance"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:ifrs-full="https://xbrl.ifrs.org/taxonomy/2024-03-27/ifrs-full"
+    xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+    xmlns:iso4217="http://www.xbrl.org/2003/iso4217">
+
+  <!-- no-dimension instant context -->
+  <xbrli:context id="ctx_nodim">
+    <xbrli:entity><xbrli:identifier scheme="http://standards.iso.org/iso/17442">529900TESTLEI00000002</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period>
+  </xbrli:context>
+
+  <!-- segment-dimensioned context (ComponentsOfEquityAxis in xbrli:segment) -->
+  <xbrli:context id="ctx_seg">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://standards.iso.org/iso/17442">529900TESTLEI00000002</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="ifrs-full:ComponentsOfEquityAxis">ifrs-full:IssuedCapitalMember</xbrldi:explicitMember>
+      </xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period>
+  </xbrli:context>
+
+  <xbrli:unit id="DKK"><xbrli:measure>iso4217:DKK</xbrli:measure></xbrli:unit>
+
+  <!-- real top-line Assets in no-dim context -->
+  <ifrs-full:Assets contextRef="ctx_nodim" decimals="0" unitRef="DKK">1000000</ifrs-full:Assets>
+  <!-- segment-dimensioned Assets: excluded by the parser -->
+  <ifrs-full:Assets contextRef="ctx_seg" decimals="0" unitRef="DKK">999999</ifrs-full:Assets>
+</xbrli:xbrl>
+"""
+
+# Minimal FSA XML: real no-dim fsa:Assets=1_000_000 + segment-dimensioned
+# fsa:Assets=999_999. parse_fsa_facts must admit only the no-dim one.
+_FSA_SEGMENT_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl
+    xmlns:xbrli="http://www.xbrl.org/2003/instance"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:fsa="http://xbrl.dcca.dk/fsa"
+    xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+    xmlns:iso4217="http://www.xbrl.org/2003/iso4217">
+
+  <!-- no-dimension instant context -->
+  <xbrli:context id="ctx_nodim">
+    <xbrli:entity><xbrli:identifier scheme="http://cvr.dk/orgnr">99999999</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period>
+  </xbrli:context>
+
+  <!-- segment-dimensioned context (some extension dimension via xbrli:segment) -->
+  <xbrli:context id="ctx_seg">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://cvr.dk/orgnr">99999999</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="fsa:SomeDimension">fsa:SomeMember</xbrldi:explicitMember>
+      </xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period>
+  </xbrli:context>
+
+  <xbrli:unit id="DKK"><xbrli:measure>iso4217:DKK</xbrli:measure></xbrli:unit>
+
+  <!-- segment-dimensioned Assets listed FIRST in document order so the test
+       is not an accident of first-wins: it must be excluded regardless of order -->
+  <fsa:Assets contextRef="ctx_seg" decimals="0" unitRef="DKK">999999</fsa:Assets>
+  <!-- real Assets in no-dim context -->
+  <fsa:Assets contextRef="ctx_nodim" decimals="0" unitRef="DKK">1000000</fsa:Assets>
+</xbrli:xbrl>
+"""
+
+
+def test_parse_virk_esef_xml_excludes_segment_dimensioned_facts():
+    """Fix 1 (ESEF): a context dimensioned via xbrli:segment must be treated as
+    dimensioned and excluded. The segment-dimensioned Assets=999_999 must not
+    appear; only the no-dim Assets=1_000_000 is kept."""
+    from bottom_up_corpus.registers.concepts_dk import parse_virk_esef_xml
+
+    flat = parse_virk_esef_xml(_ESEF_SEGMENT_XML)
+    assets_pts = flat.get("Assets", [])
+    assert len(assets_pts) == 1, (
+        f"Expected 1 Assets datapoint (no-dim only), got {len(assets_pts)}: "
+        f"{[p['val'] for p in assets_pts]}"
+    )
+    assert assets_pts[0]["val"] == 1_000_000, (
+        f"Expected 1_000_000 (no-dim), got {assets_pts[0]['val']} "
+        "(segment-dimensioned 999_999 must be excluded)"
+    )
+
+
+def test_parse_fsa_facts_excludes_segment_dimensioned_facts():
+    """Fix 1 (FSA): a context dimensioned via xbrli:segment must be excluded.
+    The segment-dimensioned fsa:Assets=999_999 must not appear; only the
+    no-dim fsa:Assets=1_000_000 is in the facts dict."""
+    facts = parse_fsa_facts(_FSA_SEGMENT_XML)["facts"]
+    assert "Assets" in facts, "no-dim Assets must be present"
+    assert facts["Assets"] == 1_000_000, (
+        f"Expected 1_000_000 (no-dim), got {facts['Assets']} "
+        "(segment-dimensioned 999_999 must be excluded)"
+    )
+
+
+# ===========================================================================
+# Fix 2 -- value unit must follow detected currency, not hardcoded "DKK"
+# ===========================================================================
+
+def test_map_fsa_facts_unit_follows_currency_eur():
+    """Fix 2: when parse_fsa_facts detects EUR (ARL s.16), every emitted value's
+    unit must be 'EUR', not the literal 'DKK'."""
+    parsed = {"period_end": "2025-12-31", "currency": "EUR",
+              "facts": {"Assets": 500_000.0, "LiabilitiesAndEquity": 500_000.0,
+                        "Equity": 200_000.0}}
+    r = map_fsa_facts(parsed)
+    assert r["currency"] == "EUR"
+    for key, v in r["values"].items():
+        assert v["unit"] == "EUR", (
+            f"values[{key!r}]['unit'] == {v['unit']!r}; expected 'EUR' "
+            "(unit must follow detected currency, not hardcoded 'DKK')"
+        )
+
+
+def test_map_fsa_facts_unit_dkk_when_currency_dkk():
+    """Fix 2 non-regression: when currency is DKK, unit stays 'DKK'."""
+    parsed = {"period_end": "2025-12-31", "currency": "DKK",
+              "facts": {"Assets": 1_000.0, "LiabilitiesAndEquity": 1_000.0,
+                        "Equity": 400.0}}
+    r = map_fsa_facts(parsed)
+    for key, v in r["values"].items():
+        assert v["unit"] == "DKK", (
+            f"values[{key!r}]['unit'] == {v['unit']!r}; expected 'DKK'"
+        )
+
+
+# ===========================================================================
+# Task 5 -- keyless Virk acquisition (virk_api.py)
 # ===========================================================================
 
 import gzip as _gzip
