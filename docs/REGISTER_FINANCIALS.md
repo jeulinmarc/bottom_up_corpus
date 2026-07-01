@@ -2,9 +2,10 @@
 
 `bottom_up_corpus/registers/` ingests **open-data statutory accounts** from national
 business registers and writes them in the same curated schema as the SEC and EU pillars.
-This document covers the purpose, source, schema, honest caveats, and CLI for three
+This document covers the purpose, source, schema, honest caveats, and CLI for five
 registers: **Norway's Brønnøysund Register Centre (Brreg)**, **UK Companies House**,
-and **Belgium's BNB Central Balance Sheet Office (CBSO)**.
+**Belgium's BNB Central Balance Sheet Office (CBSO)**, **Luxembourg's LBR/STATEC
+Centrale des bilans**, and **Finland's PRH avoindata XBRL platform**.
 
 See also: [`FINANCIALS.md`](FINANCIALS.md) (the SEC/US-GAAP pillar that defines the
 shared schema and derived-metrics engine) and [`EU_FINANCIALS.md`](EU_FINANCIALS.md)
@@ -1107,11 +1108,359 @@ See also: [NO (Brreg)](#source--brreg-regnskapsregisteret-norway),
 
 ---
 
+## Source — Luxembourg LBR/STATEC Centrale des bilans (eCDF)
+
+Luxembourg's **Centrale des bilans** is operated jointly by the LBR (Luxembourg Business
+Registers) and STATEC. Annual statutory accounts are filed in the **eCDF (Electronic
+Common Data Format)** schema — a bespoke XML format designed for Luxembourg GAAP. It is
+**not XBRL**. STATEC publishes quarterly bulk dumps of all filed accounts on
+**data.public.lu** under a **CC-BY-SA licence**:
+
+```
+https://download.data.public.lu/resources/donnees-comptes-annuels/
+<date>T000000/comptes-annuels-<YYYY>-Q<N>.xml
+```
+
+**No API key, account, or registration is required.** Each quarterly file is a single
+eCDF XML document containing all declarers for that period. The parser
+(`registers/lu_ecdf.py`) uses **stdlib `xml.etree.ElementTree` only — no Arelle, no
+taxonomy bundle**. The eCDF encoding is **ISO-8859-15**; the parser detects the encoding
+from the XML declaration before transcoding to UTF-8 for `ElementTree`.
+
+The stable **eCDF numeric code** (`<Field ecdf="NNN">`) is the semantic anchor. Codes
+are stable across taxonomy versions (with version-specific exceptions noted below);
+meaning lives in the code, not the element name.
+
+Acquisition is **bulk-scan only**: one quarterly file per run, no per-entity API.
+History reaches approximately **14 years (2012 onwards)**, split across two taxonomy
+versions.
+
+### Why LU is rich — borrowings-based leverage
+
+Like BE, LU eCDF tags **real financial borrowings** disaggregated by instrument and
+maturity, so:
+
+- **`total_debt`** = financial borrowings (bonds + bank), not total liabilities
+- **`debt_to_equity`** and **`debt_to_assets`** are **borrowings-based gearing**, not
+  liabilities-based approximations
+
+This is qualitatively the same level as the BE register — and a materially more
+informative metric than the liabilities-based approximation produced for NO and UK.
+The `source` field (`"lbr"` vs `"brreg"` / `"companies_house"` / `"bnb"`) distinguishes
+the debt-basis regime in every output row. **Never compare `debt_to_equity` from a LU
+row to a NO or UK row without first confirming that both rest on the same debt basis.**
+The `source` field is the guard.
+
+Beyond leverage, the LU pack also maps: `revenue` (eCDF 701), `participation_income`
+(eCDF 715, holding-company dividend and distribution income), `net_income`, `income_tax`,
+and `interest_expense`. The ~14-year depth and SOPARFI breadth make this register
+particularly useful for Luxembourg holdco credit analysis.
+
+## Schema — `data/financials_register/<rcs>.jsonl`
+
+Output follows the same per-period row model as the other registers and the SEC/EU
+pillars (see [`FINANCIALS.md`](FINANCIALS.md) for the full curated-concepts definition):
+
+| Column | Value |
+|---|---|
+| `entity_id` | RCS number (verbatim string, e.g. `"B60814"`) |
+| `lei` | GLEIF LEI if resolved; `null` for the keyless `--lu-file` path |
+| `country` | `"LU"` |
+| `source` | `"lbr"` |
+| `basis` | `"company"` (statutory individual accounts; consolidated detection deferred) |
+| `fy` | Fiscal year (integer, derived from `period_end`) |
+| `frequency` | `"annual"` |
+| `currency` | Reporting currency (virtually always `"EUR"`) |
+| `period_end` | ISO-8601 date string (from the eCDF `<EndDate>` element) |
+| `publication_date` | `null` (not exposed by the bulk XML) |
+
+The concept pack mapped from the eCDF codes (for a full `CA_BILAN` declaration):
+
+| Curated key | eCDF code(s) | Notes |
+|---|---|---|
+| `assets` | 201 | Total balance-sheet assets (primary gate anchor) |
+| `cash` | 197 | Cash and cash equivalents |
+| `equity` | 301 | Shareholders' equity |
+| `provisions` | 331 | Provisions |
+| `liabilities` | 435 (2016+) / 339 (2012) | Total liabilities (version-driven) |
+| `net_result_bs` | 321 | Period result on the balance sheet (gate (c) cross-check anchor) |
+| `revenue` | 701 | Turnover (full `CA_BILAN` only; see Declaration Types) |
+| `participation_income` | 715 | Income from equity participations (holdco dividend income) |
+| `net_income` | 669 (2016+) / 639−735 (2012) | Final net result — **never eCDF 667** |
+| `income_tax` | 635 (signed) | Tax charge (positive = expense; 2016+ sign convention) |
+| `interest_expense` | 627 (abs) | Interest expense (absolute value applied in both versions) |
+| `long_term_debt` | derived | Sum of LT borrowings tranches; emitted only when cross-checked |
+| `short_term_debt` | derived | Sum of ST borrowings tranches; emitted only when cross-checked |
+
+Each `kind="reported"` row carries the eCDF code selector as its `tag`
+(e.g. `"ecdf:669"`, `"ecdf:443+449+359"`), so downstream consumers can inspect the
+exact code used.
+
+The derived block produced from this pack (for a full filer) includes:
+
+- **Aggregates:** `total_debt` (borrowings), `net_debt`, `net_cash`, `working_capital`,
+  `invested_capital`
+- **Profitability:** `net_margin`, `roe`, `roa`, `interest_coverage`
+- **Leverage / liquidity:** `debt_to_equity` (borrowings), `debt_to_assets` (borrowings),
+  `current_ratio`, `quick_ratio`, `cash_ratio`
+- **Efficiency:** `asset_turnover`
+
+EBITDA and EBITDA-dependent metrics are not produced (no D&A concept in the eCDF
+schema). There is no cash-flow statement in the eCDF schema, so `free_cash_flow`,
+`cfo_to_debt`, `fcf_to_debt`, and `net_debt_to_ebitda` are not emitted.
+
+A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
+processed: `status="ok"` with a period count, `"no-financials"` (no usable values after
+gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
+exception). Suppressed items and their reasons are recorded in the `suppressed` list.
+
+## The confidence gate — no false data
+
+**Governing principle:** a number known to be wrong must never be emitted; a missing
+number is strictly better than a wrong one. The LU eCDF model has three structural traps
+that require precise handling, in addition to the standard primary balance-sheet gate.
+
+### Two taxonomy versions — dispatch before any code lookup
+
+eCDF declarations exist in two taxonomy versions that differ on the debt codes, the
+total-liabilities code, and the net-income code:
+
+| Feature | 2012 taxonomy | 2016+ taxonomy ("2022") |
+|---|---|---|
+| Total liabilities code | 339 | 435 |
+| Bonds / debentures code | 341 | 437 |
+| Net income code | 639 − 735 | 669 |
+| P&L sign convention | All unsigned positive | Expenses stored negative |
+| Version-exclusive codes | — | 669, 435, 437 |
+
+**Detection:** if any version-exclusive 2016+ code (`669`, `435`, or `437`) is present
+in the declaration's fields, the taxonomy is 2016+; otherwise 2012. Keying only off
+`669` (a P&L code) would misread a 2016+ balance-sheet declaration filed without a P&L
+as 2012, and therefore read the wrong debt and liabilities codes. All three
+version-exclusive codes are checked together.
+
+### Primary gate (a): `201 == 405`
+
+Total assets (`ecdf 201`) and total passif (`ecdf 405`) are independently tagged. Under
+LU-GAAP, passif = equity + provisions + liabilities — a BE-GAAP-like structure where
+provisions sit between equity and liabilities. If they disagree beyond
+`max(2 EUR, 0.5% of the larger figure)`, the **entire filing is rejected**:
+`status="unbalanced"`, no values emitted. A balance sheet that does not close is
+untrustworthy by construction.
+
+### Structural gate (b): passif decomposition
+
+The passif decomposes as equity (301) + provisions (331) + liabilities (435 or 339,
+version-driven) + result carried forward / minority (403). The engine checks:
+
+```
+301 + 331 + (435|339) + 403 == 405
+```
+
+Absent lines read as 0 (genuine zeros in LU-GAAP — a missing component means the line
+is zero, not unknown). On failure, every passif-derived value — `equity`, `provisions`,
+`liabilities`, `net_result_bs`, and the entire debt block — is suppressed.
+
+### The `667`-vs-`669` net-income trap (2016+ only)
+
+eCDF 2016+ distinguishes two closely-numbered result lines:
+
+- **eCDF 667**: result *after income tax but before other taxes* — a pre-final subtotal
+- **eCDF 669**: the **FINAL** net result (= 667 + 637, where 637 is other taxes)
+
+**Net income is always `669` — never `667`.** If a 2016+ declaration carries `667`
+but not `669`, the engine suppresses `net_income` and records the reason precisely
+(`"667 present but 669 absent — refusing to fall back to 667"`). There is no silent
+fallback to the pre-other-taxes figure.
+
+For 2012 declarations the final result is `639` (profit) − `735` (loss); either may be
+absent (reading as 0).
+
+### Signed P&L convention (2016+ only)
+
+The 2016+ P&L stores expenses as negative values. The engine normalises before emission:
+
+- `interest_expense` = `abs(ecdf 627)` — always positive, both versions
+- `income_tax` = `−ecdf 635` — positive = expense, negative = benefit (2016+ only;
+  2012 is unsigned and taken as-is)
+
+### BS/P&L cross-check gate (c)
+
+When a balance-sheet and a P&L declaration are merged for the same period, the engine
+cross-checks:
+
+```
+321 (BS net result) == net_income (P&L final result)
+```
+
+A mismatch beyond tolerance signals likely mismatched declarations (different periods or
+filing versions). `net_income` is suppressed with the mismatch reason recorded; the
+actif/passif and other directly-tagged values still stand.
+
+### Financial-debt cross-check — the borrowings guarantee
+
+The LT + ST maturity tranches are cross-checked against the independently-recorded
+bonds + bank borrowings aggregate (a different set of eCDF codes):
+
+```
+sum(ST tranches) + sum(LT tranches) == bonds (437|341) + bank (355)
+```
+
+Because the aggregate and the maturity split are separate rubrics in the eCDF document,
+this is a **genuinely independent cross-check**. The split is emitted **atomically**
+only when it passes: if the reconciliation fails, **neither** `long_term_debt` nor
+`short_term_debt` is emitted, and the engine falls back to the liabilities-based
+`liabilities` pack member rather than emit a possibly-wrong borrowings figure.
+
+## Declaration types and coverage
+
+The LBR accepts six declaration types: three balance-sheet types (full / abridged /
+SOPARFI), each optionally paired with a matching P&L declaration. The balance-sheet
+type determines what can be derived:
+
+| BS declaration type | Revenue | Debt breakdown |
+|---|---|---|
+| `CA_BILAN` (full accounts) | Yes (ecdf 701) | Yes (when cross-check passes) |
+| `CA_BILANABR` (abridged accounts) | No (omitted by filer) | No (aggregate liabilities only) |
+| `CA_BILANSOPARFI` (SOPARFI holdco) | No (participation income instead) | No (aggregate liabilities only) |
+
+For abridged and SOPARFI types, `revenue` and the `long_term_debt`/`short_term_debt`
+split are always suppressed — the latter because those declaration types report only
+aggregate liabilities, not the borrowings isolation the cross-check requires. The
+aggregate `liabilities` field still provides a liabilities-based leverage input.
+
+## The `basis` field — LU
+
+All LU rows carry `basis="company"`. eCDF declarations are statutory individual
+accounts for the Luxembourg legal entity. Consolidated-account detection is deferred
+to a follow-up PR.
+
+Note that `basis="company"` rows from the LBR register and `basis="consolidated"` rows
+from the EU ESEF pillar (`data/financials_eu/`) are already separated by output
+directory. They must **not** be merged without an explicit accounting and scope
+reconciliation: LU-GAAP differs from IFRS on multiple dimensions, and the obligor
+populations overlap only partly.
+
+## Identity — RCS and LEI
+
+**RCS number (`entity_id`):** The Luxembourg *Registre de Commerce et des Sociétés*
+(RCS) number is the canonical entity identifier, in the format `B<digits>` (e.g.
+`"B60814"`). It is read verbatim from the `<RcsNumber>` element in the eCDF document;
+no normalisation or digit-stripping is applied.
+
+**LEI resolution (library level):** When a spec carries a GLEIF LEI, the engine calls
+`GET https://api.gleif.org/api/v1/lei-records/{lei}` and extracts
+`entity.registeredAs`. This is accepted as the RCS number **only when**
+`entity.legalAddress.country == "LU"` — there is no guess, no fuzzy match. A LEI from
+a non-Luxembourg jurisdiction returns `status="unresolved"` in the coverage report. For
+the keyless `--lu-file` path, no GLEIF call is made and `lei` is `null` in every output
+row.
+
+## CLI usage — LU (`--lu-file`)
+
+```bash
+# dry-run (default): parse one quarterly bulk XML, print summary, nothing written
+bottom_up_corpus register-financials --lu-file comptes-annuels-2023-Q4.xml
+
+# filter to specific RCS numbers (dry-run)
+bottom_up_corpus register-financials --lu-file comptes-annuels-2023-Q4.xml \
+  --rcs B60814 B138357
+
+# write data/financials_register/<rcs>.jsonl + coverage report
+bottom_up_corpus register-financials --lu-file comptes-annuels-2023-Q4.xml --write
+
+# multiple quarterly files in one pass (builds ~14yr history)
+bottom_up_corpus register-financials \
+  --lu-file comptes-annuels-2022-Q4.xml comptes-annuels-2023-Q4.xml --write
+```
+
+`--write` is the only side-effecting flag. Omitting it is a safe dry-run that prints
+entity / period / unbalanced counts without touching disk. `--rcs` accepts one or more
+RCS strings and is available for `--lu-file` only; it filters within an already-
+downloaded file. No API key, environment variable, or registration of any kind is
+required.
+
+Bulk files are published at
+`https://download.data.public.lu/resources/donnees-comptes-annuels/` (CC-BY-SA). A
+single quarterly file covers all declarers for that period; there is no per-entity API.
+
+## Honest caveats — LU
+
+### Universe — SOPARFI and commercial entities only; CSSF/CAA-regulated entities excluded
+
+The LBR Centrale des bilans covers the **SOPARFI holdco and ordinary commercial**
+universe — entities incorporated under Luxembourg commercial law that are required to
+file statutory accounts at the LBR. This is credit-relevant for:
+
+- Luxembourg-incorporated **holding companies (SOPARFIs)** that issue bonds or
+  guarantee group debt
+- Ordinary **commercial and industrial entities** operating in Luxembourg
+
+**CSSF/CAA-supervised entities are excluded.** Banks, investment funds, insurance
+companies, and authorised securitisation vehicles (SPVs under the 2004 Securitisation
+Law) report to their respective supervisors (CSSF or CAA) rather than filing at the
+LBR — they do **not** appear in the Centrale des bilans data. Do not use this register
+to retrieve financials for Luxembourg-domiciled banks, funds, or regulated insurers.
+Those entities are simply absent.
+
+The practical consequence: the LU register has a **SOPARFI-heavy, debt-structure-
+relevant** credit profile — particularly useful for holdco leverage analysis — but is
+not the source for the regulated financial issuers that dominate IFRS-consolidated ESEF
+filings.
+
+### Leverage is borrowings-based (but compare with source-awareness)
+
+The LU register provides genuine financial-borrowings data when the full `CA_BILAN`
+type is present and the maturity cross-check passes. The derived `total_debt`,
+`debt_to_equity`, `debt_to_assets`, and `net_debt` all rest on this borrowings basis.
+However:
+
+- When the cross-check fails or the declaration type is abridged/SOPARFI, the engine
+  falls back to liabilities-based leverage from the `liabilities` pack member. The
+  `source` field (`"lbr"`) and per-row `tag` identify which basis applies to a given row.
+- **Never compare leverage metrics across registers without checking `source`:** a
+  `debt_to_equity` from `source="lbr"` (borrowings) is not directly comparable to one
+  from `source="brreg"` or `source="companies_house"` (liabilities-based).
+
+### LU-GAAP statutory — separate from ESEF
+
+LBR/STATEC filings follow **LU-GAAP** (Luxembourg Generally Accepted Accounting
+Principles). Luxembourg listed groups also file **ESEF consolidated accounts** under
+IFRS — those are ingested by the EU ESEF pillar (`data/financials_eu/`) and must
+**never be merged** with LBR rows: the GAAP regime, consolidation scope, and obligor
+population differ. The output directories (`data/financials_register/` vs
+`data/financials_eu/`) enforce this separation.
+
+### Bulk-scan only; no per-entity API
+
+There is no per-entity API for the Centrale des bilans. Acquisition always requires
+downloading a quarterly bulk XML (typically 100–400 MB per file). The `--rcs` flag
+narrows processing within a downloaded file, but the download itself is always bulk.
+
+### Annual accounts only
+
+The Centrale des bilans holds statutory annual accounts. There are no quarterly or
+semi-annual periods. `frequency` is always `"annual"`.
+
+### Consolidated-model detection deferred
+
+All rows carry `basis="company"`. eCDF declarations are statutory individual accounts;
+consolidated-model detection is deferred to a follow-up PR.
+
+### One period per entity per quarterly file
+
+Each quarterly bulk file contains the most recently filed accounts as of the cut date —
+one period per entity per file. Multi-year history (~14yr from 2012) requires iterating
+multiple quarterly archives.
+
+---
+
 ## Out of scope — future PRs
 
 The current implementation covers **Norway (Brreg)** (JSON, no XBRL), **UK Companies
 House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), **Belgium BNB CBSO**
 (dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path), and
+**Luxembourg LBR/STATEC** (custom eCDF XML, stdlib only, keyless `--lu-file` path), and
 **Finland PRH** (dimensional XBRL, stdlib only; fully keyless `--fi-file` +
 `--fi-businessid` paths).
 
@@ -1132,6 +1481,17 @@ For the **UK pillar** specifically, the following are deferred to follow-up PRs:
 - **Consolidated-accounts detection** (distinguishing group accounts from
   legal-entity-only accounts within the iXBRL filing)
 - **LEI resolution** (populating `lei` for GB entities via GLEIF `registeredAs`)
+
+For the **LU pillar** specifically, the following are deferred to follow-up PRs:
+
+- **Consolidated-model detection** (all rows currently carry `basis="company"`; eCDF
+  does not expose a standard consolidation indicator, so distinguishing individual from
+  consolidated filings requires an additional filing-type heuristic)
+- **LEI resolution on the `--lu-file` path** (the bulk XML carries no LEI data; a
+  targeted GLEIF lookup would need to be added at the CLI level)
+- **Multi-quarter iteration tooling** (building the full ~14yr history requires
+  downloading and iterating multiple quarterly archives; the library accepts multiple
+  `--lu-file` paths but the download loop is a maintainer step)
 
 Coverage enrichment for the NO register (e.g. mapping orgnr to LEI for the full Brreg
 population) is also deferred.

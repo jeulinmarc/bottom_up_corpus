@@ -35,6 +35,7 @@ from .registers.financials import (
     build_ch_financials,
     build_fi_financials,
     build_fi_financials_from_files,
+    build_lu_financials_from_files,
     build_register_financials,
 )
 from .openfigi import coverage_hint, map_identifiers
@@ -598,6 +599,20 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
             print(f"  coverage: {rep['coverage_path']}")
         return 0
 
+    # --- Luxembourg keyless path: one or more local eCDF XML files ---
+    if getattr(args, "lu_file", None):
+        rcs_filter = set(args.rcs) if getattr(args, "rcs", None) else None
+        rep = build_lu_financials_from_files(
+            args.lu_file, config=cfg, write=args.write, rcs_filter=rcs_filter)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
     # --- Norway / LEI path ---
     rep = build_register_financials(
         _register_specs(args), fetcher=Fetcher(cfg), config=cfg, write=args.write)
@@ -889,6 +904,10 @@ def build_parser() -> argparse.ArgumentParser:
     rfsrc.add_argument("--fi-businessid", nargs="+", metavar="Y_TUNNUS",
                        dest="fi_businessid",
                        help="one or more Finnish Y-tunnus values (FI, PRH open API, keyless)")
+    rfsrc.add_argument("--lu-file", nargs="+", metavar="PATH", dest="lu_file",
+                       help="one or more LBR eCDF XML files (LU, keyless parse)")
+    rf.add_argument("--rcs", nargs="+", metavar="RCS", dest="rcs",
+                    help="filter to these RCS numbers (--lu-file only, e.g. B60814)")
     rf.add_argument("--limit", type=int, default=None,
                     help="cap number of entities processed (--ch-bulk only)")
     rf.add_argument("--write", action="store_true", help="persist tables (else dry-run)")

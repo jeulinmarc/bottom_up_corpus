@@ -1,11 +1,13 @@
 """Resolve register specs to canonical entity keys:
-- Norway:   orgnr directly, or LEI -> GLEIF registeredAs -> orgnr (digit-strip).
-- UK:       ch_number directly (verbatim), or LEI -> GLEIF registeredAs -> ch_number
-            (verbatim, only when legalAddress.country == "GB").
-- Belgium:  be_number directly (KBO, 10 digits), or LEI -> GLEIF registeredAs ->
-            be_number (only when legalAddress.country == "BE").
-- Finland:  business_id directly (Y-tunnus NNNNNNN-N), or LEI -> GLEIF registeredAs ->
-            business_id (only when legalAddress.country == "FI").
+- Norway:      orgnr directly, or LEI -> GLEIF registeredAs -> orgnr (digit-strip).
+- UK:          ch_number directly (verbatim), or LEI -> GLEIF registeredAs -> ch_number
+               (verbatim, only when legalAddress.country == "GB").
+- Belgium:     be_number directly (KBO, 10 digits), or LEI -> GLEIF registeredAs ->
+               be_number (only when legalAddress.country == "BE").
+- Finland:     business_id directly (Y-tunnus NNNNNNN-N), or LEI -> GLEIF registeredAs ->
+               business_id (only when legalAddress.country == "FI").
+- Luxembourg:  rcs directly, or LEI -> GLEIF registeredAs -> rcs
+               (only when legalAddress.country == "LU").
 """
 from __future__ import annotations
 import re
@@ -29,6 +31,15 @@ def _norm_kbo(s: str) -> str:
 def _norm_ytunnus(s: str) -> str:
     """Strip surrounding whitespace; keep Y-tunnus (NNNNNNN-N) format as-is."""
     return s.strip()
+
+
+def _norm_rcs(s: str) -> str:
+    """Strip whitespace and internal spaces/dots, uppercase.
+
+    LU RCS numbers are ``B`` + digits (e.g. ``"B 60814"`` -> ``"B60814"``).
+    The ``B`` prefix is kept; digits are never zero-padded.
+    """
+    return re.sub(r"[\s.]+", "", s).upper()
 
 
 def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
@@ -58,9 +69,15 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "lei": spec.get("lei"), "name": spec.get("name", ""),
                         "country": "FI", "status": "ok"})
             continue
-        # --- LEI -> GLEIF path (NO, GB, BE, FI) ---
+        # --- LU direct path: rcs provided ---
+        if spec.get("rcs"):
+            out.append({"rcs": _norm_rcs(str(spec["rcs"])),
+                        "lei": spec.get("lei"), "name": spec.get("name", ""),
+                        "country": "LU", "status": "ok"})
+            continue
+        # --- LEI -> GLEIF path (NO, GB, BE, FI, LU) ---
         lei = spec.get("lei")
-        orgnr = ch_number = be_number = business_id = name = country = None
+        orgnr = ch_number = be_number = business_id = rcs = name = country = None
         if lei:
             try:
                 raw = fetcher.get_json(_GLEIF.format(lei=lei))
@@ -78,6 +95,8 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                 be_number = _norm_kbo(str(ra))
             elif country == "FI" and ra:
                 business_id = _norm_ytunnus(str(ra))
+            elif country == "LU" and ra:
+                rcs = _norm_rcs(str(ra))
         if orgnr:
             out.append({"orgnr": orgnr, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
@@ -89,6 +108,9 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "country": country or "", "status": "ok"})
         elif business_id:
             out.append({"business_id": business_id, "lei": lei, "name": name or spec.get("name", ""),
+                        "country": country or "", "status": "ok"})
+        elif rcs:
+            out.append({"rcs": rcs, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
         else:
             out.append({"orgnr": None, "lei": lei, "name": name or spec.get("name", ""),
