@@ -5,6 +5,7 @@ import pytest
 
 from bottom_up_corpus.registers.lu_ecdf import parse_lu_declarers
 from bottom_up_corpus.registers.concepts_lu import map_lu_entity
+from bottom_up_corpus.financials import compute_derived
 
 FIXTURES = Path("tests/fixtures/lu")
 FERRERO = FIXTURES / "ferrero_b60814_full_2022.xml"
@@ -167,16 +168,19 @@ class TestFerreroMap:
         r = self._res()
         assert _val(r, "interest_expense") == pytest.approx(153_611_574, abs=0.01)
 
-    def test_financial_debt_reconciles(self):
-        # borrowings-based: 437 (bonds 3.17bn) + 355 (bank 1.37bn); ST+LT == total.
+    def test_debt_split_reconciles_and_feeds_engine_total_debt(self):
+        # Engine-consumed maturity split: LT (443+449+359) & ST (441+447+357).
+        # It reconciles with the bonds+bank borrowings (437 3.17bn + 355 1.37bn =
+        # 4.54bn), so both halves are emitted. NO dead financial_debt key.
         r = self._res()
-        fd = _val(r, "financial_debt")
-        st = _val(r, "short_term_debt")
         lt = _val(r, "long_term_debt")
-        assert fd == pytest.approx(4_540_773_958, abs=0.01)
+        st = _val(r, "short_term_debt")
         assert lt == pytest.approx(4_137_307_291, abs=0.01)
         assert st == pytest.approx(403_466_667, abs=0.01)
-        assert st + lt == pytest.approx(fd, abs=0.01)
+        assert "financial_debt" not in r["values"]
+        # The engine (compute_derived) builds total_debt = LT + ST = borrowings.
+        derived = compute_derived(r["values"], currency="EUR")
+        assert derived["total_debt"]["value"] == pytest.approx(4_540_773_958, abs=0.01)
 
 
 class TestKrokusMap:
@@ -191,12 +195,13 @@ class TestKrokusMap:
     def test_assets(self):
         assert _val(self._res(), "assets") == pytest.approx(2_182_897.55, abs=0.01)
 
-    def test_financial_debt_2012_codes(self):
-        # 2012: financial_debt = 341 + 355; LT = 347+353+359, ST = 351+357 (=0).
+    def test_debt_split_2012_codes(self):
+        # 2012 codes: LT = 347+353+359, ST = 351+357 (=0); reconciles with the
+        # 341+355 borrowings total (1,576,436.52). NO dead financial_debt key.
         r = self._res()
-        assert _val(r, "financial_debt") == pytest.approx(1_576_436.52, abs=0.01)
         assert _val(r, "long_term_debt") == pytest.approx(1_576_436.52, abs=0.01)
         assert _val(r, "short_term_debt") == pytest.approx(0.0, abs=0.01)
+        assert "financial_debt" not in r["values"]
 
     def test_net_income_639_minus_735(self):
         r = self._res()
@@ -226,9 +231,11 @@ class TestSilversteinMap:
     def test_debt_block_suppressed_on_abridged(self):
         # Abridged gives only aggregate liabilities (435), not borrowings.
         r = self._res()
-        for key in ("financial_debt", "short_term_debt", "long_term_debt"):
+        for key in ("short_term_debt", "long_term_debt"):
             assert key not in r["values"]
             assert key in _suppressed_keys(r)
+        # No dead financial_debt key is emitted.
+        assert "financial_debt" not in r["values"]
 
     def test_net_income_from_669_not_667(self):
         # 667 = -39,414.70 (pre other-taxes) must NEVER be used; 669 = -44,229.70.
@@ -253,9 +260,11 @@ class TestSyntheticGates:
         assert r["values"] == {}
         assert any(k == "__all__" for k, _ in r["suppressed"])
 
-    def test_debt_maturity_mismatch_emits_only_total(self):
-        # Full v2022 BS that balances (primary + structural), financial_debt
-        # formable, but ST+LT (300) != financial_debt (4000) -> only the total.
+    def test_debt_maturity_mismatch_suppresses_whole_block(self):
+        # Full v2022 BS that balances (primary + structural), borrowings formable
+        # (437+355 = 4000), but the maturity split ST+LT (300) != 4000 -> the
+        # split is unconfirmable, so the WHOLE debt block is suppressed. There is
+        # NO financial_debt fallback (the engine has no such key).
         decls = [{
             "type": "CA_BILAN", "model": "2", "currency": "EUR",
             "period_end": "2022-12-31",
@@ -263,13 +272,57 @@ class TestSyntheticGates:
                 201: 10_000.0, 405: 10_000.0,   # primary balances
                 301: 4_000.0, 435: 6_000.0,     # structural: 4000+0+6000+0 == 10000
                 669: 0.0,                        # marks the 2022 taxonomy
-                437: 3_000.0, 355: 1_000.0,      # financial_debt = 4000
+                437: 3_000.0, 355: 1_000.0,      # borrowings = 4000
                 441: 100.0, 443: 200.0,          # ST=100, LT=200 -> 300 != 4000
             },
         }]
         r = map_lu_entity(decls)
-        assert _val(r, "financial_debt") == pytest.approx(4_000.0, abs=0.01)
+        assert "financial_debt" not in r["values"]
         assert "short_term_debt" not in r["values"]
         assert "long_term_debt" not in r["values"]
         assert "short_term_debt" in _suppressed_keys(r)
         assert "long_term_debt" in _suppressed_keys(r)
+
+    def test_version_detection_uses_version_exclusive_codes(self):
+        # A 2022 balance sheet filed WITHOUT any P&L (no 669) must still read as
+        # 2022 via the version-exclusive BS codes 435/437, so the 2022 debt codes
+        # (437/355 bonds+bank, 441/447/357 ST, 443/449/359 LT) are used.
+        decls = [{
+            "type": "CA_BILAN", "model": "2", "currency": "EUR",
+            "period_end": "2022-12-31",
+            "fields": {
+                201: 10_000.0, 405: 10_000.0,   # primary balances
+                301: 4_000.0, 435: 6_000.0,     # structural: 4000+0+6000+0 == 10000
+                437: 3_000.0, 355: 1_000.0,      # 2022 bonds+bank = 4000 (no 669)
+                441: 1_000.0, 443: 3_000.0,      # ST=1000, LT=3000 -> 4000 == 4000
+            },
+        }]
+        r = map_lu_entity(decls)
+        # 435 is the 2022 total-liabilities code -> emitted as liabilities.
+        assert _val(r, "liabilities") == pytest.approx(6_000.0, abs=0.01)
+        # 2022 debt codes reconcile -> split emitted (a 2012 misread would not).
+        assert _val(r, "long_term_debt") == pytest.approx(3_000.0, abs=0.01)
+        assert _val(r, "short_term_debt") == pytest.approx(1_000.0, abs=0.01)
+
+    def test_map_lu_entity_uses_only_latest_period(self):
+        # Two periods of ONE RCS passed together: the guard keeps only the LATEST
+        # period_end. The older period is listed LAST (so a naive last-wins merge
+        # would apply it) and is internally unbalanced; the latest period balances.
+        latest = {
+            "type": "CA_BILAN", "model": "2", "currency": "EUR",
+            "period_end": "2022-12-31",
+            "fields": {201: 10_000.0, 405: 10_000.0, 301: 10_000.0},
+        }
+        older = {
+            "type": "CA_BILAN", "model": "2", "currency": "EUR",
+            "period_end": "2021-12-31",
+            "fields": {201: 8_000.0, 405: 3_000.0, 301: 3_000.0},
+        }
+        r = map_lu_entity([latest, older])
+        assert r["unbalanced"] is False
+        assert r["period_end"] == "2022-12-31"
+        assert _val(r, "assets") == pytest.approx(10_000.0, abs=0.01)
+        assert _val(r, "equity") == pytest.approx(10_000.0, abs=0.01)
+        # Sanity: the older period ALONE is unbalanced — so a merge would have
+        # tripped the primary gate. The guard prevented the blend.
+        assert map_lu_entity([older])["unbalanced"] is True

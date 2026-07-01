@@ -17,9 +17,11 @@ is suppressed with a recorded reason.
 Luxembourg's eCDF has three real traps, handled exactly here:
 
 1. **Two taxonomy versions.** 2016+ ("2022") vs 2012 differ on some codes.
-   Detect via ``669`` present -> 2022, else 2012. The financial-debt breakdown
-   and the net-income code differ by version; the BS core (201/301/331/197/…)
-   is stable.
+   Detect via a version-EXCLUSIVE 2016+ code (any of ``669``/``435``/``437``)
+   present -> 2022, else 2012. Keying only off ``669`` (a P&L code) would misread
+   a 2022 balance sheet filed without a P&L declaration as 2012. The financial-
+   debt breakdown, the total-liabilities code and the net-income code differ by
+   version; the BS core (201/301/331/197/…) is stable.
 
 2. **A signed P&L (2022 only).** The 2022 P&L stores expenses negative, so
    ``interest_expense = abs(627)`` and ``income_tax = -635`` (raw 635 negative
@@ -43,9 +45,14 @@ The confidence gate (design §4), tolerance ``max(2, 0.005·scale)``:
       the whole debt block) is suppressed.
   (c) **BS/P&L** ``321 == net_income`` -> else suppress net_income (guards
       against merging mismatched declarations).
-The borrowings breakdown is emitted only when ``ST + LT == financial_debt``
-(else only the total), and the whole debt block is suppressed for abridged /
-SOPARFI declarations, which report only aggregate liabilities, not borrowings.
+The engine (:func:`bottom_up_corpus.financials.compute_derived`) builds
+``total_debt`` from ``long_term_debt`` + ``short_term_debt`` and has NO
+``financial_debt`` key, so we emit that maturity split — but only when it
+reconciles with the bonds + bank borrowings total (``ST + LT == bonds+bank``,
+an independent cross-check). Otherwise, and for abridged / SOPARFI declarations
+(which report only aggregate liabilities, not borrowings), the whole debt block
+is suppressed (fall back to liabilities-based leverage rather than a wrong
+number).
 """
 from __future__ import annotations
 
@@ -56,7 +63,6 @@ _SOPARFI_BILAN = "CA_BILANSOPARFI"
 
 # Passif-derived keys — suppressed together when the structural gate (b) fails.
 _PASSIF_KEYS = ("equity", "provisions", "net_result_bs", "liabilities")
-_DEBT_KEYS = ("financial_debt", "short_term_debt", "long_term_debt")
 
 
 def _tol(scale: float) -> float:
@@ -75,14 +81,25 @@ def map_lu_entity(declarations: list[dict]) -> dict:
     ``basis="company"``, currency EUR. ``suppressed`` is a list of
     ``(key, reason)`` for every value declined; ``unbalanced`` is True when the
     primary balance gate fails (then ``values`` is empty)."""
+    # Period-consistency guard: a caller passing two periods of one RCS must not
+    # silently blend them. Keep only the declarations at the LATEST period_end so
+    # the merge uses one consistent period (period-less declarations and older
+    # periods are dropped). No period_end anywhere -> nothing to filter.
+    _periods = [d["period_end"] for d in declarations if d.get("period_end")]
+    if _periods:
+        _max_period = max(_periods)
+        declarations = [d for d in declarations if d.get("period_end") == _max_period]
+
     # Merge all declarations' fields (BS < 600, P&L >= 600 — no collision).
     fields: dict[int, float] = {}
     for d in declarations:
         fields.update(d.get("fields", {}))
     types = {d.get("type", "") for d in declarations}
 
-    # Taxonomy version: 669 present anywhere -> 2016+ ("2022"), else 2012.
-    v2022 = any(669 in d.get("fields", {}) for d in declarations)
+    # Taxonomy version: a version-EXCLUSIVE 2016+ code (669/435/437) present ->
+    # 2016+ ("2022"), else 2012. Never key off 669 alone (a P&L code): a 2022 BS
+    # filed without a P&L would misread as 2012 and read the wrong debt codes.
+    v2022 = any(c in fields for c in (669, 435, 437))
 
     # period_end / currency: first declaration that supplies each; EUR default.
     period_end = next((d["period_end"] for d in declarations if d.get("period_end")), None)
@@ -117,10 +134,11 @@ def map_lu_entity(declarations: list[dict]) -> dict:
                 ("__all__", f"unbalanced: total assets {a} != total passif {p}"))
             return result(unbalanced=True)
 
-    # Total-liabilities (creditors) code: 435 (2022) / 339 (2012); always 339
-    # for a SOPARFI declaration (only its aggregate is reported).
-    soparfi = _SOPARFI_BILAN in types
-    liab_code = 339 if (soparfi or not v2022) else 435
+    # Total-liabilities (creditors) code: 435 (2022) / 339 (2012) — version-driven
+    # ONLY. 2022 filers (SOPARFI included) report the aggregate under 435; forcing
+    # 339 for a 2022 SOPARFI would fail the structural gate and suppress the entire
+    # holdco universe. Let the structural gate (b) below decide reconciliation.
+    liab_code = 435 if v2022 else 339
 
     # --- Gate (b) Structural: 301 + 331 + (435|339) + 403 == 405. Absent lines
     #     read as 0 (genuine zeros). On failure the passif decomposition is
@@ -207,26 +225,35 @@ def map_lu_entity(declarations: list[dict]) -> dict:
         else:
             emit("net_income", net_income, ni_tag)
 
-    # --- Financial debt (borrowings-based — the payoff). Full BS only; the
-    #     structural gate must hold (it is a passif breakdown).
+    # --- Debt split (long_term_debt/short_term_debt — the engine-consumed
+    #     borrowings). Full BS only; the structural gate must hold (passif
+    #     breakdown); emitted only when the maturity split reconciles.
     _emit_financial_debt(v2022, types, has, get, emit, suppressed, structural_ok)
 
     return result(unbalanced=False)
 
 
 def _emit_financial_debt(v2022, types, has, get, emit, suppressed, structural_ok) -> None:
-    """Emit ``financial_debt`` (bonds + bank) and, when it reconciles, the
-    ``short_term_debt``/``long_term_debt`` split — or suppress with a reason.
+    """Emit the ``long_term_debt``/``short_term_debt`` maturity split (real
+    borrowings — the payoff), or suppress the whole block with a recorded reason.
+
+    The engine (:func:`bottom_up_corpus.financials.compute_derived`) builds
+    ``total_debt`` from ``long_term_debt`` + ``short_term_debt`` and never reads a
+    ``financial_debt`` key, so we emit the split the engine consumes — matching the
+    BE sibling (:func:`concepts_be._emit_financial_debt`). No dead ``financial_debt``.
 
     Suppressed wholesale for abridged / SOPARFI declarations (they report only
-    aggregate liabilities, incl. trade payables, not the borrowings isolation)
-    and when the structural passif gate failed. ``financial_debt`` is formed
-    only when at least one borrowings code is present; the maturity split is
-    emitted only when ``|ST + LT − financial_debt| <= tol`` (else just the
-    total feeds the engine's total_debt)."""
+    aggregate liabilities, incl. trade payables, not the borrowings isolation) and
+    when the structural passif gate failed. NO-FALSE-DATA reconciliation: the bond
+    + bank borrowings total and the ST/LT maturity sums are kept internal; the
+    split is emitted ONLY when it reconciles (``|ST + LT − (bonds+bank)| <= tol``,
+    an independent cross-check). If it does not reconcile the split is
+    unconfirmable -> suppress the block (fall back to liabilities-based leverage
+    rather than emit a wrong number)."""
+    keys = ("long_term_debt", "short_term_debt")
 
     def suppress_all(reason: str) -> None:
-        for key in _DEBT_KEYS:
+        for key in keys:
             suppressed.append((key, reason))
 
     # A full CA_BILAN is required — abridged/SOPARFI give only the aggregate.
@@ -247,19 +274,16 @@ def _emit_financial_debt(v2022, types, has, get, emit, suppressed, structural_ok
         st_codes, lt_codes = (351, 357), (347, 353, 359)
 
     if not (has(bond_c) or has(bank_c)):
-        suppress_all(f"no ecdf:{bond_c}/{bank_c} — cannot form financial_debt")
+        suppress_all(f"no ecdf:{bond_c}/{bank_c} — cannot form the borrowings total")
         return
 
-    financial_debt = get(bond_c) + get(bank_c)
-    emit("financial_debt", financial_debt, f"ecdf:{bond_c}+{bank_c}")
-
+    borrowings = get(bond_c) + get(bank_c)  # internal cross-check target only
     st = sum(get(c) for c in st_codes)
     lt = sum(get(c) for c in lt_codes)
-    if abs((st + lt) - financial_debt) <= _tol(max(abs(st + lt), abs(financial_debt))):
-        emit("short_term_debt", st, "ecdf:" + "+".join(str(c) for c in st_codes))
+    if abs((st + lt) - borrowings) <= _tol(max(abs(st + lt), abs(borrowings))):
         emit("long_term_debt", lt, "ecdf:" + "+".join(str(c) for c in lt_codes))
+        emit("short_term_debt", st, "ecdf:" + "+".join(str(c) for c in st_codes))
     else:
-        reason = (f"maturity split ST+LT {st + lt} != financial_debt "
-                  f"{financial_debt} — emitting only the total")
-        suppressed.append(("short_term_debt", reason))
-        suppressed.append(("long_term_debt", reason))
+        suppress_all(
+            f"maturity split ST+LT {st + lt} != borrowings (bonds+bank) "
+            f"{borrowings} — split unconfirmable, suppressing the debt block")
