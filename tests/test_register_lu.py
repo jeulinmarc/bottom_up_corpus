@@ -326,3 +326,54 @@ class TestSyntheticGates:
         # Sanity: the older period ALONE is unbalanced — so a merge would have
         # tripped the primary gate. The guard prevented the blend.
         assert map_lu_entity([older])["unbalanced"] is True
+
+
+# ---------------------------------------------------------------------------
+# LU identity: _norm_rcs + resolve_register_specs LU branch
+# ---------------------------------------------------------------------------
+
+def test_norm_rcs_strips_space():
+    from bottom_up_corpus.registers.identity import _norm_rcs
+    assert _norm_rcs("B 60814") == "B60814"
+
+
+def test_norm_rcs_uppercases():
+    from bottom_up_corpus.registers.identity import _norm_rcs
+    assert _norm_rcs("b6061") == "B6061"
+
+
+class _GleifFetcherLU:
+    """Minimal GLEIF stub returning one LU entity record."""
+    def __init__(self, country, registered_as, name="FERRERO INTERNATIONAL S.A."):
+        self._c, self._r, self._n = country, registered_as, name
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": self._n},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_lu_lei_resolves_via_gleif():
+    """LEI for a LU entity resolves via GLEIF entity.registeredAs -> rcs."""
+    from bottom_up_corpus.registers.identity import resolve_register_specs
+    r = resolve_register_specs(
+        [{"lei": "L1LU"}],
+        fetcher=_GleifFetcherLU("LU", "B6061"),
+    )[0]
+    assert r["rcs"] == "B6061"
+    assert r["country"] == "LU"
+    assert r["status"] == "ok"
+    assert r["lei"] == "L1LU"
+
+
+def test_non_lu_lei_unresolved():
+    """LEI for a non-LU entity (e.g. FR) stays unresolved; no rcs returned."""
+    from bottom_up_corpus.registers.identity import resolve_register_specs
+    r = resolve_register_specs(
+        [{"lei": "L2FR"}],
+        fetcher=_GleifFetcherLU("FR", "B6061"),
+    )[0]
+    assert r["status"] == "unresolved"
+    assert not r.get("rcs")

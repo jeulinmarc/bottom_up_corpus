@@ -1,9 +1,11 @@
 """Resolve register specs to canonical entity keys:
-- Norway:   orgnr directly, or LEI -> GLEIF registeredAs -> orgnr (digit-strip).
-- UK:       ch_number directly (verbatim), or LEI -> GLEIF registeredAs -> ch_number
-            (verbatim, only when legalAddress.country == "GB").
-- Belgium:  be_number directly (KBO, 10 digits), or LEI -> GLEIF registeredAs ->
-            be_number (only when legalAddress.country == "BE").
+- Norway:      orgnr directly, or LEI -> GLEIF registeredAs -> orgnr (digit-strip).
+- UK:          ch_number directly (verbatim), or LEI -> GLEIF registeredAs -> ch_number
+               (verbatim, only when legalAddress.country == "GB").
+- Belgium:     be_number directly (KBO, 10 digits), or LEI -> GLEIF registeredAs ->
+               be_number (only when legalAddress.country == "BE").
+- Luxembourg:  rcs directly, or LEI -> GLEIF registeredAs -> rcs
+               (only when legalAddress.country == "LU").
 """
 from __future__ import annotations
 import re
@@ -22,6 +24,15 @@ def _norm_ch_number(s: str) -> str:
 def _norm_kbo(s: str) -> str:
     """Strip non-digit characters; preserve leading zero; zero-pad to 10 digits."""
     return re.sub(r"\D", "", s).zfill(10)
+
+
+def _norm_rcs(s: str) -> str:
+    """Strip whitespace and internal spaces/dots, uppercase.
+
+    LU RCS numbers are ``B`` + digits (e.g. ``"B 60814"`` -> ``"B60814"``).
+    The ``B`` prefix is kept; digits are never zero-padded.
+    """
+    return re.sub(r"[\s.]+", "", s).upper()
 
 
 def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
@@ -45,9 +56,15 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "lei": spec.get("lei"), "name": spec.get("name", ""),
                         "country": "BE", "status": "ok"})
             continue
-        # --- LEI -> GLEIF path (NO, GB, BE) ---
+        # --- LU direct path: rcs provided ---
+        if spec.get("rcs"):
+            out.append({"rcs": _norm_rcs(str(spec["rcs"])),
+                        "lei": spec.get("lei"), "name": spec.get("name", ""),
+                        "country": "LU", "status": "ok"})
+            continue
+        # --- LEI -> GLEIF path (NO, GB, BE, LU) ---
         lei = spec.get("lei")
-        orgnr = ch_number = be_number = name = country = None
+        orgnr = ch_number = be_number = rcs = name = country = None
         if lei:
             try:
                 raw = fetcher.get_json(_GLEIF.format(lei=lei))
@@ -63,6 +80,8 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                 ch_number = _norm_ch_number(str(ra))
             elif country == "BE" and ra:
                 be_number = _norm_kbo(str(ra))
+            elif country == "LU" and ra:
+                rcs = _norm_rcs(str(ra))
         if orgnr:
             out.append({"orgnr": orgnr, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
@@ -71,6 +90,9 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "country": country or "", "status": "ok"})
         elif be_number:
             out.append({"be_number": be_number, "lei": lei, "name": name or spec.get("name", ""),
+                        "country": country or "", "status": "ok"})
+        elif rcs:
+            out.append({"rcs": rcs, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
         else:
             out.append({"orgnr": None, "lei": lei, "name": name or spec.get("name", ""),
