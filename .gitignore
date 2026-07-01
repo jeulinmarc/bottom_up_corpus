@@ -32,3 +32,6 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# subagent-driven working artifacts (never commit)
+.superpowers/
