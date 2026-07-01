@@ -240,3 +240,109 @@ def test_non_be_lei_unresolved():
     )[0]
     assert r["status"] == "unresolved"
     assert not r.get("be_number")
+
+
+# ---------------------------------------------------------------------------
+# CBSO Authentic Data API acquisition — fetch_bnb_deposit
+# ---------------------------------------------------------------------------
+
+_CBSO_REFS = [
+    {
+        "ReferenceNumber": "REF001",
+        "DepositDate": "2019-04-10",
+        "ExerciseDates": {"StartDate": "2018-01-01", "EndDate": "2018-12-31"},
+        "ModelType": "M02",
+        "AccountingDataURL": "https://ws.cbso.nbb.be/authentic/deposit/REF001/accountingData",
+    },
+    {
+        "ReferenceNumber": "REF002",
+        "DepositDate": "2021-03-15",
+        "ExerciseDates": {"StartDate": "2020-01-01", "EndDate": "2020-12-31"},
+        "ModelType": "M02",
+        "AccountingDataURL": "https://ws.cbso.nbb.be/authentic/deposit/REF002/accountingData",
+    },
+]
+
+_FIXTURE_BYTES = open("tests/fixtures/be/m02_full_0648822310.xbrl", "rb").read()
+
+
+class _CbsoFetcherOK:
+    """Stub: get_json returns _CBSO_REFS; get() returns fixture bytes."""
+
+    def __init__(self, refs=_CBSO_REFS, acct_bytes=_FIXTURE_BYTES):
+        self._refs = refs
+        self._acct = acct_bytes
+        self.last_get_json_headers = None
+        self.last_get_headers = None
+
+    def get_json(self, url, *, headers=None, **kw):
+        self.last_get_json_headers = headers
+        return self._refs
+
+    def get(self, url, *, headers=None, **kw):
+        self.last_get_headers = headers
+
+        class _Resp:
+            pass
+
+        r = _Resp()
+        r.content = self._acct
+        return r
+
+
+class _CbsoFetcherRefsError:
+    """Stub: get_json raises (simulates network / auth failure)."""
+
+    def get_json(self, url, **kw):
+        raise RuntimeError("network error")
+
+
+def test_fetch_bnb_deposit_latest_bytes():
+    """Two deposits with different DepositDates → bytes of the LATEST returned."""
+    from bottom_up_corpus.registers.bnb_cbso import fetch_bnb_deposit
+
+    fetcher = _CbsoFetcherOK()
+    result = fetch_bnb_deposit("0648822310", fetcher=fetcher, key="test-key")
+    assert result == _FIXTURE_BYTES
+
+
+def test_fetch_bnb_deposit_headers_sent():
+    """Subscription-key and X-Request-Id headers are forwarded on both calls."""
+    from bottom_up_corpus.registers.bnb_cbso import fetch_bnb_deposit
+
+    fetcher = _CbsoFetcherOK()
+    fetch_bnb_deposit("0648822310", fetcher=fetcher, key="my-api-key")
+
+    assert fetcher.last_get_json_headers["NBB-CBSO-Subscription-Key"] == "my-api-key"
+    assert "X-Request-Id" in fetcher.last_get_json_headers
+    assert fetcher.last_get_headers["NBB-CBSO-Subscription-Key"] == "my-api-key"
+    assert "X-Request-Id" in fetcher.last_get_headers
+    assert fetcher.last_get_headers.get("Accept") == "application/x.xbrl"
+
+
+def test_fetch_bnb_deposit_empty_refs_returns_none():
+    """Empty references list → None (batch-safe)."""
+    from bottom_up_corpus.registers.bnb_cbso import fetch_bnb_deposit
+
+    result = fetch_bnb_deposit("0000000000", fetcher=_CbsoFetcherOK(refs=[]), key="k")
+    assert result is None
+
+
+def test_fetch_bnb_deposit_refs_error_returns_none():
+    """get_json raising → None (batch-safe, never raises)."""
+    from bottom_up_corpus.registers.bnb_cbso import fetch_bnb_deposit
+
+    result = fetch_bnb_deposit("0648822310", fetcher=_CbsoFetcherRefsError(), key="k")
+    assert result is None
+
+
+def test_fetch_bnb_deposit_acct_error_returns_none():
+    """get() raising on accounting-data URL → None (batch-safe)."""
+    from bottom_up_corpus.registers.bnb_cbso import fetch_bnb_deposit
+
+    class _AcErrFetcher(_CbsoFetcherOK):
+        def get(self, url, **kw):
+            raise RuntimeError("download failed")
+
+    result = fetch_bnb_deposit("0648822310", fetcher=_AcErrFetcher(), key="k")
+    assert result is None
