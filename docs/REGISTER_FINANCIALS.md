@@ -823,11 +823,296 @@ maintainer steps, not exercised in the unit tests.
 
 ---
 
+## Source — Finland PRH avoindata XBRL open API
+
+Finland's **Patent and Registration Office (PRH)** publishes statutory annual accounts
+as **dimensional XBRL** instance documents on its **avoindata open-data platform**. The
+API is fully public:
+
+```
+GET https://avoindata.prh.fi/opendata-xbrl-api/v3/financial?businessId=…&financialDate=…
+```
+
+**No API key, no registration, no authentication required** — every endpoint is
+keyless. Two supporting endpoints cover entity history and population traversal:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v3/financials?businessId=…` | List all available `financialDate` strings for one entity |
+| `GET /v3/all_financials?financialDate=…` | Iterate all companies that filed for a given date (paginated, 100/page) |
+
+The XBRL model is dimensional: every monetary fact sits in an element of the
+`fi_met` / `fi_md103` namespace whose `contextRef` attribute links to a context
+carrying the metric code as a `fi_dim:MCY` member (e.g. `fi_MC:x673` → revenue).
+Comparative-period facts are distinguished by a `fi_dim:REF` member in the scenario;
+the parser (`registers/fi_prh_xbrl.py`) keeps **current-period facts only**.
+
+The parser uses **stdlib `xml.etree.ElementTree` only — no Arelle, no taxonomy
+bundle**. Because meaning lives in the MCY dimension members (not the element names),
+the parser needs only to read the MCY integer and the numeric value. This makes it
+fast, dependency-free, and resilient to future taxonomy version changes.
+
+Accounts filed at the PRH follow **Finnish GAAP (FAS)** — the statutory accounting
+standard for Finnish legal entities filing individual (non-consolidated) accounts. FAS
+differs materially from IFRS in the treatment of appropriations, tax, and provisions
+(see the confidence gate below). The PRH register covers the **SME and private
+universe**; large listed Finnish groups file consolidated ESEF accounts separately
+(ingested by the EU ESEF pillar — never merged here).
+
+## Schema — `data/financials_register/<ytunnus>.jsonl`
+
+Output follows the same per-period row model as the NO/UK/BE registers and the
+SEC/EU pillars (see [`FINANCIALS.md`](FINANCIALS.md) for the full curated-concepts
+definition):
+
+| Column | Value |
+|---|---|
+| `entity_id` | Y-tunnus (string; `NNNNNNN-N` format preserved, e.g. `"2919415-2"`) |
+| `lei` | GLEIF LEI if resolved; `null` for the keyless `--fi-file` path |
+| `country` | `"FI"` |
+| `source` | `"prh"` |
+| `basis` | `"company"` (FAS individual statutory accounts) |
+| `fy` | Fiscal year (integer, derived from `period_end`) |
+| `frequency` | `"annual"` (PRH holds only annual statutory accounts) |
+| `currency` | Reporting currency from the XBRL unit (virtually always `"EUR"`) |
+| `period_end` | ISO-8601 date string (instant of the current-period context) |
+| `publication_date` | `null` (not exposed by the PRH API) |
+
+The concept pack mapped from the `fi_MC` dimensional space covers:
+
+| Curated key | fi_MC code | Notes |
+|---|---|---|
+| `revenue` | x673 | Turnover |
+| `operating_income` | x689 | Operating result |
+| `net_income` | x740 | **Final result after appropriations — never x738** (see gate) |
+| `interest_expense` | abs(x4046) | Stored negative in the filing; taken as absolute value |
+| `assets` | x360 | Total balance-sheet assets |
+| `equity` | x435 | Shareholders' equity |
+| `liabilities` | x513 | Total liabilities (confirmed total; maturity split suppressed — see gate) |
+| `personnel_costs` | x1869 | Staff costs |
+| `non_current_assets` | x376 | Fixed / non-current assets (may be negative; see gate) |
+| `assets_current` | x424 | Current assets |
+
+Each `kind="reported"` row carries its `fi_MC` code as `tag` (e.g. `"fi_MC:x360"`).
+
+The derived block produced from this pack includes (for a full filer):
+
+- **Margins:** `operating_margin`, `net_margin`
+- **Returns:** `roa`, `roe`
+- **Coverage:** `interest_coverage`
+- **Efficiency:** `asset_turnover`
+
+FI produces **no** `total_debt`, `net_debt`, `net_cash`, `debt_to_equity`,
+`debt_to_assets`, `working_capital`, `current_ratio`, `quick_ratio`, or `cash_ratio`
+— see the confidence gate below for the precise reasons. There is no `ebitda` (no
+D&A in the pack) and no `effective_tax_rate` (income tax suppressed).
+
+A coverage report is written to `data/reports/register_coverage.jsonl` for every
+entity processed: `status="ok"` with a period count, `"no-financials"` (no usable
+facts after gating), `"unbalanced"` (primary balance gate failed), `"unresolved"`
+(identity lookup failed), or `"error"` (parse exception). Suppressed items and their
+reasons are always recorded in the `suppressed` list.
+
+## The confidence gate — no false data
+
+**Governing principle (from `concepts_fi.py`):** a number we cannot confirm must
+never be emitted; a missing number is strictly better than a wrong one. Two
+Finnish-specific traps shape the gate:
+
+### The net-income trap — x740, never x738
+
+Under Finnish GAAP, the P&L routes tax-like charges through **appropriations**
+(`x541`). The pre-appropriations result `x738` is therefore **not** net income; the
+final bottom line is `x740` (result after appropriations): `x740 = x738 + x541`.
+The engine maps `net_income` to `x740` exclusively and verifies a **two-leg waterfall**
+before emitting it:
+
+- **Leg 1** (when both `x12` net financial items and `x738` are present):
+  `|x689 + x12 − x738| ≤ tol` — if this fails, the P&L is untrusted and
+  `net_income` is suppressed immediately.
+- **Leg 2** (when `x738` is present):
+  `|x738 + (x541 or 0) − x740| ≤ tol` — if this fails, the appropriations step is
+  inconsistent and `net_income` is suppressed.
+- When `x738` is absent both legs are skipped and `x740` is emitted directly (many
+  abbreviated filings do not tag the intermediate result).
+
+If either leg fails, `net_income` is suppressed. The engine **never falls back to
+`x738`** — a pre-appropriations value labeled as net income would be a false figure
+for any entity carrying appropriations.
+
+Tolerance: `max(2 EUR, 0.5% of the scale)` — calibrated to the three real
+fixtures (full, abbreviated, housing-company).
+
+### Primary gate: `x360 == x435 + (x513 or 0)`
+
+Total assets must equal equity plus total liabilities within tolerance. Mismatch →
+the entire filing is untrustworthy: `unbalanced=True`, no values emitted at all.
+When `x360` or `x435` is absent the gate cannot run and the parser proceeds
+(directly-tagged values still stand), mirroring the BE/UK siblings.
+
+### Asset decomposition gate: `x376 + x424 == x360`
+
+When both asset components are present, the engine verifies their sum equals total
+assets. On mismatch, **both `non_current_assets` and `assets_current` are suppressed**
+(the gate-verified total `x360` still stands). Importantly: **`x376` (non-current
+assets) may be negative** — Finnish housing companies regularly carry negative fixed
+assets due to accumulated depreciation exceeding gross cost. This is structurally
+correct under FAS; the engine accepts negative `x376` without a positivity check.
+
+### The leverage trap — maturity split suppressed, `liabilities` reported as-is
+
+The PRH instance documents carry `x583` and `x816` as the two maturity buckets of
+total liabilities (`x513`), and these buckets reconcile to `x513` to the cent. The
+problem is that the **PRH instance carries no label linkbase** — the taxonomy that
+names which bucket is long-term vs short-term is external and not shipped with the
+filing. There is therefore **no way to confirm from the data which of `x583`/`x816`
+is long-term and which is short-term**.
+
+Emitting a guessed `long_term_debt` / `short_term_debt` split would be a false
+maturity claim. Mapping the total into a single maturity bucket would be an equally
+false "all one maturity" assertion. Per the no-false-data governing principle the
+engine therefore **suppresses the maturity split entirely** and records the reason.
+
+Consequences:
+
+- FI emits `liabilities` (`x513`) as a directly-tagged reported value.
+- **No** `long_term_debt` or `short_term_debt` are emitted.
+- **No** `total_debt`, `net_debt`, `net_cash`, `debt_to_equity`, or `debt_to_assets`
+  are produced (the engine's leverage engine requires the maturity split).
+- An authoritative PRH codelist confirming the `x583`/`x816` label assignment would
+  re-enable the split under the existing reconciliation gate without any schema
+  changes — this is the natural fast-follow.
+
+### Always suppressed
+
+| Key | Reason |
+|---|---|
+| `income_tax` | FAS routes tax through appropriations (x541); no confirmed income-tax line (x448 is not it) |
+| `cash` | x438 cash semantics are ambiguous under FAS |
+| `financial_debt` | No reliable bank-borrowings vs trade-payables split — suppressed |
+| `provisions` | No confirmed provisions code on FAS filings |
+
+## The `basis` field — FI
+
+All FI rows carry `basis="company"`. PRH statutory accounts are individual legal-entity
+accounts under FAS. The register does not expose consolidated group accounts; Finnish
+groups file consolidated ESEF accounts separately.
+
+Note that `basis="company"` rows from the PRH register and `basis="consolidated"` rows
+from the EU ESEF pillar (`data/financials_eu/`) are already separated by output
+directory. They must **never** be merged: FAS differs materially from IFRS (treatment
+of appropriations, depreciation, pension, and deferred tax); the obligor population
+(Finnish private companies) overlaps only partly with the ESEF pillar (Finnish listed
+groups that issued regulated securities).
+
+## Identity — Y-tunnus and LEI
+
+**Y-tunnus (`entity_id`):** The Finnish business identifier — format `NNNNNNN-N`
+(7 digits, hyphen, 1 check digit, e.g. `"2919415-2"`). Whitespace is stripped; the
+hyphen and check digit are preserved verbatim. No leading-zero normalisation is
+applied (the check digit is structurally distinct from the 7-digit body).
+
+Two input modes:
+
+- **`--fi-file` path:** the Y-tunnus is extracted from the filename using the
+  `NNNNNNN-N` pattern (e.g. `fi_2919415-2_full_2024.xml` → `"2919415-2"`).
+- **`--fi-businessid` path:** Y-tunnus values are passed directly on the command line.
+
+**LEI resolution:** When a spec carries a GLEIF LEI, the engine calls
+`GET https://api.gleif.org/api/v1/lei-records/{lei}` and extracts
+`entity.registeredAs`. This is accepted as the Y-tunnus **only when**
+`entity.legalAddress.country == "FI"` — the same country guard as the NO/BE
+registers. A LEI from a non-Finnish jurisdiction returns `status="unresolved"` in
+the coverage report. In both modes, the resolved `lei` (if available) is carried
+through to every output row.
+
+## CLI usage — FI
+
+```bash
+# keyless local path: parse one or more PRH XBRL .xml files (dry-run)
+bottom_up_corpus register-financials --fi-file fi_2919415-2_full_2024.xml
+
+# keyless local path: multiple files, persist to disk
+bottom_up_corpus register-financials \
+  --fi-file fi_2919415-2_full_2024.xml fi_0100379-9_abbrev_2023.xml --write
+
+# keyless API path: fetch latest period via PRH open API (no key required)
+bottom_up_corpus register-financials --fi-businessid 2919415-2
+
+# keyless API path: multiple entities, persist
+bottom_up_corpus register-financials --fi-businessid 2919415-2 0100379-9 --write
+```
+
+`--write` is the only side-effecting flag. Omitting it is a safe dry-run that prints
+the entity / period / unbalanced counts without touching disk. The `--fi-file` and
+`--fi-businessid` flags are mutually exclusive with each other and with `--orgnrs`,
+`--leis`, `--ch-bulk`, `--be-file`, and `--be-numbers`.
+
+**API path behaviour:** for each Y-tunnus, the engine calls `GET /v3/financials` to
+list available dates, picks the latest, then fetches that period's XBRL via
+`GET /v3/financial`. A missing or erroring entity is recorded as `"no-financials"`
+or `"error"` in the coverage report and never silently dropped.
+
+## Honest caveats — FI
+
+### Finnish GAAP (FAS), not IFRS — never merge with ESEF
+
+PRH statutory accounts follow **Finnish GAAP (FAS)** — individual legal-entity
+accounts for the private and SME universe. Finnish listed groups also file
+**ESEF consolidated accounts** under IFRS; those are ingested by the EU ESEF pillar
+(`data/financials_eu/`) and must **never be merged** with PRH rows. The GAAP regime,
+consolidation scope, and entity population are all different.
+
+### No leverage ratios (maturity-split fast-follow)
+
+FI produces `liabilities` but **no `total_debt`, `debt_to_equity`, or
+`debt_to_assets`** (see the confidence gate above). This is not a permanent
+constraint: an authoritative PRH codelist confirming the `x583`/`x816` long/short
+assignment would re-enable the maturity split under the existing reconciliation gate.
+Until that codelist is confirmed, cross-register leverage comparisons should note that
+FI rows carry no borrowings-based or liabilities-split gearing metric.
+
+### Digital XBRL coverage is growing (~5% of registered companies)
+
+The PRH avoindata platform holds XBRL filings from 2019 onwards. At present,
+roughly 5% of Finnish registered companies have filed at least one digital XBRL
+return — the remainder file PDF accounts. Coverage is growing year-on-year as larger
+companies are brought into scope, but the universe today is a subset, not a census,
+of Finnish companies.
+
+### SME and private universe — large listed companies use ESEF
+
+Finnish listed companies with securities admitted to trading on a regulated market are
+required to file ESEF iXBRL consolidated accounts under IFRS. Their consolidated
+figures appear in `data/financials_eu/`. The PRH avoindata register captures their
+**individual (statutory entity) accounts** under FAS — a distinct and narrower filing
+that is the obligor entity's own accounts, not the economic group.
+
+### Annual accounts only
+
+PRH statutory accounts are annual. `frequency` is always `"annual"`. There are no
+quarterly or semi-annual periods in the avoindata XBRL API.
+
+### No commercial fallback — ever
+
+If the PRH API returns no XBRL filing for an entity, the entity is recorded as
+`"no-financials"`. Revenue, income, and balance-sheet figures are **never
+supplemented from commercial databases or any non-public source**. Open data only.
+
+See also: [NO (Brreg)](#source--brreg-regnskapsregisteret-norway),
+[UK (Companies House)](#source--uk-companies-house-statutory-accounts-ixbrl),
+[BE (BNB CBSO)](#source--belgium-bnb-cbso-annual-accounts-dimensional-xbrl),
+[`FINANCIALS.md`](FINANCIALS.md), [`EU_FINANCIALS.md`](EU_FINANCIALS.md).
+
+---
+
 ## Out of scope — future PRs
 
 The current implementation covers **Norway (Brreg)** (JSON, no XBRL), **UK Companies
-House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), and **Belgium BNB CBSO**
-(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path).
+House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), **Belgium BNB CBSO**
+(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path), and
+**Finland PRH** (dimensional XBRL, stdlib only; fully keyless `--fi-file` +
+`--fi-businessid` paths).
 
 National registers not yet supported:
 
