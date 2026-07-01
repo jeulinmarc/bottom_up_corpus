@@ -331,3 +331,129 @@ def test_non_fi_lei_is_unresolved():
     )[0]
     assert r.get("business_id") is None
     assert r["status"] == "unresolved"
+
+
+# ===========================================================================
+# Task 4 — keyless PRH XBRL acquisition (registers/prh_api.py)
+# ===========================================================================
+
+from bottom_up_corpus.registers.prh_api import (
+    fetch_fi_financial,
+    iter_fi_all,
+    list_fi_dates,
+)
+
+
+class _StubFetcher:
+    """Records calls and returns configured bytes or JSON; optionally raises."""
+
+    def __init__(self, *, bytes_response=None, json_response=None, raises=False):
+        self.calls: list[dict] = []
+        self._bytes = bytes_response
+        self._json = json_response
+        self._raises = raises
+
+    def get(self, url, *, headers=None, params=None, **kw):
+        self.calls.append({"url": url, "headers": headers, "params": params})
+        if self._raises:
+            raise RuntimeError("simulated network error")
+
+        class _Resp:
+            def __init__(self, content):
+                self.content = content
+
+        return _Resp(self._bytes)
+
+    def get_json(self, url, *, headers=None, params=None, **kw):
+        self.calls.append({"url": url, "headers": headers, "params": params})
+        if self._raises:
+            raise RuntimeError("simulated network error")
+        return self._json
+
+
+def test_fetch_fi_financial_returns_fixture_bytes():
+    """Stub fetcher → fetch_fi_financial returns the raw XBRL bytes."""
+    raw = open(FIXTURE, "rb").read()
+    stub = _StubFetcher(bytes_response=raw)
+    result = fetch_fi_financial("2919415-2", "2024-12-31", fetcher=stub)
+    assert result == raw
+
+
+def test_fetch_fi_financial_no_accept_header():
+    """Must NOT send Accept: application/xml — PRH returns 400 if sent."""
+    raw = open(FIXTURE, "rb").read()
+    stub = _StubFetcher(bytes_response=raw)
+    fetch_fi_financial("2919415-2", "2024-12-31", fetcher=stub)
+    call = stub.calls[0]
+    hdrs = call["headers"] or {}
+    assert "Accept" not in hdrs, f"Accept header must not be set; got headers={hdrs!r}"
+
+
+def test_fetch_fi_financial_error_returns_none():
+    """A fetcher that raises → returns None (batch-safe, never raises out)."""
+    stub = _StubFetcher(raises=True)
+    result = fetch_fi_financial("2919415-2", "2024-12-31", fetcher=stub)
+    assert result is None
+
+
+def test_fetch_fi_financial_uses_correct_url_and_params():
+    """GET BASE/financial?businessId=…&financialDate=…"""
+    raw = open(FIXTURE, "rb").read()
+    stub = _StubFetcher(bytes_response=raw)
+    fetch_fi_financial("2919415-2", "2024-12-31", fetcher=stub)
+    call = stub.calls[0]
+    assert call["url"].endswith("/financial")
+    assert call["params"] == {"businessId": "2919415-2", "financialDate": "2024-12-31"}
+
+
+def test_list_fi_dates_returns_list():
+    """Stub returns a list of date strings → list_fi_dates passes it through."""
+    dates = ["2022-12-31", "2023-12-31", "2024-12-31"]
+    stub = _StubFetcher(json_response=dates)
+    result = list_fi_dates("2919415-2", fetcher=stub)
+    assert result == dates
+
+
+def test_list_fi_dates_error_returns_empty_list():
+    """A fetcher that raises → returns [] (batch-safe, never raises out)."""
+    stub = _StubFetcher(raises=True)
+    result = list_fi_dates("2919415-2", fetcher=stub)
+    assert result == []
+
+
+def test_list_fi_dates_uses_correct_url_and_params():
+    """GET BASE/financials?businessId=…"""
+    stub = _StubFetcher(json_response=[])
+    list_fi_dates("2919415-2", fetcher=stub)
+    call = stub.calls[0]
+    assert call["url"].endswith("/financials")
+    assert call["params"] == {"businessId": "2919415-2"}
+
+
+def test_iter_fi_all_yields_business_ids_and_stops_at_last_page():
+    """Two pages: first returns 100 items, second returns 3 → stop after page 2."""
+    page1 = [{"businessId": f"ID{i:04d}"} for i in range(100)]
+    page2 = [{"businessId": "LAST1"}, {"businessId": "LAST2"}, {"businessId": "LAST3"}]
+
+    class _PaginatedFetcher:
+        def __init__(self):
+            self.calls: list[dict | None] = []
+
+        def get_json(self, url, *, params=None, **kw):
+            self.calls.append(params)
+            page = (params or {}).get("page", 1)
+            return page1 if page == 1 else page2
+
+    stub = _PaginatedFetcher()
+    result = list(iter_fi_all("2024-12-31", fetcher=stub))
+    assert result[:3] == ["ID0000", "ID0001", "ID0002"]
+    assert result[-3:] == ["LAST1", "LAST2", "LAST3"]
+    assert len(result) == 103
+    assert len(stub.calls) == 2  # exactly 2 page fetches
+
+
+def test_iter_fi_all_error_stops_gracefully():
+    """A fetcher that raises → yields nothing (batch-safe, never raises out)."""
+    stub = _StubFetcher(raises=True)
+    result = list(iter_fi_all("2024-12-31", fetcher=stub))
+    assert result == []
