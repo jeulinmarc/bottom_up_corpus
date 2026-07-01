@@ -189,3 +189,54 @@ def test_be_pack_shape():
         assert key in BE_PACK
         bas, part, required = BE_PACK[key]
         assert isinstance(bas, str) and isinstance(part, str) and isinstance(required, dict)
+
+
+# ---------------------------------------------------------------------------
+# BE identity: _norm_kbo + resolve_register_specs BE branch
+# ---------------------------------------------------------------------------
+
+def test_norm_kbo_strips_dots():
+    from bottom_up_corpus.registers.identity import _norm_kbo
+    assert _norm_kbo("0648.822.310") == "0648822310"
+
+
+def test_norm_kbo_zero_pads_to_10():
+    from bottom_up_corpus.registers.identity import _norm_kbo
+    assert _norm_kbo("417497106") == "0417497106"   # 9 digits -> pad to 10
+
+
+class _GleifFetcherBE:
+    """Minimal GLEIF stub returning one BE entity record."""
+    def __init__(self, country, registered_as, name="AGEAS SA/NV"):
+        self._c, self._r, self._n = country, registered_as, name
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": self._n},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_be_lei_resolves_via_gleif():
+    """LEI for a BE entity resolves via GLEIF entity.registeredAs -> be_number (KBO)."""
+    from bottom_up_corpus.registers.identity import resolve_register_specs
+    r = resolve_register_specs(
+        [{"lei": "L1BE"}],
+        fetcher=_GleifFetcherBE("BE", "0417.497.106"),
+    )[0]
+    assert r["be_number"] == "0417497106"
+    assert r["country"] == "BE"
+    assert r["status"] == "ok"
+    assert r["lei"] == "L1BE"
+
+
+def test_non_be_lei_unresolved():
+    """LEI for a non-BE entity (e.g. FR) stays unresolved; no be_number returned."""
+    from bottom_up_corpus.registers.identity import resolve_register_specs
+    r = resolve_register_specs(
+        [{"lei": "L2FR"}],
+        fetcher=_GleifFetcherBE("FR", "417497106"),
+    )[0]
+    assert r["status"] == "unresolved"
+    assert not r.get("be_number")
