@@ -1,6 +1,7 @@
 import pytest
 
 from bottom_up_corpus.registers.concepts_uk import map_ch_facts
+from bottom_up_corpus.registers.identity import resolve_register_specs
 
 
 def flat(**kw):
@@ -101,3 +102,49 @@ def test_oim_from_ch_html_parses_micro():
     assert len(facts) > 20
     concepts = {fv["dimensions"]["concept"].split(":")[-1] for fv in facts.values()}
     assert {"CurrentAssets", "Equity"} <= concepts
+
+
+# ---------------------------------------------------------------------------
+# GB identity: _norm_ch_number + resolve_register_specs GB branch
+# ---------------------------------------------------------------------------
+
+def test_ch_number_preserved_and_padded():
+    from bottom_up_corpus.registers.identity import _norm_ch_number
+    assert _norm_ch_number("510976") == "00510976"       # pure digits -> zero-pad to 8
+    assert _norm_ch_number("SC741022") == "SC741022"     # SC prefix -> verbatim
+    assert _norm_ch_number(" oc372294 ") == "OC372294"   # strip + uppercase, OC prefix
+
+
+class _GleifFetcherGB:
+    """Minimal GLEIF stub returning one entity record."""
+    def __init__(self, country, registered_as, name="ACME LTD"):
+        self._c, self._r, self._n = country, registered_as, name
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": self._n},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_gb_lei_resolves_via_gleif():
+    """LEI for a GB entity resolves via GLEIF entity.registeredAs -> ch_number."""
+    r = resolve_register_specs(
+        [{"lei": "L1GB"}],
+        fetcher=_GleifFetcherGB("GB", "10399850"),
+    )[0]
+    assert r["ch_number"] == "10399850"
+    assert r["country"] == "GB"
+    assert r["status"] == "ok"
+    assert r["lei"] == "L1GB"
+
+
+def test_non_gb_lei_unresolved():
+    """LEI for a non-GB entity (e.g. SE) stays unresolved; no ch_number returned."""
+    r = resolve_register_specs(
+        [{"lei": "L2SE"}],
+        fetcher=_GleifFetcherGB("SE", "5560000000"),
+    )[0]
+    assert r["status"] == "unresolved"
+    assert not r.get("ch_number")
