@@ -1,9 +1,18 @@
-"""Tests for the Belgium BNB CBSO XBRL parser (stdlib, no Arelle)."""
+"""Tests for the Belgium BNB CBSO register: the stdlib XBRL parser (no Arelle)
+and the dimensional concept pack + NO-FALSE-DATA confidence gate."""
 import pytest
 
 from bottom_up_corpus.registers.bnb_xbrl import parse_bnb_data_xbrl, open_bnb_deposit
+from bottom_up_corpus.registers.concepts_be import map_bnb_facts, BE_PACK
 
 FIXTURE = "tests/fixtures/be/m02_full_0648822310.xbrl"
+FIXTURE_M01 = "tests/fixtures/be/m01_abbrev_0508773215.xbrl"
+FIXTURE_M07 = "tests/fixtures/be/m07_micro_0563659278.xbrl"
+
+
+def _val(res, key):
+    """The numeric value emitted for ``key`` (KeyError if suppressed/absent)."""
+    return res["values"][key]["value"]
 
 
 def test_parse_bnb_xbrl_count():
@@ -44,3 +53,139 @@ def test_open_bnb_deposit(tmp_path):
 
     result = open_bnb_deposit(zip_path.read_bytes())
     assert result == data_bytes
+
+
+# --------------------------------------------------------------------------- #
+# Concept pack + confidence gate — asserted against the REAL m02 filing.       #
+# --------------------------------------------------------------------------- #
+
+def _map_fixture(path):
+    return map_bnb_facts(parse_bnb_data_xbrl(path), period_end="2020-12-31")
+
+
+def test_map_bnb_m02_core_values():
+    """Every curated key on the real m02 filing == its validated total (±1 EUR)."""
+    res = _map_fixture(FIXTURE)
+    expected = {
+        "equity": 6734534627,
+        "revenue": 484777143,
+        "assets": 14340301238,
+        "liabilities": 7298623904,
+        "provisions": 307142707,
+        "income_tax": 36038793,
+        "depreciation": 63038416,
+        "inventory": 4606684,
+        "receivables": 232625124,
+    }
+    for key, want in expected.items():
+        assert round(_val(res, key)) == want, f"{key}: {_val(res, key)!r} != {want}"
+        assert res["values"][key]["unit"] == "EUR"
+        assert res["values"][key]["label"] == key
+
+
+def test_map_bnb_m02_net_income_is_total_not_pretax_trap():
+    """net_income is the breakdown-free m59/m4 total (115.9M), NOT the m59/spec=m16
+    pre-tax disaggregation (54.4M) — the false-data trap."""
+    res = _map_fixture(FIXTURE)
+    assert round(_val(res, "net_income")) == 115942395
+    assert round(_val(res, "net_income")) != 54441434
+
+
+def test_map_bnb_m02_financial_debt_block_emitted():
+    """The m51 borrowings block is emitted (x-check reconciles vs m50[ntr=m3])."""
+    res = _map_fixture(FIXTURE)
+    assert round(_val(res, "long_term_debt")) == 2300987436   # 986217794 + 1314769642
+    assert round(_val(res, "short_term_debt")) == 4338796392
+    # engine total_debt = LT + ST = real borrowings
+    assert round(_val(res, "long_term_debt") + _val(res, "short_term_debt")) == 6639783828
+    assert res["values"]["long_term_debt"]["tag"] == "m51 (derived, x-checked)"
+
+
+def test_map_bnb_m02_balanced_and_operating_profit_suppressed():
+    res = _map_fixture(FIXTURE)
+    assert res["unbalanced"] is False
+    assert res["basis"] == "company"
+    assert res["currency"] == "EUR"
+    assert res["period_end"] == "2020-12-31"
+    # operating_profit is ALWAYS suppressed (label ambiguous, pending 2nd example)
+    assert "operating_profit" not in res["values"]
+    assert any(k == "operating_profit" for k, _ in res["suppressed"])
+
+
+@pytest.mark.parametrize("path", [FIXTURE_M01, FIXTURE_M07])
+def test_map_bnb_small_models_equity_present_revenue_absent(path):
+    """Abbreviated (m01) & micro (m07) models: parse must not crash; equity is
+    present (~3.616M) but turnover is omitted by small models -> revenue absent."""
+    res = _map_fixture(path)
+    assert res is not None
+    assert 3_616_000 <= round(_val(res, "equity")) <= 3_617_000
+    assert "revenue" not in res["values"]
+    assert res["unbalanced"] is False
+
+
+def test_map_bnb_unbalanced_gate_blanks_values():
+    """Synthetic: total assets (m25/m1) != total passif (m25/m3) beyond tol ->
+    the whole filing is untrustworthy: unbalanced, no values emitted."""
+    flat = [
+        {"dims": {"bas": "m25", "part": "m1", "prd": "m1"}, "value": 1_000_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m25", "part": "m3", "prd": "m1"}, "value": 2_000_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m37", "part": "m3", "prd": "m1", "ntr": "m4"}, "value": 500_000.0, "unit": "EUR"},
+    ]
+    res = map_bnb_facts(flat)
+    assert res["unbalanced"] is True
+    assert res["values"] == {}
+    assert res["suppressed"]  # a reason was recorded
+
+
+def _balanced_base():
+    """A minimal balanced flat (m25/m1 == m25/m3) carrying equity."""
+    return [
+        {"dims": {"bas": "m25", "part": "m1", "prd": "m1"}, "value": 100_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m25", "part": "m3", "prd": "m1"}, "value": 100_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m37", "part": "m3", "prd": "m1", "ntr": "m4"}, "value": 40_000.0, "unit": "EUR"},
+    ]
+
+
+def test_map_bnb_debt_block_suppressed_when_xcheck_fails():
+    """Synthetic: m51 tranches that do NOT reconcile with m50[ntr=m3] ->
+    the debt block is suppressed (reason recorded); other values still emit."""
+    flat = _balanced_base() + [
+        # m51 tranches sum to 3,000 ...
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1", "typ": "m1"}, "value": 1_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2", "typ": "m1"}, "value": 2_000.0, "unit": "EUR"},
+        # ... but the independent m50[ntr=m3] witness says 20,000 -> mismatch.
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 10_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m2"}, "value": 10_000.0, "unit": "EUR"},
+    ]
+    res = map_bnb_facts(flat)
+    assert "long_term_debt" not in res["values"]
+    assert "short_term_debt" not in res["values"]
+    assert any(k in ("long_term_debt", "short_term_debt") for k, _ in res["suppressed"])
+    assert round(_val(res, "equity")) == 40_000          # other values still emitted
+    assert res["unbalanced"] is False
+
+
+def test_map_bnb_debt_block_suppressed_when_tranche_lacks_typ():
+    """Synthetic: an m51 balance-sheet fact missing its typ tranche -> the total
+    cannot be confirmed, so the debt block is suppressed atomically."""
+    flat = _balanced_base() + [
+        # a breakdown-free m51 fact with rst but no typ (a deviating structure)
+        {"dims": {"bas": "m51", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 1_000.0, "unit": "EUR"},
+        {"dims": {"bas": "m50", "part": "m3", "prd": "m1", "ntr": "m3", "rst": "m1"}, "value": 1_000.0, "unit": "EUR"},
+    ]
+    res = map_bnb_facts(flat)
+    assert "long_term_debt" not in res["values"]
+    assert "short_term_debt" not in res["values"]
+    assert any(k in ("long_term_debt", "short_term_debt") for k, _ in res["suppressed"])
+    assert round(_val(res, "equity")) == 40_000
+
+
+def test_be_pack_shape():
+    """The pack is (bas, part, required-members) triples for the documented keys."""
+    for key in ("assets", "equity", "revenue", "net_income", "income_tax",
+                "depreciation", "inventory", "receivables", "liabilities",
+                "liabilities_current", "provisions", "cash", "assets_fixed",
+                "assets_current"):
+        assert key in BE_PACK
+        bas, part, required = BE_PACK[key]
+        assert isinstance(bas, str) and isinstance(part, str) and isinstance(required, dict)
