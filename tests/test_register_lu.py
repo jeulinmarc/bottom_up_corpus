@@ -80,3 +80,29 @@ class TestBytesInput:
         result_path = parse_lu_declarers(KROKUS)
         result_bytes = parse_lu_declarers(KROKUS.read_bytes())
         assert result_path == result_bytes
+
+
+class TestISO885915Encoding:
+    def test_iso_8859_15_bytes_with_accented_name(self):
+        """Parser must handle real ISO-8859-15 STATEC dumps without ParseError.
+
+        The raw bytes contain \xe9 (é in ISO-8859-15) and the XML declaration
+        says encoding="ISO-8859-15".  expat only supports a small set of
+        built-in encodings; passing the raw bytes (or a str re-encoded to
+        UTF-8 with the wrong declaration) would raise xml.etree.ParseError on
+        many platforms.  The fix in _parse_root re-encodes to UTF-8 and
+        rewrites the declaration before handing bytes to ET.fromstring.
+        """
+        xml = (
+            b'<?xml version="1.0" encoding="ISO-8859-15"?>'
+            b"<STATECCDBDeclarations>"
+            b"<Declarer>"
+            b"<RcsNumber>B99999</RcsNumber>"
+            b"<LegalUnitName>Soci\xe9t\xe9 S.A.</LegalUnitName>"
+            b"</Declarer>"
+            b"</STATECCDBDeclarations>"
+        )
+        result = parse_lu_declarers(xml)
+        assert len(result) == 1
+        assert result[0]["rcs"] == "B99999"
+        assert result[0]["name"] == "Société S.A."

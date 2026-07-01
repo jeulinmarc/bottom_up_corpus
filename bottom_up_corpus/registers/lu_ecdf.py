@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import re
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from typing import Union
 
 
@@ -38,7 +37,10 @@ def _parse_root(source: Union[str, bytes, os.PathLike]) -> ET.Element:
     raw = _load_raw(source)
     m = re.match(rb'<\?xml[^>]*encoding=["\']([^"\']+)["\']', raw)
     enc = m.group(1).decode("ascii") if m else "utf-8"
-    return ET.fromstring(raw.decode(enc))
+    utf8 = raw.decode(enc).encode("utf-8")
+    if m:
+        utf8 = re.sub(rb'encoding=["\'][^"\']+["\']', b'encoding="UTF-8"', utf8, count=1)
+    return ET.fromstring(utf8)
 
 
 def _collect_fields(form_data: ET.Element) -> dict[int, float]:
