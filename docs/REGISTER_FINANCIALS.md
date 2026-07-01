@@ -2,8 +2,9 @@
 
 `bottom_up_corpus/registers/` ingests **open-data statutory accounts** from national
 business registers and writes them in the same curated schema as the SEC and EU pillars.
-This document covers the purpose, source, schema, honest caveats, and CLI for two
-registers: **Norway's Brønnøysund Register Centre (Brreg)** and **UK Companies House**.
+This document covers the purpose, source, schema, honest caveats, and CLI for three
+registers: **Norway's Brønnøysund Register Centre (Brreg)**, **UK Companies House**,
+and **Belgium's BNB Central Balance Sheet Office (CBSO)**.
 
 See also: [`FINANCIALS.md`](FINANCIALS.md) (the SEC/US-GAAP pillar that defines the
 shared schema and derived-metrics engine) and [`EU_FINANCIALS.md`](EU_FINANCIALS.md)
@@ -499,18 +500,341 @@ a deliberate design constraint, not a coverage gap to be filled.
 
 ---
 
+## Source — Belgium BNB CBSO annual accounts (dimensional XBRL)
+
+Belgium's **Banque Nationale de Belgique Central Balance Sheet Office (BNB CBSO)**
+collects mandatory annual statutory accounts from virtually all Belgian legal entities
+and makes them available as **dimensional XBRL** instance documents. The XBRL model is
+EBA/DPM-style: every monetary fact is qualified by its context's dimension members
+(`bas`, `part`, `prd`, `ntr`, `rst`, `typ`, …) rather than carrying the meaning in the
+element name. The CBSO uses a **version-stable `dict` member namespace**, so the
+member-to-meaning mapping does not change across taxonomy releases.
+
+The parser (`registers/bnb_xbrl.py`) uses **stdlib `xml.etree.ElementTree` only — no
+Arelle, no taxonomy bundle**. Because meaning lives in the dimension members (not the
+element names), the parser needs only to read context dimension members and numeric
+values; it does not need the taxonomy at all. This makes it fast, dependency-free, and
+resilient to taxonomy version changes.
+
+### Two acquisition paths
+
+| Path | Key required | Flag |
+|---|---|---|
+| **CBSO Authentic Data API** (targeted, per KBO) | Free subscription key | `--be-numbers` |
+| **Local file** (downloaded `.xbrl` or deposit `.zip`) | None | `--be-file` |
+
+**Authentic Data API:** The CBSO provides a free REST API at `https://ws.cbso.nbb.be`.
+Registration is self-service at `https://developer.cbso.nbb.be`; the subscription key
+is passed as `NBB-CBSO-Subscription-Key` header. The engine calls
+`/authentic/legalEntity/{kbo}/references` to list available deposits, picks the most
+recent by `DepositDate`, then fetches the accounting data. Live/scale validation —
+rate limits, pagination, and quota behaviour for entities with large deposit histories —
+is a **maintainer step** and is intentionally out of scope; the parser and pack are
+validated against the public example filings.
+
+**Keyless local-file path (`--be-file`):** A BNB deposit is either a bare `-data.xbrl`
+file or a three-member deposit `.zip` (`*-contact.xbrl`, `*-data.xbrl`, `*-vendor.xbrl`).
+Both are handled: the engine extracts the `*-data.xbrl` member automatically when it
+receives a `.zip`. The KBO number is derived from the last underscore-delimited token
+of the filename stem (e.g. `m02_full_0648822310.xbrl` → `"0648822310"`).
+
+### Why BE is the richest register — borrowings-based leverage
+
+BE is the **richest register in this corpus**. Unlike Norway (Brreg) and UK (Companies
+House), which expose only broad liabilities aggregates, the BNB CBSO instance tags **real
+financial borrowings** under the `bas:m51` rubric — bonds, bank loans, leases —
+disaggregated by maturity (`rst`: long-term `m1` / short-term `m2`) and instrument type
+(`typ`). The engine sums the validated `m51` tranches to compute `long_term_debt` and
+`short_term_debt`, so:
+
+- **`total_debt`** = financial borrowings (not total liabilities)
+- **`debt_to_equity`** and **`debt_to_assets`** are **borrowings-based gearing**, not
+  liabilities-based approximations
+
+This is a qualitatively different and more informative metric than the liabilities-based
+approximation produced for NO and UK. The `source` field (`"bnb"` vs `"brreg"` vs
+`"companies_house"`) distinguishes the regimes in every output row. **Never compare
+`debt_to_equity` from a BE row to a NO or UK row without first confirming that both
+rest on the same debt basis.** The `source` field is the guard.
+
+Additional richness: `revenue`, `dep_amort` (depreciation + amortisation), and
+`net_income` + `income_tax` are all mapped — BE carries the full set of building blocks
+for EBITDA derivation once `operating_profit` (m44) is unblocked (see Caveats). Depth
+reaches approximately 18 years (2007 onwards). For comparison: Brreg typically provides
+5–10 years and the UK bulk product provides one period per entity per monthly file.
+
+## Schema — `data/financials_register/<kbo>.jsonl`
+
+Output follows the same per-period row model as the NO and UK registers and the SEC/EU
+pillars (see [`FINANCIALS.md`](FINANCIALS.md) for the full curated-concepts definition):
+
+| Column | Value |
+|---|---|
+| `entity_id` | KBO enterprise number (10-digit zero-padded string) |
+| `lei` | GLEIF LEI if resolved; `null` for the keyless `--be-file` path |
+| `country` | `"BE"` |
+| `source` | `"bnb"` |
+| `basis` | `"company"` (statutory individual accounts; consolidated detection deferred) |
+| `fy` | Fiscal year (integer, derived from `period_end`) |
+| `frequency` | `"annual"` (CBSO holds only annual statutory accounts) |
+| `currency` | Reporting currency from the XBRL unit (virtually always `"EUR"`) |
+| `period_end` | ISO-8601 date (the maximum `endDate`/`instant` across all XBRL contexts) |
+| `publication_date` | `null` (not extracted from the deposit) |
+
+The concept pack mapped from the `m`-member dimensional space covers:
+
+| Curated key | XBRL rubric | Notes |
+|---|---|---|
+| `assets` | `m25/m1` | Total balance-sheet assets (= total passif anchor) |
+| `assets_fixed` | `m2/m1` | Fixed assets |
+| `assets_current` | `m12/m1` | Current assets (BE-GAAP: includes receivables >1yr — see Caveats) |
+| `cash` | `m23/m1` | Cash and cash equivalents |
+| `inventory` | `m14/m1 sts=m2` | On-balance-sheet inventory |
+| `receivables` | `m9/m1 rst=m2` | Short-term receivables |
+| `equity` | `m37/m3 ntr=m4` | Shareholders' equity |
+| `provisions` | `m47/m3` | Provisions (BE-GAAP: between equity and liabilities) |
+| `liabilities` | `m50/m3` | Total liabilities |
+| `liabilities_current` | `m50/m3 rst=m2` | Current liabilities |
+| `revenue` | `m53/m4 ntr=m6` | Turnover |
+| `net_income` | `m59/m4` | Period net result (breakdown-free; see note on pre-tax below) |
+| `income_tax` | `m60/m4 spec=m17` | Income tax |
+| `dep_amort` | `m2/m4 ntr=m6 mdp=m1` | Depreciation and amortisation |
+| `long_term_debt` | derived from `m51` | Real financial borrowings, LT — see Confidence Gate |
+| `short_term_debt` | derived from `m51` | Real financial borrowings, ST — see Confidence Gate |
+
+Each `kind="reported"` row carries the source dimension selector as its `tag`
+(e.g. `"m51 (derived, x-checked)"`), so downstream consumers can inspect exactly which
+XBRL rubric fed each value.
+
+The derived block produced from this pack includes (for a full filer):
+
+- **Aggregates:** `total_debt` (borrowings), `net_debt`, `net_cash`, `working_capital`,
+  `invested_capital`
+- **Profitability:** `net_margin`, `roe`, `roa`
+- **Leverage / liquidity:** `debt_to_equity` (borrowings), `debt_to_assets` (borrowings),
+  `current_ratio`, `quick_ratio`, `cash_ratio`
+- **Efficiency:** `asset_turnover`, `dso`
+
+EBITDA and EBITDA-dependent metrics (`ebitda`, `ebitda_margin`, `net_debt_to_ebitda`)
+are **not emitted** in the current release — `operating_profit` (m44) is suppressed
+pending a second real validated example. When it is unblocked, the `dep_amort` mapping
+already in place means EBITDA will be automatically computable without further work.
+
+A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
+processed: `status="ok"` with a period count, `"no-financials"` (no usable facts after
+gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
+exception). When items are suppressed by the confidence gate or the always-suppress
+list, a `suppressed` list records each key and the reason.
+
+## The confidence gate — no false data
+
+**Governing principle:** a number known to be wrong must never be emitted; a missing
+number is strictly better than a wrong one. The BNB instance is dimensional — meaning
+lives in the dimension members, not the element names — so the central risk is **picking
+a disaggregated fact instead of the total**. For example, `m59/m4 spec=m16` is the
+pre-tax result while the **breakdown-free** `m59/m4` (no `spec` member) is the true
+net result. The engine guards against this systematically.
+
+### Canonical-member selection
+
+For every curated key, the engine selects the **unique** fact whose `dims` equals
+exactly `{bas, part, prd:m1} ∪ required-members` and carries **no other dimension**.
+A disaggregated sub-breakdown (which carries an extra member like `spec=m16` or
+`rst=m1`) can never match this exact set, so it can never masquerade as the total.
+If 0 or more than 1 such fact exists — the total is ambiguous — the key is suppressed
+and the reason recorded. The engine never defaults a missing value to zero.
+
+### Primary gate: `m25/m1 == m25/m3`
+
+Total assets (`m25/m1`) and total passif (`m25/m3`) are independently tagged in the
+instance document. Under BE-GAAP, passif = equity + provisions + liabilities (note:
+provisions sit between equity and liabilities, unlike the IFRS balance sheet where they
+sit within liabilities — do not confuse the structures). If total assets and total passif
+disagree beyond `max(2 EUR, 0.5% of the larger figure)`, the **entire filing is
+rejected**: `status="unbalanced"`, no values emitted. A balance sheet that does not close
+is untrustworthy by construction.
+
+### Financial-debt cross-check — the borrowings guarantee
+
+The `m51` rubric tags financial borrowings disaggregated by maturity (`rst`) and
+instrument type (`typ`). The engine:
+
+1. Collects all balance-sheet `m51` tranches (`bas=m51, ntr=m3, part=m3, prd=m1`),
+   excluding the subordinated `sts` cross-cut that would double-count across tranches.
+2. Checks that every remaining fact has **exactly** the expected dimension set
+   `{bas, ntr, part, prd, rst, typ}` and a maturity bucket in `{m1, m2}`. A deviating
+   structure (a subtotal without `typ`, a further sub-breakdown, an unexpected bucket)
+   means the total cannot be confirmed — suppress the entire debt block.
+3. Sums LT (`rst=m1`) and ST (`rst=m2`) tranches separately.
+4. **Independent cross-check:** the financial-nature slice of total liabilities
+   (`m50[ntr=m3]`, breakdown-free `rst=m1 + rst=m2` on the passif) is a **different
+   rubric** from `m51`, so it is a genuinely independent witness. The `m51` sum must
+   reconcile with this witness within `max(2 EUR, 0.5%)`.
+5. Only if the cross-check passes are `long_term_debt` and `short_term_debt` emitted —
+   **atomically**: if either half fails, neither is emitted. When the block is
+   suppressed, the engine falls back to liabilities-based leverage (from the `m50`
+   pack members) rather than emit a possibly-wrong borrowings figure.
+
+### `operating_profit` — always suppressed
+
+`operating_profit` (m44) is in the always-suppress list because its label is ambiguous
+on the one validated real filing available — a second real example is required before
+this concept can be safely unblocked. The reason is recorded in every filing's
+`suppressed` list. This has no knock-on effect on `net_income` (independently tagged as
+`m59/m4` breakdown-free) or any other concept.
+
+### Pre-tax result is not net income
+
+The dimensional model makes this explicit: `m59/m4 spec=m16` is the pre-tax result
+(a disaggregation); the breakdown-free `m59/m4` is the net result. Because the
+canonical-member selector requires an exact dimension match, the pre-tax breakout
+cannot match the `net_income` selector and is automatically excluded. There is no risk
+of the pre-tax figure being misreported as net income.
+
+## The `basis` field — BE
+
+All BE rows carry `basis="company"`. The BNB CBSO instance document embeds a
+consolidation-model indicator (`m120`) that distinguishes individual accounts from
+consolidated group accounts, but consolidated-model detection is deferred to a follow-up
+PR. Until then, both individual and consolidated filings are emitted with
+`basis="company"`.
+
+Note that `basis="company"` rows from the BNB CBSO register and
+`basis="consolidated"` rows from the EU ESEF pillar (`data/financials_eu/`) are already
+separated by output directory. They must **not** be merged without an explicit accounting
+and scope reconciliation: BE-GAAP differs materially from IFRS on lease accounting,
+pension, deferred tax, and the treatment of provisions; and the obligor universe covered
+by the register (all Belgian legal entities above the filing threshold) overlaps only
+partly with the ESEF pillar (listed EU groups that issued regulated debt or equity).
+
+## Identity — KBO and LEI
+
+**KBO enterprise number (`entity_id`):** The KBO (Kruispuntbank van Ondernemingen)
+enterprise number is the canonical Belgian legal-entity identifier — a 10-digit
+zero-padded string (e.g. `"0648822310"`). It is always normalised to 10 digits
+(stripping non-digits, left-zero-padding).
+
+- **`--be-file` path:** the KBO is derived from the filename (last
+  underscore-delimited stem token), so the file must be named consistently with the
+  CBSO deposit convention.
+- **`--be-numbers` path:** KBO numbers are passed directly on the command line and
+  normalised to 10 digits.
+
+**LEI resolution (library level):** When a spec carries a GLEIF LEI, the engine calls
+`GET https://api.gleif.org/api/v1/lei-records/{lei}` and extracts
+`entity.registeredAs`. This is accepted as the KBO **only when**
+`entity.legalAddress.country == "BE"` — there is no guess, no fuzzy match. A LEI
+from a non-Belgian jurisdiction returns `status="unresolved"` in the coverage report.
+LEI resolution is available at the library level (`build_be_financials`); the CLI
+`--be-numbers` flag takes KBO numbers directly and does not call GLEIF. In both modes,
+the resolved `lei` (if available) is carried through to every output row.
+
+## CLI usage — BE
+
+```bash
+# keyless path: parse one or more local .xbrl or deposit .zip files (dry-run)
+bottom_up_corpus register-financials --be-file m02_full_0648822310.xbrl
+
+# keyless path: multiple files, persist to disk
+bottom_up_corpus register-financials \
+  --be-file deposit_0200068636.zip deposit_0648822310.zip --write
+
+# API path: fetch via CBSO Authentic Data API (requires free subscription key)
+export BNB_CBSO_KEY=<your-key>
+bottom_up_corpus register-financials --be-numbers 0648822310 0200068636
+
+# API path: persist
+bottom_up_corpus register-financials --be-numbers 0648822310 --write
+```
+
+`--write` is the only side-effecting flag. Omitting it is a safe dry-run that prints
+the entity / period / unbalanced counts without touching disk.
+
+The `--be-file` and `--be-numbers` flags are mutually exclusive with each other and
+with `--orgnrs`, `--leis`, and `--ch-bulk`.
+
+**CBSO API key:** Register at `https://developer.cbso.nbb.be` (self-service, free). Set
+the key in the `BNB_CBSO_KEY` environment variable before calling `--be-numbers`. The
+key is passed as the `NBB-CBSO-Subscription-Key` header; the engine also sends a unique
+`X-Request-Id` per request (CBSO requirement).
+
+## Honest caveats — BE
+
+### Leverage is borrowings-based (but compare with source-awareness)
+
+The BE register is unique in this corpus in providing genuine financial-borrowings data
+via `m51`. The derived `total_debt`, `debt_to_equity`, `debt_to_assets`, and `net_debt`
+all rest on this borrowings basis — more precise than the total-liabilities basis used
+for NO and UK. However:
+
+- The `m50`-based fallback (liabilities-based) is used when the `m51` cross-check
+  fails or the `m51` tranche structure deviates. The `source` and `tag` fields let
+  downstream consumers identify which basis applies to a given row.
+- **Never compare leverage metrics across registers without checking `source`:** a
+  `debt_to_equity` from `source="bnb"` (borrowings) is not directly comparable to one
+  from `source="brreg"` or `source="companies_house"` (liabilities-based).
+
+### BE-GAAP statutory — separate from ESEF
+
+BNB CBSO filings follow **BE-GAAP** (Belgian Generally Accepted Accounting Principles),
+the statutory accounting standard for non-listed Belgian legal entities. Belgian listed
+groups also file **ESEF consolidated accounts** under IFRS — those are ingested by the
+EU ESEF pillar (`data/financials_eu/`) and must **never be merged** with BNB CBSO rows:
+the GAAP regime, the consolidation scope, and the obligor population differ.
+
+### BE-GAAP current-assets perimeter
+
+Under BE-GAAP, **all trade receivables — including those due beyond one year — are
+classified in current assets** (the `m12/m1` rubric). This means `assets_current`
+includes long-dated receivables that IFRS would classify as non-current. Users comparing
+BE current-asset figures to IFRS-based current assets for the same entity should be
+aware of this classification difference; it affects `working_capital`, `current_ratio`,
+`quick_ratio`, and any metric built on current assets.
+
+### `operating_profit` suppressed
+
+`operating_profit` (m44) is always suppressed in the current release — its label is
+ambiguous on the one validated real filing and a second real example is required before
+it can be safely unblocked. Consequently, `operating_margin`, `ebitda`, `ebitda_margin`,
+`nopat`, `roic`, `interest_coverage`, and `net_debt_to_ebitda` are not produced for BE
+rows. The `dep_amort` concept is mapped and ready; EBITDA will be automatically
+derivable once `operating_profit` is validated.
+
+### Consolidated-model detection deferred
+
+All rows carry `basis="company"`. The CBSO instance embeds a consolidation indicator
+(`m120`) that can distinguish individual from consolidated accounts, but reading it is
+deferred to a follow-up PR. Until then, a consolidated filing processed via the BE
+path will be tagged `basis="company"` — an inaccurate label that may mislead downstream
+queries filtering by `basis`.
+
+### Annual accounts only
+
+BNB CBSO holds statutory annual accounts. There are no quarterly or semi-annual periods.
+`frequency` is always `"annual"`.
+
+### Live/scale validation requires the free CBSO key
+
+The `--be-numbers` path requires the CBSO Authentic Data API subscription key, which is
+free but requires self-service registration. The parser and concept pack are validated
+against the public example filings published by the BNB; rate-limit behaviour,
+pagination for entities with large deposit histories, and key-quota handling are
+maintainer steps, not exercised in the unit tests.
+
+---
+
 ## Out of scope — future PRs
 
-The current implementation covers **Norway (Brreg)** (JSON, no XBRL) and **UK Companies
-House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path).
+The current implementation covers **Norway (Brreg)** (JSON, no XBRL), **UK Companies
+House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), and **Belgium BNB CBSO**
+(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path).
 
 National registers not yet supported:
 
-- **Belgium (BNB / Banque Nationale)** — XBRL
 - **Denmark (Erhvervsstyrelsen / Virk)** — XBRL / iXBRL
 
-These will require the **Tier B Arelle bridge** (already built for the ESEF pillar and
-reused for UK; see [`EU_FINANCIALS.md`](EU_FINANCIALS.md)) to be adapted to each
+Denmark will require the **Tier B Arelle bridge** (already built for the ESEF pillar and
+reused for UK; see [`EU_FINANCIALS.md`](EU_FINANCIALS.md)) to be adapted to the Danish
 register's taxonomy and delivery format.
 
 For the **UK pillar** specifically, the following are deferred to follow-up PRs:

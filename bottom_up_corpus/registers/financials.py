@@ -19,8 +19,11 @@ from ..config import Config
 from ..eu.oim import flatten_oim_json
 from ..financials import PeriodSummary, rows_from_base
 from ..storage import Storage, _atomic_write_text
+from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
+from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
 from .ch_ixbrl import oim_from_ch_html
+from .concepts_be import map_bnb_facts
 from .concepts_no import map_brreg_entry
 from .concepts_uk import map_ch_facts
 from .identity import resolve_register_specs
@@ -277,6 +280,219 @@ def build_ch_financials(
         cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
         _atomic_write_text(cov_path,
                            "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Belgium BNB CBSO register producer
+# ---------------------------------------------------------------------------
+# Note: consolidated model detection (m120) is out of scope; all entities are
+# emitted with basis="company" (the statutory individual accounts model).
+
+def _be_pipeline(
+    xbrl_source,
+    entity_id: str,
+    lei,
+    name: str,
+    *,
+    storage: Storage,
+    out: dict,
+    coverage: list[dict],
+    write: bool,
+) -> None:
+    """Parse, map, and emit rows for one BNB XBRL source (shared by both BE paths).
+
+    ``xbrl_source`` is either a :class:`pathlib.Path` (for the keyless path)
+    or ``bytes`` (for the API path after deposit extraction).  Raises on any
+    parse or mapping error — callers must wrap in ``try/except``.
+    """
+    # Single parse for both facts and period_end (M1: avoids double-parsing at batch scale).
+    flat, pe = parse_bnb_document(xbrl_source)
+    mapped = map_bnb_facts(flat, period_end=pe)
+
+    cov_base: dict = {"be_number": entity_id, "lei": lei}
+
+    if mapped["unbalanced"]:
+        cov = {**cov_base, "status": "unbalanced"}
+        if mapped.get("suppressed"):
+            cov["suppressed"] = mapped["suppressed"]
+        coverage.append(cov)
+        out["unbalanced"] += 1
+        return
+
+    if not mapped.get("values"):
+        cov = {**cov_base, "status": "no-financials"}
+        if mapped.get("suppressed"):
+            cov["suppressed"] = mapped["suppressed"]
+        coverage.append(cov)
+        out["no_financials"] += 1
+        return
+
+    s = _summary(
+        mapped, name or entity_id,
+        sec_form="bnb",
+        accession=f"bnb-{entity_id}-{mapped['period_end']}",
+    )
+    base = _base(entity_id, lei, mapped, s, country="BE", source="bnb")
+    rows = list(rows_from_base(base, s))
+
+    cov = dict(cov_base)
+    if mapped.get("suppressed"):
+        cov["suppressed"] = mapped["suppressed"]
+    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+
+
+def build_be_financials_from_files(
+    paths,
+    *,
+    config: Config,
+    write: bool = True,
+) -> dict:
+    """Parse a list of local BNB .xbrl or deposit .zip files -> the curated schema.
+
+    Each path is either a bare ``-data.xbrl`` file or a BNB deposit ``.zip``
+    (the three-file archive; the ``*-data.xbrl`` member is extracted via
+    :func:`open_bnb_deposit`).
+
+    The entity identifier (KBO) is derived from the filename: the last
+    underscore-delimited token of the stem is used (e.g.
+    ``m02_full_0648822310.xbrl`` → ``"0648822310"``).
+
+    Parameters
+    ----------
+    paths:
+        Iterable of file paths (str or Path) pointing to ``.xbrl`` or ``.zip``
+        files.
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for path in paths:
+        out["entities"] += 1
+        path_obj = Path(str(path))
+        # KBO from the last underscore-delimited stem token (or the whole stem).
+        entity_id = path_obj.stem.rsplit("_", 1)[-1]
+        cov_base: dict = {"be_number": entity_id, "lei": None}
+
+        try:
+            if path_obj.suffix.lower() == ".zip":
+                xbrl_bytes = open_bnb_deposit(path_obj.read_bytes())
+                xbrl_source = xbrl_bytes   # bytes
+            else:
+                xbrl_source = path_obj     # Path (parsed from disk)
+
+            _be_pipeline(
+                xbrl_source, entity_id, None, entity_id,
+                storage=storage, out=out, coverage=coverage, write=write,
+            )
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_be_financials(
+    specs,
+    *,
+    fetcher,
+    config: Config,
+    key: str,
+    write: bool = True,
+) -> dict:
+    """Fetch BNB deposit via the CBSO API and emit the curated schema.
+
+    Resolves each spec to a KBO number via :func:`resolve_register_specs`, then
+    calls :func:`fetch_bnb_deposit` to retrieve the latest deposit bytes.  The
+    deposit may be a deposit ``.zip`` or a bare ``.xbrl`` depending on the model
+    type; both are handled transparently.
+
+    Live / scale validation — rate limits, pagination behaviour for entities with
+    a large deposit history, key-quota behaviour — is a **maintainer step** and
+    is intentionally out of scope for this function.  Unit-test with a stubbed
+    fetcher returning fixture bytes.
+
+    Parameters
+    ----------
+    specs:
+        List of spec dicts accepted by :func:`resolve_register_specs` (e.g.
+        ``[{"be_number": "0648822310"}]`` or ``[{"lei": "…"}]``).
+    fetcher:
+        A :class:`bottom_up_corpus.http.Fetcher` instance (or any object that
+        exposes ``get_json`` and ``get``).
+    config:
+        Config instance (``data_dir`` for output).
+    key:
+        CBSO Authentic Data API subscription key.
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    resolved = resolve_register_specs(specs, fetcher=fetcher)
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for r in resolved:
+        out["entities"] += 1
+        be_number = r.get("be_number")
+        cov_base: dict = {"be_number": be_number, "lei": r.get("lei")}
+
+        if not be_number:
+            coverage.append({**cov_base, "status": "unresolved"})
+            out["no_financials"] += 1
+            continue
+
+        try:
+            deposit_bytes = _fetch_bnb_deposit(be_number, fetcher=fetcher, key=key)
+            if deposit_bytes is None:
+                coverage.append({**cov_base, "status": "no-financials"})
+                out["no_financials"] += 1
+                continue
+
+            # Detect deposit zip (PK magic) vs bare .xbrl bytes.
+            xbrl_bytes = (
+                open_bnb_deposit(deposit_bytes)
+                if deposit_bytes[:4] == b"PK\x03\x04"
+                else deposit_bytes
+            )
+
+            _be_pipeline(
+                xbrl_bytes, be_number, r.get("lei"), r.get("name") or be_number,
+                storage=storage, out=out, coverage=coverage, write=write,
+            )
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
         out["coverage_path"] = str(cov_path)
     else:
         out["coverage_path"] = None

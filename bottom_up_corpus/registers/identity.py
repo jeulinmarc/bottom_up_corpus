@@ -1,9 +1,12 @@
 """Resolve register specs to canonical entity keys:
-- Norway: orgnr directly, or LEI -> GLEIF registeredAs -> orgnr (digit-strip).
-- UK:     ch_number directly (verbatim), or LEI -> GLEIF registeredAs -> ch_number
-          (verbatim, only when legalAddress.country == "GB").
+- Norway:   orgnr directly, or LEI -> GLEIF registeredAs -> orgnr (digit-strip).
+- UK:       ch_number directly (verbatim), or LEI -> GLEIF registeredAs -> ch_number
+            (verbatim, only when legalAddress.country == "GB").
+- Belgium:  be_number directly (KBO, 10 digits), or LEI -> GLEIF registeredAs ->
+            be_number (only when legalAddress.country == "BE").
 """
 from __future__ import annotations
+import re
 
 _GLEIF = "https://api.gleif.org/api/v1/lei-records/{lei}"
 
@@ -14,6 +17,11 @@ def _norm_ch_number(s: str) -> str:
     if s.isdigit():
         return s.zfill(8)
     return s
+
+
+def _norm_kbo(s: str) -> str:
+    """Strip non-digit characters; preserve leading zero; zero-pad to 10 digits."""
+    return re.sub(r"\D", "", s).zfill(10)
 
 
 def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
@@ -31,9 +39,15 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "lei": spec.get("lei"), "name": spec.get("name", ""),
                         "country": "NO", "status": "ok"})
             continue
-        # --- LEI -> GLEIF path (NO and GB) ---
+        # --- BE direct path: be_number (KBO) provided ---
+        if spec.get("be_number"):
+            out.append({"be_number": _norm_kbo(str(spec["be_number"])),
+                        "lei": spec.get("lei"), "name": spec.get("name", ""),
+                        "country": "BE", "status": "ok"})
+            continue
+        # --- LEI -> GLEIF path (NO, GB, BE) ---
         lei = spec.get("lei")
-        orgnr = ch_number = name = country = None
+        orgnr = ch_number = be_number = name = country = None
         if lei:
             try:
                 raw = fetcher.get_json(_GLEIF.format(lei=lei))
@@ -47,11 +61,16 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                 orgnr = "".join(ch for ch in str(ra) if ch.isdigit())
             elif country == "GB" and ra:
                 ch_number = _norm_ch_number(str(ra))
+            elif country == "BE" and ra:
+                be_number = _norm_kbo(str(ra))
         if orgnr:
             out.append({"orgnr": orgnr, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
         elif ch_number:
             out.append({"ch_number": ch_number, "lei": lei, "name": name or spec.get("name", ""),
+                        "country": country or "", "status": "ok"})
+        elif be_number:
+            out.append({"be_number": be_number, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
         else:
             out.append({"orgnr": None, "lei": lei, "name": name or spec.get("name", ""),
