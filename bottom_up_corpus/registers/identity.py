@@ -8,6 +8,8 @@
                business_id (only when legalAddress.country == "FI").
 - Luxembourg:  rcs directly, or LEI -> GLEIF registeredAs -> rcs
                (only when legalAddress.country == "LU").
+- Estonia:     registrikood directly (8 digits), or LEI -> GLEIF registeredAs ->
+               registrikood (only when legalAddress.country == "EE").
 """
 from __future__ import annotations
 import re
@@ -40,6 +42,11 @@ def _norm_rcs(s: str) -> str:
     The ``B`` prefix is kept; digits are never zero-padded.
     """
     return re.sub(r"[\s.]+", "", s).upper()
+
+
+def _norm_registrikood(s: str) -> str:
+    """Strip non-digit characters; left-pad to 8 digits (EE registry code)."""
+    return re.sub(r"\D", "", str(s)).zfill(8)
 
 
 def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
@@ -75,9 +82,15 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "lei": spec.get("lei"), "name": spec.get("name", ""),
                         "country": "LU", "status": "ok"})
             continue
-        # --- LEI -> GLEIF path (NO, GB, BE, FI, LU) ---
+        # --- EE direct path: registrikood provided ---
+        if spec.get("registrikood"):
+            out.append({"registrikood": _norm_registrikood(str(spec["registrikood"])),
+                        "lei": spec.get("lei"), "name": spec.get("name", ""),
+                        "country": "EE", "status": "ok"})
+            continue
+        # --- LEI -> GLEIF path (NO, GB, BE, FI, LU, EE) ---
         lei = spec.get("lei")
-        orgnr = ch_number = be_number = business_id = rcs = name = country = None
+        orgnr = ch_number = be_number = business_id = rcs = registrikood = name = country = None
         if lei:
             try:
                 raw = fetcher.get_json(_GLEIF.format(lei=lei))
@@ -97,6 +110,8 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                 business_id = _norm_ytunnus(str(ra))
             elif country == "LU" and ra:
                 rcs = _norm_rcs(str(ra))
+            elif country == "EE" and ra:
+                registrikood = _norm_registrikood(str(ra))
         if orgnr:
             out.append({"orgnr": orgnr, "lei": lei, "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
@@ -111,6 +126,10 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
                         "country": country or "", "status": "ok"})
         elif rcs:
             out.append({"rcs": rcs, "lei": lei, "name": name or spec.get("name", ""),
+                        "country": country or "", "status": "ok"})
+        elif registrikood:
+            out.append({"registrikood": registrikood, "lei": lei,
+                        "name": name or spec.get("name", ""),
                         "country": country or "", "status": "ok"})
         else:
             out.append({"orgnr": None, "lei": lei, "name": name or spec.get("name", ""),

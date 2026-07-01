@@ -1,4 +1,4 @@
-"""Tests for the EE Äriregister bulk CSV-join register (Tasks 1 & 2)."""
+"""Tests for the EE Äriregister bulk CSV-join register (Tasks 1, 2 & 3)."""
 import re
 
 import pytest
@@ -198,3 +198,53 @@ def test_map_ee_ngo_template_is_no_financials():
     reason = _reason(m, "__all__")
     assert reason is not None
     assert "Assets" in reason or "no-financials" in reason.lower()
+
+
+# ===========================================================================
+# Task 3 — EE identity (registrikood / LEI->GLEIF registeredAs)
+# ===========================================================================
+
+from bottom_up_corpus.registers.identity import _norm_registrikood, resolve_register_specs
+
+
+class _GleifFetcherEE:
+    """Stub GLEIF fetcher returning a fixed country + registeredAs."""
+
+    def __init__(self, country, registered_as):
+        self._c, self._r = country, registered_as
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": "ACME EESTI AS"},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_norm_registrikood_strips_whitespace_and_pads():
+    """_norm_registrikood strips non-digits and left-pads to 8 digits."""
+    assert _norm_registrikood(" 11098261 ") == "11098261"
+    assert _norm_registrikood("11098261") == "11098261"
+    assert _norm_registrikood("EE11098261") == "11098261"
+
+
+def test_ee_lei_resolves_via_gleif_registeredas():
+    """A LEI for an EE entity resolves via GLEIF registeredAs -> registrikood."""
+    r = resolve_register_specs(
+        [{"lei": "L_EE1"}],
+        fetcher=_GleifFetcherEE("EE", "11098261"),
+    )[0]
+    assert r["registrikood"] == "11098261"
+    assert r["lei"] == "L_EE1"
+    assert r["status"] == "ok"
+    assert r["country"] == "EE"
+
+
+def test_non_ee_lei_is_unresolved():
+    """A LEI whose GLEIF country != EE must not produce a registrikood (no-guess)."""
+    r = resolve_register_specs(
+        [{"lei": "L_LV1"}],
+        fetcher=_GleifFetcherEE("LV", "40003009497"),
+    )[0]
+    assert r.get("registrikood") is None
+    assert r["status"] == "unresolved"
