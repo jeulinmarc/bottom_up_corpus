@@ -483,3 +483,154 @@ class TestDownloadLuQuarter:
         from bottom_up_corpus.registers.lu_cdb import download_lu_quarter
         with pytest.raises(RuntimeError, match="Failed to download"):
             download_lu_quarter("https://example.com/q.xml", fetcher=self._FailingFetcher())
+
+
+# ---------------------------------------------------------------------------
+# Task 5: producer (build_lu_financials_from_files) + CLI (--lu-file)
+# ---------------------------------------------------------------------------
+
+class TestBuildLuFinancialsFromFiles:
+    """build_lu_financials_from_files — keyless local-path producer."""
+
+    def test_writes_jsonl_with_correct_rows(self, tmp_path):
+        """write=True writes data/financials_register/B60814.jsonl; rows carry
+        source='lbr', country='LU', basis='company', and the validated values."""
+        import json
+        from bottom_up_corpus.config import Config
+        from bottom_up_corpus.registers.financials import build_lu_financials_from_files
+
+        cfg = Config(data_dir=tmp_path)
+        out = build_lu_financials_from_files([str(FERRERO)], config=cfg, write=True)
+
+        # Summary counters
+        assert out["entities"] == 1
+        assert out["with_financials"] == 1
+        assert out["no_financials"] == 0
+        assert out["errors"] == 0
+
+        # File written at the expected path
+        out_file = tmp_path / "financials_register" / "B60814.jsonl"
+        assert out_file.exists(), f"Expected {out_file} to be written"
+
+        rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+        assert rows, "JSONL must not be empty"
+
+        # Identity columns on every row
+        # Ferrero's fiscal year ends 31 August; the fixture carries period_end=2021-08-31.
+        # "2022" in the filename is the taxonomy version, not the period.
+        for row in rows:
+            assert row["source"] == "lbr"
+            assert row["country"] == "LU"
+            assert row["basis"] == "company"
+            assert row["period_end"] == "2021-08-31"
+            assert row["fy"] == 2021
+            assert row["currency"] == "EUR"
+
+        # Equity = 3,545,668,561 (ecdf:301)
+        eq_rows = [r for r in rows if r["concept"] == "equity" and r["kind"] == "reported"]
+        assert eq_rows, "equity reported row missing"
+        assert round(eq_rows[0]["value"]) == 3_545_668_561
+
+        # Borrowings-based debt_to_equity derived concept present
+        dte_rows = [r for r in rows if r["concept"] == "debt_to_equity" and r["kind"] == "derived"]
+        assert dte_rows, "debt_to_equity derived row missing"
+
+        # total_debt = long_term_debt + short_term_debt = 4,540,773,958
+        td_rows = [r for r in rows if r["concept"] == "total_debt" and r["kind"] == "derived"]
+        assert td_rows, "total_debt derived row missing"
+        assert round(td_rows[0]["value"]) == 4_540_773_958
+
+    def test_dry_run_no_file_written(self, tmp_path):
+        """write=False: counters correct, no JSONL written."""
+        from bottom_up_corpus.config import Config
+        from bottom_up_corpus.registers.financials import build_lu_financials_from_files
+
+        cfg = Config(data_dir=tmp_path)
+        out = build_lu_financials_from_files([str(FERRERO)], config=cfg, write=False)
+
+        assert out["with_financials"] == 1
+        out_file = tmp_path / "financials_register" / "B60814.jsonl"
+        assert not out_file.exists(), "Dry-run must not write any file"
+        assert out["paths"] == []
+
+    def test_rcs_filter_excludes_non_matching(self, tmp_path):
+        """rcs_filter restricts which entities are processed; no match -> 0 entities."""
+        from bottom_up_corpus.config import Config
+        from bottom_up_corpus.registers.financials import build_lu_financials_from_files
+
+        cfg = Config(data_dir=tmp_path)
+        out = build_lu_financials_from_files(
+            [str(FERRERO)], config=cfg, write=False, rcs_filter={"BXXX"}
+        )
+        assert out["entities"] == 0
+
+    def test_rcs_filter_matching_entity_passes(self, tmp_path):
+        """rcs_filter={'B60814'} passes Ferrero through."""
+        from bottom_up_corpus.config import Config
+        from bottom_up_corpus.registers.financials import build_lu_financials_from_files
+
+        cfg = Config(data_dir=tmp_path)
+        out = build_lu_financials_from_files(
+            [str(FERRERO)], config=cfg, write=False, rcs_filter={"B60814"}
+        )
+        assert out["entities"] == 1
+        assert out["with_financials"] == 1
+
+    def test_error_isolation(self, tmp_path):
+        """A bad path is counted as an error; the good path still processes."""
+        from bottom_up_corpus.config import Config
+        from bottom_up_corpus.registers.financials import build_lu_financials_from_files
+
+        cfg = Config(data_dir=tmp_path)
+        out = build_lu_financials_from_files(
+            ["/nonexistent/lu/B00000.xml", str(FERRERO)],
+            config=cfg, write=False,
+        )
+        assert out["errors"] == 1
+        assert out["with_financials"] == 1
+
+
+class TestCliLuFile:
+    """CLI register-financials --lu-file wiring."""
+
+    def test_dry_run_no_write(self, tmp_path):
+        """--lu-file dry-run: rc=0, no JSONL written."""
+        from bottom_up_corpus.cli import main
+
+        rc = main([
+            "--data-dir", str(tmp_path),
+            "register-financials",
+            "--lu-file", str(FERRERO),
+        ])
+        assert rc == 0
+        out_file = tmp_path / "financials_register" / "B60814.jsonl"
+        assert not out_file.exists(), "Dry-run must not write any file"
+
+    def test_write_produces_jsonl(self, tmp_path):
+        """--lu-file --write: rc=0, JSONL file written."""
+        from bottom_up_corpus.cli import main
+
+        rc = main([
+            "--data-dir", str(tmp_path),
+            "register-financials",
+            "--lu-file", str(FERRERO),
+            "--write",
+        ])
+        assert rc == 0
+        out_file = tmp_path / "financials_register" / "B60814.jsonl"
+        assert out_file.exists(), f"Expected {out_file} to exist after --write"
+
+    def test_rcs_filter_via_cli(self, tmp_path):
+        """--rcs B60814 passes the Ferrero entity; no --write means dry-run."""
+        from bottom_up_corpus.cli import main
+
+        rc = main([
+            "--data-dir", str(tmp_path),
+            "register-financials",
+            "--lu-file", str(FERRERO),
+            "--rcs", "B60814",
+        ])
+        assert rc == 0
+        # Dry-run: no file written even with matching --rcs
+        out_file = tmp_path / "financials_register" / "B60814.jsonl"
+        assert not out_file.exists()

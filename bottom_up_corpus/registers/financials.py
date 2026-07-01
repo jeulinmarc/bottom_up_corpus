@@ -24,9 +24,11 @@ from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
 from .ch_ixbrl import oim_from_ch_html
 from .concepts_be import map_bnb_facts
+from .concepts_lu import map_lu_entity
 from .concepts_no import map_brreg_entry
 from .concepts_uk import map_ch_facts
 from .identity import resolve_register_specs
+from .lu_cdb import iter_lu_declarers
 from .no_brreg import fetch_brreg_accounts
 
 # Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
@@ -401,6 +403,105 @@ def build_be_financials_from_files(
             coverage.append({**cov_base, "status": "error", "error": str(exc)})
             out["errors"] += 1
             continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_lu_financials_from_files(
+    paths,
+    *,
+    config: Config,
+    write: bool = True,
+    rcs_filter=None,
+) -> dict:
+    """Parse a list of local LBR eCDF XML files and emit the curated schema.
+
+    Each file is a STATEC/LBR eCDF bulk XML (as published on data.public.lu) or
+    a single-entity XML; it may contain one or more ``<Declarer>`` elements.
+    Each declarer is mapped via :func:`map_lu_entity` and emitted through the
+    shared ``_emit_entity_rows`` tail.
+
+    Parameters
+    ----------
+    paths:
+        Iterable of file paths (str or Path) pointing to eCDF XML files.
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    rcs_filter:
+        Optional collection of RCS strings (e.g. ``{"B60814"}``).  When
+        provided, only declarers whose ``rcs`` is in the set are processed.
+        Pass ``None`` (the default) to process every declarer.
+    """
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for path in paths:
+        path_obj = Path(str(path))
+        # Materialise all declarers for this file inside a try so that a bad
+        # path (missing file, malformed XML) is isolated from the rest of the batch.
+        try:
+            declarers = list(iter_lu_declarers(path_obj, rcs_filter=rcs_filter))
+        except Exception as exc:  # noqa: BLE001 — path-level error, no entity_id
+            coverage.append({"rcs": path_obj.name, "lei": None,
+                             "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+        for declarer in declarers:
+            out["entities"] += 1
+            entity_id = declarer["rcs"]
+            cov_base: dict = {"rcs": entity_id, "lei": None}
+
+            try:
+                mapped = map_lu_entity(declarer["declarations"])
+
+                if mapped["unbalanced"]:
+                    cov = {**cov_base, "status": "unbalanced"}
+                    if mapped.get("suppressed"):
+                        cov["suppressed"] = mapped["suppressed"]
+                    coverage.append(cov)
+                    out["unbalanced"] += 1
+                    continue
+
+                if not mapped.get("values"):
+                    cov = {**cov_base, "status": "no-financials"}
+                    if mapped.get("suppressed"):
+                        cov["suppressed"] = mapped["suppressed"]
+                    coverage.append(cov)
+                    out["no_financials"] += 1
+                    continue
+
+                s = _summary(
+                    mapped, declarer.get("name") or entity_id,
+                    sec_form="lbr",
+                    accession=f"lbr-{entity_id}-{mapped['period_end']}",
+                )
+                base = _base(entity_id, None, mapped, s, country="LU", source="lbr")
+                rows = list(rows_from_base(base, s))
+
+                cov = dict(cov_base)
+                if mapped.get("suppressed"):
+                    cov["suppressed"] = mapped["suppressed"]
+                _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
+                                  write=write)
+
+            except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+                coverage.append({**cov_base, "status": "error", "error": str(exc)})
+                out["errors"] += 1
+                continue
 
     if write:
         cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
