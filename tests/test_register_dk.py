@@ -2,14 +2,29 @@
 
 Task 1 — stdlib DK-GAAP FSA XBRL parser (``dk_fsa_xbrl.parse_fsa_facts``).
 Task 2 — DK-GAAP concept pack + NO-FALSE-DATA gate (``concepts_dk.map_fsa_facts``).
+
+Fixtures — all real, provenance-clean DK-GAAP class-B filings served verbatim by
+Virk/ERST (``distribution.virk.dk`` -> ``regnskaber.virk.dk``):
+
+  * ``dk_30830725_microB_2025`` — NIPE FINANS ApS, micro-B, FY ending 2025-09-30.
+  * ``dk_30560000_2024``        — K.Kirch ApS, FY ending 2025-12-31.
+  * ``dk_42566551_2025``        — Sneaks2Peak ApS, a FY2025 wind-down. Its
+    ``fsa:Provisions`` (15,844) and ``fsa:Revenue`` (36,536) are tagged ONLY in
+    the 2024 comparative; the 2025 current period settled them. This is the
+    regression fixture for the period-mixing bug: the fixed parser must NOT leak
+    those prior-only facts into the current-period view.
+  * ``dk_42710644_provisions``  — Taxikørsel 011 ApS, class B, FY2025. Its
+    CURRENT period carries ``fsa:Provisions`` (4,469) > 0 — the honest fixture
+    for the provisions-in-liabilities branch (prior year was a different 24,475,
+    so a period-mixed parse would break the reconciliation).
 """
-import pytest
 from bottom_up_corpus.registers.dk_fsa_xbrl import parse_fsa_facts
 from bottom_up_corpus.registers.concepts_dk import map_fsa_facts
 
 MICROB = "tests/fixtures/dk/dk_30830725_microB_2025.xml"
-PROVISIONS = "tests/fixtures/dk/dk_42566551_provisions_2024.xml"
 STANDARD = "tests/fixtures/dk/dk_30560000_2024.xml"
+WINDDOWN = "tests/fixtures/dk/dk_42566551_2025.xml"
+PROVISIONS = "tests/fixtures/dk/dk_42710644_provisions.xml"
 
 
 def _suppressed_keys(result):
@@ -38,6 +53,49 @@ def test_parse_fsa_facts_microb_2025():
     assert facts["Equity"] == -585256.0
     assert facts["LiabilitiesAndEquity"] == 6744.0
     assert facts["CashAndCashEquivalents"] == 1744.0
+
+
+def test_parse_current_period_only_excludes_prior_only_facts():
+    """REGRESSION (no period-mixing): the parser selects the CURRENT reporting
+    period only and never leaks a prior-period-only fact.
+
+    dk_42566551 is a real FY2025 wind-down. fsa:Provisions (15,844) and
+    fsa:Revenue (36,536) are tagged ONLY in the 2024 comparative context; the
+    2025 current period settled them. The fixed parser therefore OMITS both from
+    the current-period facts (never defaulted, never leaked from the prior year),
+    and the current row balances on its own.
+    """
+    result = parse_fsa_facts(WINDDOWN)
+
+    assert result["currency"] == "DKK"
+    assert result["period_end"] == "2025-12-31"      # current balance-sheet date
+
+    facts = result["facts"]
+
+    # The heart of the bug: a fact present ONLY in the prior-year context must be
+    # ABSENT from the current-period view — not leaked, not defaulted.
+    assert "Provisions" not in facts
+    assert "Revenue" not in facts
+
+    # Current-period (2025) figures — internally consistent for one period alone.
+    assert facts["Assets"] == 77480.0
+    assert facts["LiabilitiesAndEquity"] == 77480.0
+    assert facts["Equity"] == 77480.0
+    assert facts["Assets"] == facts["LiabilitiesAndEquity"]   # balances alone
+    assert facts["CashAndCashEquivalents"] == 5462.0
+    assert facts["ProfitLoss"] == -2981.0
+    assert facts["GrossProfitLoss"] == -2981.0
+
+
+def test_parse_provisions_selects_current_period_value():
+    """The provisions fixture tags fsa:Provisions in BOTH years (current 4,469,
+    prior 24,475). The fixed parser returns the CURRENT 4,469 — never the prior
+    24,475 — and the current balance sheet reconciles."""
+    facts = parse_fsa_facts(PROVISIONS)["facts"]
+    assert facts["Provisions"] == 4469.0
+    assert facts["Assets"] == 279025.0
+    assert facts["LiabilitiesAndEquity"] == 279025.0
+    assert facts["Assets"] == facts["LiabilitiesAndEquity"]
 
 
 # ===========================================================================
@@ -99,40 +157,76 @@ def test_map_microb_short_term_debt_reconciles_alone():
     assert "financial_debt" in _suppressed_keys(r)
 
 
+def test_map_winddown_current_period_has_no_provisions_or_revenue():
+    """dk_42566551 (FY2025 wind-down): the RESTORED real filing's current period.
+    Gate holds; derived liabilities are 0 (LiabilitiesAndEquity 77,480 − Equity
+    77,480 — every liability was settled); provisions and revenue are ABSENT
+    because they belong only to the settled prior year. Absent/zero provisions in
+    the current period is the truth — assert it (never the leaked prior 15,844)."""
+    r = map_fsa_facts(parse_fsa_facts(WINDDOWN))
+    v = r["values"]
+    assert r["unbalanced"] is False
+    assert r["period_end"] == "2025-12-31"
+    assert v["assets"]["value"] == 77480.0
+    assert v["equity"]["value"] == 77480.0
+    assert v["liabilities"]["value"] == 0.0             # all liabilities settled
+    assert v["net_income"]["value"] == -2981.0
+    assert v["gross_profit"]["value"] == -2981.0
+    # Provisions is a prior-year-only fact -> never emitted for the current period.
+    assert "provisions" not in v
+    # Revenue tagged only in the prior year -> suppressed (§32 + prior-only).
+    assert "revenue" not in v
+    assert "revenue" in _suppressed_keys(r)
+
+
 def test_map_provisions_derived_liabilities_capture_provisions():
-    """dk_42566551 (FY2024): assets 107,347 · equity 83,832 · liabilities 23,515
-    (= 107,347 - 83,832, includes provisions 15,844) · gate exact."""
+    """dk_42710644 (Taxikørsel 011 ApS, FY2025): the CURRENT period carries
+    fsa:Provisions (4,469). Derived liabilities (LiabilitiesAndEquity 279,025 −
+    Equity 83,118 = 195,907) capture provisions automatically, and provisions is
+    also surfaced as its own reported value; gate holds."""
     r = map_fsa_facts(parse_fsa_facts(PROVISIONS))
     v = r["values"]
     assert r["unbalanced"] is False
-    assert v["assets"]["value"] == 107347.0
-    assert v["equity"]["value"] == 83832.0
-    assert v["liabilities"]["value"] == 23515.0          # captures provisions 15,844
-    assert v["provisions"]["value"] == 15844.0
+    assert r["period_end"] == "2025-12-31"
+    assert v["assets"]["value"] == 279025.0
+    assert v["equity"]["value"] == 83118.0
+    assert v["liabilities"]["value"] == 195907.0         # captures provisions 4,469
+    assert v["provisions"]["value"] == 4469.0
     assert v["provisions"]["tag"] == "fsa:Provisions"
-    assert v["net_income"]["value"] == -34060.0
+    # Provisions are inside the derived total liabilities.
+    assert v["liabilities"]["value"] >= v["provisions"]["value"]
+    assert v["net_income"]["value"] == 63109.0
 
 
 def test_map_provisions_split_reconciles_with_provisions():
-    """The lone short bucket (7,671) + provisions (15,844) reconcile to the
-    derived liabilities (23,515) -> emit short_term_debt; provisions stay a
-    separate reported value, NOT counted as debt; no long bucket -> not emitted."""
+    """The lone short bucket (191,438) + provisions (4,469) reconcile to the
+    derived liabilities (195,907) -> emit short_term_debt; provisions stay a
+    SEPARATE reported value, NOT counted as debt; no long bucket -> not emitted.
+
+    This reconciliation holds ONLY because provisions is the CURRENT 4,469 (not
+    the prior-year 24,475) — a period-mixed parse would break it (191,438 +
+    24,475 = 215,913 != 195,907)."""
     r = map_fsa_facts(parse_fsa_facts(PROVISIONS))
-    assert r["values"]["short_term_debt"]["value"] == 7671.0
+    assert r["values"]["short_term_debt"]["value"] == 191438.0
     assert "long_term_debt" not in r["values"]
     # Provisions reported separately, not merged into the debt keys.
-    assert r["values"]["provisions"]["value"] == 15844.0
+    assert r["values"]["provisions"]["value"] == 4469.0
 
 
-def test_map_provisions_revenue_present_is_emitted():
-    """When fsa:Revenue IS tagged (36,536 here) revenue is emitted from it —
-    the suppression rule fires only when fsa:Revenue is absent."""
-    r = map_fsa_facts(parse_fsa_facts(PROVISIONS))
-    assert r["values"]["revenue"]["value"] == 36536.0
+def test_map_revenue_emitted_when_directly_tagged():
+    """When fsa:Revenue IS tagged, revenue is emitted from it — the §32
+    suppression fires only when fsa:Revenue is absent. Uses a synthetic parsed
+    dict: every real DK class-B fixture here presents Bruttoresultat and omits
+    fsa:Revenue in the current period, so this branch has no real fixture."""
+    parsed = {"period_end": "2025-12-31", "currency": "DKK",
+              "facts": {"Assets": 1000.0, "LiabilitiesAndEquity": 1000.0,
+                        "Equity": 400.0, "Revenue": 5000.0,
+                        "GrossProfitLoss": 250.0}}
+    r = map_fsa_facts(parsed)
+    assert r["values"]["revenue"]["value"] == 5000.0
     assert r["values"]["revenue"]["tag"] == "fsa:Revenue"
-    # This filing has no GrossProfitLoss line -> gross_profit suppressed.
-    assert "gross_profit" not in r["values"]
-    assert "gross_profit" in _suppressed_keys(r)
+    # GrossProfitLoss keeps its own key and is never conflated with revenue.
+    assert r["values"]["gross_profit"]["value"] == 250.0
 
 
 def test_map_standard_gate_and_net_income():

@@ -24,11 +24,22 @@ contexts have no scenario at all.  The selection priority is:
 
 Mixed-basis facts (consolidated + solo) are never emitted together.
 
-Duplicate-period deduplication
--------------------------------
-Balance-sheet items appear for both the current and prior year instant dates.
-When a local name appears in multiple selected contexts the fact whose context
-carries the **latest** date (``xbrli:instant`` or ``xbrli:endDate``) is kept.
+Current-period selection (NO period-mixing)
+-------------------------------------------
+A DK-GAAP filing carries the current AND the prior-year figures side by side
+(current/prior instant dates for the balance sheet, current/prior duration
+periods for the P&L). We anchor on a single **current reporting period** and
+emit only that period's facts:
+
+  * ``period_end`` = the **max ``xbrli:instant``** across the selected contexts
+    (the current balance-sheet date).
+  * a balance-sheet (instant) fact counts only when its context ``instant`` ==
+    ``period_end``; a P&L (duration) fact counts only when its context
+    ``endDate`` == ``period_end`` (the current fiscal year).
+  * a fact tagged **only** in a prior-period context is **excluded** — never
+    leaked into the current view, never defaulted. This keeps the emitted row
+    internally consistent (e.g. ``Assets == LiabilitiesAndEquity`` holds for the
+    current period alone) even when the company changed year over year.
 
 Public API
 ----------
@@ -91,22 +102,29 @@ def _parse_date(text: str) -> "date | None":
         return None
 
 
-def _context_date(ctx: ET.Element) -> "date | None":
-    """Return the most specific period date for a context element.
+def _context_period(ctx: ET.Element) -> "tuple[str | None, date | None]":
+    """Classify a context's period as ``(kind, end_date)``.
 
-    Prefers ``xbrli:instant``; falls back to ``xbrli:endDate``.
-    Returns ``None`` when neither is present or parseable.
+    ``kind`` is ``"instant"`` when the context carries an ``xbrli:instant`` (a
+    balance-sheet snapshot) or ``"duration"`` when it carries an
+    ``xbrli:endDate`` (a P&L period, keyed on its end date). ``end_date`` is the
+    parsed date used for current-period selection. Returns ``(None, None)`` when
+    neither is present or parseable.
     """
     period = ctx.find(_TAG_PERIOD)
     if period is None:
-        return None
-    for tag in (_TAG_INSTANT, _TAG_END_DATE):
-        el = period.find(tag)
-        if el is not None and el.text and el.text.strip():
-            d = _parse_date(el.text)
-            if d is not None:
-                return d
-    return None
+        return (None, None)
+    inst = period.find(_TAG_INSTANT)
+    if inst is not None and inst.text and inst.text.strip():
+        d = _parse_date(inst.text)
+        if d is not None:
+            return ("instant", d)
+    end = period.find(_TAG_END_DATE)
+    if end is not None and end.text and end.text.strip():
+        d = _parse_date(end.text)
+        if d is not None:
+            return ("duration", d)
+    return (None, None)
 
 
 def _classify_context(ctx: ET.Element) -> "str | None":
@@ -135,25 +153,28 @@ def _classify_context(ctx: ET.Element) -> "str | None":
     return None
 
 
-def _build_selected_contexts(root: ET.Element) -> "dict[str, date | None]":
-    """Return ``{ctx_id: period_date}`` for the selected basis.
+def _build_selected_contexts(
+    root: ET.Element,
+) -> "dict[str, tuple[str | None, date | None]]":
+    """Return ``{ctx_id: (kind, end_date)}`` for the selected basis.
 
-    Priority: nodim > solo > consolidated.  Never mixes bases.
+    ``kind``/``end_date`` come from :func:`_context_period`. Priority:
+    nodim > solo > consolidated. Never mixes bases.
     """
-    nodim: dict[str, "date | None"] = {}
-    solo: dict[str, "date | None"] = {}
-    consolidated: dict[str, "date | None"] = {}
+    nodim: dict[str, tuple] = {}
+    solo: dict[str, tuple] = {}
+    consolidated: dict[str, tuple] = {}
 
     for ctx in root.iter(_TAG_CONTEXT):
         ctx_id = ctx.get("id", "")
         classification = _classify_context(ctx)
-        d = _context_date(ctx)
+        period = _context_period(ctx)
         if classification == "nodim":
-            nodim[ctx_id] = d
+            nodim[ctx_id] = period
         elif classification == "solo":
-            solo[ctx_id] = d
+            solo[ctx_id] = period
         elif classification == "consolidated":
-            consolidated[ctx_id] = d
+            consolidated[ctx_id] = period
 
     if nodim:
         return nodim
@@ -192,15 +213,17 @@ def parse_fsa_facts(
     Returns
     -------
     dict with keys:
-        ``"period_end"``  — ``"YYYY-MM-DD"`` of the max selected-context date,
-                            or ``None`` when no dated context is found.
+        ``"period_end"``  — ``"YYYY-MM-DD"`` of the current balance-sheet date
+                            (max ``xbrli:instant`` across selected contexts), or
+                            ``None`` when no dated context is found.
         ``"currency"``    — ISO-4217 code (``"DKK"`` unless the unit says otherwise).
-        ``"facts"``       — ``{local_name: float}`` for every numeric fact in
-                            the ``fsa`` namespace whose ``contextRef`` is a
-                            selected context.  When the same local name appears
-                            in multiple selected contexts the fact with the
-                            **latest** context date is kept (current-period
-                            precedence for balance-sheet instant facts).
+        ``"facts"``       — ``{local_name: float}`` for the numeric ``fsa``-namespace
+                            facts of the **current reporting period only**: an
+                            instant fact whose context ``instant`` == ``period_end``
+                            or a duration fact whose context ``endDate`` ==
+                            ``period_end``. A fact tagged only in a prior-period
+                            context is excluded (never leaked, never defaulted),
+                            so the row is internally consistent for one period.
     """
     if isinstance(source, (str, Path)):
         tree = ET.parse(str(source))
@@ -208,19 +231,38 @@ def parse_fsa_facts(
     else:
         root = ET.fromstring(source)
 
-    # Build {ctx_id: date | None} for the selected basis
+    # Build {ctx_id: (kind, end_date)} for the selected basis.
     selected = _build_selected_contexts(root)
 
-    # period_end = max date among selected contexts
-    all_dates = [d for d in selected.values() if d is not None]
-    period_end: "str | None" = max(all_dates).isoformat() if all_dates else None
+    # period_end = the current balance-sheet date = max xbrli:instant across the
+    # selected contexts. This anchors the *current* reporting period. When a
+    # filing carries no balance-sheet (instant) context at all we fall back to
+    # the latest duration end date so a P&L-only document still resolves.
+    instant_dates = [d for kind, d in selected.values()
+                     if kind == "instant" and d is not None]
+    if instant_dates:
+        period_end_date: "date | None" = max(instant_dates)
+    else:
+        dur_dates = [d for _, d in selected.values() if d is not None]
+        period_end_date = max(dur_dates) if dur_dates else None
+    period_end: "str | None" = (
+        period_end_date.isoformat() if period_end_date is not None else None
+    )
+
+    # Contexts of the current reporting period: the balance-sheet snapshot at
+    # period_end (instant == period_end) AND the fiscal-year P&L ending at
+    # period_end (endDate == period_end). Prior-period contexts carry an earlier
+    # date and are excluded here, so a prior-only fact can never leak in.
+    current_ctx = {
+        ctx_id for ctx_id, (_, d) in selected.items()
+        if d is not None and d == period_end_date
+    }
 
     # Currency
     currency = _detect_currency(root)
 
-    # Collect fsa-namespace numeric facts, current-period wins on ties
-    # {local_name: (value, context_date)}
-    fact_best: dict[str, tuple[float, "date | None"]] = {}
+    # Collect fsa-namespace numeric facts from the current-period contexts only.
+    facts: dict[str, float] = {}
 
     for elem in root:
         # Match by namespace URI via Clark prefix — never by prefix name
@@ -232,7 +274,7 @@ def parse_fsa_facts(
             continue
 
         ctx_ref = elem.get("contextRef")
-        if ctx_ref not in selected:
+        if ctx_ref not in current_ctx:
             continue
 
         # Skip xsi:nil facts
@@ -248,21 +290,10 @@ def parse_fsa_facts(
         except ValueError:
             continue  # text/boolean fact — skip
 
-        ctx_date = selected[ctx_ref]
-
-        # Current-period selection: keep the fact with the max context date.
-        # None dates lose to any real date; equal dates keep the first seen.
-        if local not in fact_best:
-            fact_best[local] = (value, ctx_date)
-        else:
-            existing_date = fact_best[local][1]
-            newer = (
-                ctx_date is not None
-                and (existing_date is None or ctx_date > existing_date)
-            )
-            if newer:
-                fact_best[local] = (value, ctx_date)
-
-    facts = {name: val for name, (val, _) in fact_best.items()}
+        # Each balance-sheet / P&L line is tagged once for the current period; on
+        # the rare duplicate (same local name repeated in a current-period
+        # context) the first occurrence in document order wins.
+        if local not in facts:
+            facts[local] = value
 
     return {"period_end": period_end, "currency": currency, "facts": facts}
