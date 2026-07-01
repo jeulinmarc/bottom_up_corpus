@@ -148,3 +148,43 @@ def test_non_gb_lei_unresolved():
     )[0]
     assert r["status"] == "unresolved"
     assert not r.get("ch_number")
+
+
+# ---------------------------------------------------------------------------
+# iter_ch_bulk: keyless bulk zip iterator
+# ---------------------------------------------------------------------------
+
+def test_iter_ch_bulk_yields_both_fixtures(tmp_path):
+    import zipfile
+    from bottom_up_corpus.registers.ch_bulk import iter_ch_bulk
+
+    fixture_dir = "tests/fixtures/uk"
+    micro_bytes = open(f"{fixture_dir}/frs105_micro_02855129.html", "rb").read()
+    pl_bytes = open(f"{fixture_dir}/frs102_pl_SC741022.html", "rb").read()
+
+    zip_path = tmp_path / "accounts_bulk.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Prod223_4212_02855129_20260331.html", micro_bytes)
+        zf.writestr("Prod223_4212_SC741022_20250831.html", pl_bytes)
+
+    results = list(iter_ch_bulk(str(zip_path)))
+    numbers = {ch for ch, _ in results}
+    assert numbers == {"02855129", "SC741022"}
+    assert all(len(b) > 0 for _, b in results)
+
+
+def test_iter_ch_bulk_limit(tmp_path):
+    import zipfile
+    from bottom_up_corpus.registers.ch_bulk import iter_ch_bulk
+
+    fixture_dir = "tests/fixtures/uk"
+    micro_bytes = open(f"{fixture_dir}/frs105_micro_02855129.html", "rb").read()
+    pl_bytes = open(f"{fixture_dir}/frs102_pl_SC741022.html", "rb").read()
+
+    zip_path = tmp_path / "accounts_bulk.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Prod223_4212_02855129_20260331.html", micro_bytes)
+        zf.writestr("Prod223_4212_SC741022_20250831.html", pl_bytes)
+
+    results = list(iter_ch_bulk(str(zip_path), limit=1))
+    assert len(results) == 1
