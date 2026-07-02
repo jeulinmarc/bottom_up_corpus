@@ -262,11 +262,72 @@ def test_synthetic_esef_row_builds_correct_urls():
 
 
 def test_unknown_issuer_returns_empty():
-    """Entity name not in the companies map → empty list, no errors."""
+    """Entity name not in the companies map → empty list."""
     stub = _make_stub()  # no extra; "UNKNOWN CORP" is absent
     src = OneInfoIT(fetcher=stub)
     docs = src.discover(Entity(lei="L_NONE", name="UNKNOWN CORP XYZ", country="IT"))
     assert docs == []
+
+
+# -----------------------------------------------------------------------
+# A-I3b regression: name-miss records resolve-no-match error
+# -----------------------------------------------------------------------
+
+def test_name_miss_records_resolve_no_match():
+    """When the companies map loads successfully but entity name is absent,
+    a 'resolve-no-match' error is recorded (peers: FI, GB, DK all do this).
+    Old code returned None silently with no error recorded."""
+    stub = _make_stub()  # companies map loaded; "UNKNOWN CORP XYZ" absent
+    src = OneInfoIT(fetcher=stub)
+    src.discover(Entity(lei="L_NONE", name="UNKNOWN CORP XYZ", country="IT"))
+
+    resolve_errors = [e for e in src.errors if e["context"] == "resolve-no-match"]
+    assert resolve_errors, (
+        "expected a 'resolve-no-match' error for an entity whose name is absent "
+        "from the 1Info company map"
+    )
+
+
+def test_failed_companies_load_not_cached():
+    """A failed companies-endpoint fetch must not be cached as an empty map.
+    Old code cached {} → every subsequent entity for the same src silently
+    returned [] (no error).  Fix: don't cache on failure; next call retries."""
+    call_count = [0]
+
+    class _RetryableFetcher:
+        def get_json(self, url, **_):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ConnectionError("transient")
+            # Second and subsequent calls succeed
+            return [{"ndg": 117, "descrizione": "ENI", "id": 0, "idRow": 0}]
+
+        def post_json(self, url, body, **_):
+            return {"draw": 1, "recordsFiltered": 0, "data": []}
+
+    src = OneInfoIT(fetcher=_RetryableFetcher())
+
+    # First call: load fails → records "companies" error, returns []
+    docs1 = src.discover(Entity(lei="L1", name="ENI", country="IT"))
+    assert docs1 == []
+    assert any(e["context"] == "companies" for e in src.errors), (
+        "first failed load must record a 'companies' error"
+    )
+
+    # Second call: same src, load retried (not cached from first failure) → succeeds
+    docs2 = src.discover(Entity(lei="L1", name="ENI", country="IT"))
+    assert docs2 == []  # POST returns empty data, but resolve succeeded
+    # Only one "companies" error — the second load succeeded (no new error)
+    assert sum(e["context"] == "companies" for e in src.errors) == 1, (
+        "exactly one companies error (from the first failed load)"
+    )
+    # ENI found after retry → no resolve-no-match error
+    assert not any(e["context"] == "resolve-no-match" for e in src.errors), (
+        "ENI must resolve after successful retry"
+    )
+    assert call_count[0] == 2, (
+        "companies endpoint must be called twice: once (failed) + once (retry)"
+    )
 
 
 def test_list_issuers_returns_empty():

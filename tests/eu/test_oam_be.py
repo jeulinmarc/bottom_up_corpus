@@ -467,6 +467,36 @@ def test_pagination_without_result_count():
     assert stub.full_calls == 3  # page1, page2, empty-terminates
 
 
+# ---------------------------------------------------------------------------
+# A-I3a regression: live curl_cffi path records error on non-2xx
+# ---------------------------------------------------------------------------
+
+def test_live_path_non_2xx_is_recorded():
+    """A WAF 403 (body present but status non-2xx) must be recorded as an error;
+    the body must NOT be silently treated as authoritative empty data."""
+
+    class _FakeResp:
+        status_code = 403
+        def json(self):
+            # Body looks valid (a WAF block page serialised to JSON) but it's not data.
+            return {"storiResultItems": [{"requiredReportingTopicId": "T-FAKE",
+                                          "companyName": "WAF",
+                                          "reportingTopicName": "other",
+                                          "mainDocuments": [], "attachments": []}]}
+
+    class _FakeSession:
+        def post(self, *a, **kw): return _FakeResp()
+        def get(self, *a, **kw): return _FakeResp()
+
+    src = StoriBE()
+    # Inject our fake curl_cffi session so _ensure_session() returns it directly
+    # without touching the real lazy-import path.
+    src._session = _FakeSession()
+    docs = src.discover(Entity(lei=None, name="X", country="BE", isins=("BE0000000001",)))
+    assert docs == [], "a 403 response must yield no documents"
+    assert src.errors, "at least one error must be recorded for the 403 response"
+
+
 def test_peek_error_falls_through_to_full_search():
     """A transient peek failure must not drop the ISIN — falls through to full search."""
     company = "0417497106"

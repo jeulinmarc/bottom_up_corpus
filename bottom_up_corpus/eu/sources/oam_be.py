@@ -358,6 +358,8 @@ class StoriBE(OamSource):
         if session is None:
             return {}
         resp = session.post(url, json=body, headers=_HEADERS)
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"HTTP {resp.status_code} from {url}")
         return resp.json()
 
     def _get_json(self, url: str) -> object:
@@ -367,6 +369,8 @@ class StoriBE(OamSource):
         if session is None:
             return None
         resp = session.get(url, headers=_HEADERS)
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"HTTP {resp.status_code} from {url}")
         return resp.json()
 
     def _ensure_session(self):

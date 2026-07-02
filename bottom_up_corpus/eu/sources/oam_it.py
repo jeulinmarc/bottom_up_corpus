@@ -161,7 +161,10 @@ class OneInfoIT(OamSource):
     # Internals
     # ------------------------------------------------------------------
 
-    def _load_companies(self) -> dict[str, int]:
+    def _load_companies(self) -> dict[str, int] | None:
+        """Load the name->ndg map.  Returns None (not {}) on failure so the caller
+        knows not to cache the result — a transient error must not permanently silence
+        every subsequent entity."""
         url = BASE + "/API/companies/documenti"
         try:
             rows = self.fetcher.get_json(url)
@@ -172,12 +175,29 @@ class OneInfoIT(OamSource):
             }
         except Exception as exc:  # noqa: BLE001
             self._record_error("companies", url, exc)
-            return {}
+            return None  # do NOT return {}; caller must not cache this
 
     def _resolve_ndg(self, name: str) -> int | None:
         if self._companies is None:
-            self._companies = self._load_companies()
-        return self._companies.get(_normalise(name))
+            loaded = self._load_companies()
+            if loaded is None:
+                # Load failed; error already recorded. Don't cache the failure so
+                # a subsequent call can retry (e.g. after a transient network error).
+                return None
+            self._companies = loaded
+
+        key = _normalise(name)
+        ndg = self._companies.get(key)
+        if ndg is None:
+            self._record_error(
+                "resolve-no-match",
+                BASE + "/API/companies/documenti",
+                RuntimeError(
+                    f"no company match for {name!r} "
+                    f"(normalised {key!r}) in 1Info company list"
+                ),
+            )
+        return ndg
 
     def _build_document(
         self,
