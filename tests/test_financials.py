@@ -323,6 +323,31 @@ def test_total_debt_rollup_still_adds_separate_short_term_borrowing():
     assert d["total_debt"]["value"] == 1200
 
 
+def test_total_debt_short_term_only_borrower():
+    from bottom_up_corpus.financials import compute_derived
+    # A commercial-paper / all-current-debt issuer (only short_term_debt, no
+    # long-term line) still gets a real total_debt = short_term_debt and the
+    # leverage ratios that build on it.
+    vals = {
+        "short_term_debt": {"value": 500.0, "unit": "USD", "tag": "CommercialPaper"},
+        "equity": {"value": 1000.0, "unit": "USD"},
+        "assets": {"value": 2000.0, "unit": "USD"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 500
+    assert d["debt_to_equity"]["value"] == pytest.approx(0.5)
+    assert d["debt_to_assets"]["value"] == pytest.approx(0.25)
+
+
+def test_total_debt_none_for_debt_free_filer():
+    from bottom_up_corpus.financials import compute_derived
+    # No debt component of any kind -> total_debt stays None (never coerced to 0).
+    vals = {"equity": {"value": 1000.0, "unit": "USD"}, "assets": {"value": 2000.0, "unit": "USD"}}
+    d = compute_derived(vals)
+    assert "total_debt" not in d
+    assert "debt_to_equity" not in d
+
+
 def test_net_debt_no_double_count_for_combined_cash_tag():
     from bottom_up_corpus.financials import compute_derived
     vals = {

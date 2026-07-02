@@ -503,12 +503,16 @@ def compute_derived(
     ac, lc = _num(values, "assets_current"), _num(values, "liabilities_current")
     cash = _num(values, "cash")
 
-    # Aggregates
-    ltd = _num(values, "long_term_debt")
+    # Aggregates. total_debt is emitted whenever ANY debt component is present
+    # (long-term, its current portion, or short-term), summed additively -- so a
+    # commercial-paper / all-current-debt issuer gets its real total_debt =
+    # short_term_debt, while a genuinely debt-free filer (no component) stays None.
+    debt_keys = ("long_term_debt", "lt_debt_current", "short_term_debt")
     total_debt = None
-    if ltd is not None:
+    if any(_num(values, k) is not None for k in debt_keys):
         ltd_tag = _src(values, "long_term_debt")
         short_tag = _src(values, "short_term_debt")
+        ltd = opt("long_term_debt")
         cur = opt("lt_debt_current")
         st = opt("short_term_debt")
         if ltd_tag in _ROLLUP_LTD_TAGS:
