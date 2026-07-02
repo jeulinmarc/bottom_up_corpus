@@ -61,3 +61,65 @@ def test_oim_from_esef_zip_raises_clear_error_when_arelle_missing(monkeypatch, t
     z = tmp_path / "x.zip"; z.write_bytes(b"PK\x03\x04")
     with pytest.raises(ImportError, match="eu-financials"):
         arelle_esef.oim_from_esef_zip(str(z))
+
+
+def test_tls_cert_check_stays_on_when_verify_tls_true(monkeypatch, tmp_path):
+    """When config.verify_tls=True (default), noCertificateCheck must NOT be set
+    to True on the Arelle controller — fix for unconditional TLS-off."""
+    import sys, types, zipfile, io
+    from bottom_up_corpus.config import Config
+
+    # Write a minimal ESEF zip. The inner-path check is
+    # ``n.endswith(".xhtml") and "/reports/" in n`` — the path must have a
+    # parent component (e.g. "issuer/reports/a.xhtml") for "/reports/" to match.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("issuer/reports/a.xhtml", "<html/>")
+    zip_path = str(tmp_path / "test.zip")
+    (tmp_path / "test.zip").write_bytes(buf.getvalue())
+
+    # Inject a stub arelle package so the `from arelle import Cntlr` inside
+    # oim_from_esef_zip doesn't raise ImportError (arelle not installed here).
+    fake_arelle_cntlr_mod = types.ModuleType("arelle.Cntlr")
+    fake_arelle_mod = types.ModuleType("arelle")
+    fake_arelle_mod.Cntlr = fake_arelle_cntlr_mod
+    monkeypatch.setitem(sys.modules, "arelle", fake_arelle_mod)
+    monkeypatch.setitem(sys.modules, "arelle.Cntlr", fake_arelle_cntlr_mod)
+
+    class _WebCache:
+        """Mutable cache stub.  noCertificateCheck starts False (instance attr)."""
+        def __init__(self):
+            self.noCertificateCheck = False
+
+    class _FakeCntrl:
+        """Minimal Arelle controller stub: webCache + modelManager.load → None."""
+        def close(self): pass
+        class _MM:
+            @staticmethod
+            def load(p): return None
+        modelManager = _MM()
+
+    cfg_on = Config(data_dir=tmp_path, verify_tls=True)
+    cfg_off = Config(data_dir=tmp_path, verify_tls=False)
+
+    # Case 1: verify_tls=True — noCertificateCheck must remain False.
+    cntlr_on = _FakeCntrl()
+    cntlr_on.webCache = _WebCache()         # instance attribute; starts False
+    try:
+        arelle_esef.oim_from_esef_zip(zip_path, cntlr=cntlr_on, config=cfg_on)
+    except Exception:
+        pass  # ValueError("no facts") expected — model.load() returns None
+    assert cntlr_on.webCache.noCertificateCheck is False, (
+        "noCertificateCheck must remain False when verify_tls=True"
+    )
+
+    # Case 2: verify_tls=False — noCertificateCheck must be set to True.
+    cntlr_off = _FakeCntrl()
+    cntlr_off.webCache = _WebCache()        # separate instance; starts False
+    try:
+        arelle_esef.oim_from_esef_zip(zip_path, cntlr=cntlr_off, config=cfg_off)
+    except Exception:
+        pass
+    assert cntlr_off.webCache.noCertificateCheck is True, (
+        "noCertificateCheck must be True when verify_tls=False"
+    )
