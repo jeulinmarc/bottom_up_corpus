@@ -420,9 +420,22 @@ def _src(values: dict, key: str) -> str | None:
     return v.get("tag") if v else None
 
 
+# Long-term-debt tags that are current-INCLUSIVE roll-ups: they already contain
+# the current maturities of long-term debt, so the current tranche must NOT be
+# added on top (doing so double-counts -> overstated leverage). US-GAAP
+# LongTermDebt / LongTermDebtAndCapitalLeaseObligations and IFRS Borrowings.
+_ROLLUP_LTD_TAGS: frozenset[str] = frozenset({
+    "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations", "Borrowings",
+})
+# The roll-up's OWN current tranche (a total current-debt line the roll-up already
+# subsumes): US-GAAP DebtCurrent, IFRS CurrentBorrowings. When long_term_debt came
+# from a roll-up, a short_term_debt resolving to one of these is NOT added again.
+_ROLLUP_OWN_CURRENT_TAGS: frozenset[str] = frozenset({"DebtCurrent", "CurrentBorrowings"})
+
+
 def compute_derived(
     values: dict[str, dict], frequency: str = "annual", currency: str = "USD",
-    is_financial: bool = False,
+    is_financial: bool | None = False,
 ) -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
@@ -497,12 +510,25 @@ def compute_derived(
         ltd_tag = _src(values, "long_term_debt")
         short_tag = _src(values, "short_term_debt")
         cur = opt("lt_debt_current")
-        # LongTermDebt is the FASB roll-up (current + noncurrent); DebtCurrent
-        # already includes current maturities of LTD. Either case already counts
-        # the current portion, so do not add lt_debt_current again.
-        if ltd_tag == "LongTermDebt" or short_tag == "DebtCurrent":
+        st = opt("short_term_debt")
+        if ltd_tag in _ROLLUP_LTD_TAGS:
+            # long_term_debt resolved from a current-INCLUSIVE roll-up (US-GAAP
+            # LongTermDebt[AndCapitalLeaseObligations], IFRS Borrowings): its own
+            # current maturities are already inside it. Never add lt_debt_current,
+            # and add short_term_debt only when it is a genuinely separate
+            # short-term borrowing (commercial paper, notes) -- NOT the roll-up's
+            # own current tranche (DebtCurrent / CurrentBorrowings), which the
+            # roll-up already contains. (Borrowings=1000 + CurrentBorrowings=300
+            # with no NoncurrentBorrowings -> true total is 1000, not 1300.)
             cur = 0
-        total_debt = ltd + cur + opt("short_term_debt")
+            if short_tag in _ROLLUP_OWN_CURRENT_TAGS:
+                st = 0
+        elif short_tag == "DebtCurrent":
+            # Clean noncurrent-only LTD split + DebtCurrent (= current LTD + ST):
+            # DebtCurrent already includes the current maturities of LTD, so don't
+            # add lt_debt_current on top of it.
+            cur = 0
+        total_debt = ltd + cur + st
     put("total_debt", total_debt)
 
     leases = (opt("finance_lease_current") + opt("finance_lease_noncurrent")

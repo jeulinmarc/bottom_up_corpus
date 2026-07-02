@@ -271,6 +271,58 @@ def test_total_debt_no_double_count_for_debtcurrent():
     assert d["total_debt"]["value"] == 140  # 100 + 40 (DebtCurrent), current portion not re-added
 
 
+def test_total_debt_no_double_count_for_ifrs_borrowings_rollup():
+    from bottom_up_corpus.financials import compute_derived
+    # IFRS `Borrowings` is a current-INCLUSIVE roll-up; `CurrentBorrowings` is its
+    # own current tranche (already inside it). With no NoncurrentBorrowings the
+    # true total is the roll-up itself (1000), NOT 1000 + 300.
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "EUR", "tag": "Borrowings"},
+        "short_term_debt": {"value": 300.0, "unit": "EUR", "tag": "CurrentBorrowings"},
+        "equity": {"value": 2000.0, "unit": "EUR"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["total_debt"]["value"] == 1000            # not 1300
+    assert d["debt_to_equity"]["value"] == pytest.approx(0.50)  # not 0.65
+
+
+def test_total_debt_ifrs_clean_split_unchanged():
+    from bottom_up_corpus.financials import compute_derived
+    # Clean IFRS split: NoncurrentBorrowings (long-term only) + CurrentBorrowings
+    # -> additive, total = 700 + 300 = 1000 (the roll-up guard must not fire here).
+    vals = {
+        "long_term_debt": {"value": 700.0, "unit": "EUR", "tag": "NoncurrentBorrowings"},
+        "short_term_debt": {"value": 300.0, "unit": "EUR", "tag": "CurrentBorrowings"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["total_debt"]["value"] == 1000
+
+
+def test_total_debt_us_gaap_longtermdebt_plus_debtcurrent_not_doubled():
+    from bottom_up_corpus.financials import compute_derived
+    # US-GAAP `LongTermDebt` roll-up (incl. current maturities) + `DebtCurrent`
+    # (the total current-debt line it already subsumes) -> total is the roll-up
+    # (1000), not 1000 + 300.
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebt"},
+        "short_term_debt": {"value": 300.0, "unit": "USD", "tag": "DebtCurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 1000            # not 1300
+
+
+def test_total_debt_rollup_still_adds_separate_short_term_borrowing():
+    from bottom_up_corpus.financials import compute_derived
+    # A LongTermDebt roll-up + genuinely-separate commercial paper (not the
+    # roll-up's own current tranche) -> the CP IS additive: 1000 + 200 = 1200.
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebt"},
+        "short_term_debt": {"value": 200.0, "unit": "USD", "tag": "CommercialPaper"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 1200
+
+
 def test_net_debt_no_double_count_for_combined_cash_tag():
     from bottom_up_corpus.financials import compute_derived
     vals = {
