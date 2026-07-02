@@ -25,10 +25,12 @@ from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
 from .ch_ixbrl import oim_from_ch_html
 from .concepts_be import map_bnb_facts
+from .concepts_ee import map_ee_report as _map_ee_report
 from .concepts_fi import map_fi_facts
 from .concepts_lu import map_lu_entity
 from .concepts_no import map_brreg_entry
 from .concepts_uk import map_ch_facts
+from .ee_csv import download_ee_bulk as _download_ee_bulk, iter_ee_reports as _iter_ee_reports
 from .fi_prh_xbrl import parse_fi_facts
 from .identity import resolve_register_specs
 from .lu_cdb import iter_lu_declarers
@@ -1210,3 +1212,193 @@ def build_dk_financials(
     else:
         out["coverage_path"] = None
     return out
+
+
+# ---------------------------------------------------------------------------
+# Estonia Äriregister (RIK) bulk-CSV register producer
+# ---------------------------------------------------------------------------
+# Keyless open-data — no subscription key required.  stdlib csv + zipfile only.
+# The bulk CSV join (_iter_ee_reports) + concept map (_map_ee_report) handle
+# parsing/mapping.  basis="company" (RIK standalone statutory accounts). EUR.
+#
+# net_income = TotalAnnualPeriodProfitLoss (FINAL after tax) — NEVER TotalProfitLoss.
+# Liabilities-based leverage: short_term_debt=CurrentLiabilities,
+# long_term_debt=NonCurrentLiabilities.
+# interest_expense / interest_coverage: ALWAYS suppressed (not in RIK bulk).
+
+
+def build_ee_financials_from_files(
+    elem_path,
+    meta_path,
+    *,
+    config: Config,
+    write: bool = True,
+    limit: int | None = None,
+) -> dict:
+    """Iterate EE Äriregister bulk CSVs and emit the curated schema.
+
+    Joins the elements and metadata CSVs via :func:`iter_ee_reports`, groups all
+    reports by ``registrikood``, deduplicates same-period resubmissions (last-seen
+    wins — a proxy for the ``taidetud_aruanne_report_id`` supersession pointer which
+    is not surfaced by the iterator), and writes **one file per entity** with ALL of
+    its periods accumulated.  This mirrors the Norwegian :func:`build_register_financials`
+    accumulate-and-dedupe pattern, avoiding the silent per-report overwrite that
+    previously clobbered all but the last-processed period for an entity.
+
+    Parameters
+    ----------
+    elem_path:
+        File path (str / Path) or raw bytes of the elements CSV (or its .zip).
+    meta_path:
+        File path (str / Path) or raw bytes of the metadata CSV (or its .zip).
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    limit:
+        Cap on the number of reports streamed from the iterator.  ``None`` = no cap.
+    """
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    # --- Pass 1: stream reports up to *limit*, grouping by registrikood.
+    # Deduplication key = period_end within each registrikood; last-seen report wins
+    # for same-period resubmissions (mirrors _dedupe_latest for the NO producer,
+    # which keeps the highest Brreg submission id — here we use last-seen order as
+    # a proxy since iter_ee_reports does not surface taidetud_aruanne_report_id).
+    entity_groups: dict[str, dict[str, dict]] = {}  # rk -> {period_key -> report}
+    n_reports = 0
+
+    for report in _iter_ee_reports(elem_path, meta_path):
+        if limit is not None and n_reports >= limit:
+            break
+        n_reports += 1
+
+        registrikood = report.get("registrikood")
+        if not registrikood:
+            # No registrikood: count as entity + no-financials immediately.
+            out["entities"] += 1
+            coverage.append({"registrikood": None, "lei": None, "status": "no-financials"})
+            out["no_financials"] += 1
+            continue
+
+        period_end = report.get("period_end")
+        # Sentinel for unknown period_end so distinct unknown-period reports don't
+        # clobber each other.
+        period_key = (
+            period_end if period_end is not None
+            else f"_none_{report.get('report_id', n_reports)}"
+        )
+        if registrikood not in entity_groups:
+            entity_groups[registrikood] = {}
+        entity_groups[registrikood][period_key] = report  # last-seen wins
+
+    # --- Pass 2: emit one file per registrikood with all accumulated periods.
+    for registrikood, period_map in entity_groups.items():
+        out["entities"] += 1
+        cov_base: dict = {"registrikood": registrikood, "lei": None}
+
+        try:
+            rows: list[dict] = []
+            n_periods = 0
+            suppressed_all: list = []
+            had_unbalanced = False
+
+            for period_key in sorted(period_map):
+                report = period_map[period_key]
+                mapped = _map_ee_report(
+                    report["elements"], report["period_end"], registrikood
+                )
+
+                if mapped.get("suppressed"):
+                    suppressed_all.extend(mapped["suppressed"])
+
+                if mapped["unbalanced"]:
+                    had_unbalanced = True
+                    continue  # period gate failed; try next period for this entity
+
+                if not mapped.get("values"):
+                    continue  # NGO/no-financials period; try next
+
+                s = _summary(
+                    mapped, registrikood,
+                    sec_form="rik",
+                    accession=f"rik-{registrikood}-{mapped['period_end']}",
+                )
+                base = _base(registrikood, None, mapped, s, country="EE", source="rik")
+                rows.extend(rows_from_base(base, s))
+                n_periods += 1
+
+            cov = dict(cov_base)
+            if suppressed_all:
+                cov["suppressed"] = suppressed_all
+
+            # If no period produced rows and all failures were balance-gate rejections,
+            # classify the entity as "unbalanced" rather than "no-financials".
+            if not rows and had_unbalanced:
+                cov["status"] = "unbalanced"
+                coverage.append(cov)
+                out["unbalanced"] += 1
+                continue
+
+            _emit_entity_rows(registrikood, rows, n_periods, cov, storage, out, coverage,
+                              write=write)
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_ee_financials(
+    year: int,
+    *,
+    fetcher,
+    config: Config,
+    write: bool = True,
+    limit: int | None = None,
+    elem_url: str | None = None,
+    meta_url: str | None = None,
+) -> dict:
+    """Download EE Äriregister bulk CSVs for *year* and emit the curated schema.
+
+    Downloads the two bulk zips via :func:`download_ee_bulk` (keyless, CC-BY),
+    then pipes the bytes through :func:`build_ee_financials_from_files`.
+
+    Parameters
+    ----------
+    year:
+        Fiscal year of interest — passed to ``download_ee_bulk`` for logging.
+    fetcher:
+        HTTP fetcher (exposes ``get(url) -> response`` with ``.content``).
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    limit:
+        Cap on the number of reports processed.
+    elem_url:
+        Full URL for the elements zip (rotates with each RIK snapshot; obtain
+        from avaandmed.ariregister.rik.ee/et/avaandmete-allalaadimine).
+    meta_url:
+        Full URL for the metadata zip.
+    """
+    elem_bytes, meta_bytes = _download_ee_bulk(
+        year, fetcher=fetcher, elem_url=elem_url, meta_url=meta_url
+    )
+    return build_ee_financials_from_files(
+        elem_bytes, meta_bytes, config=config, write=write, limit=limit
+    )
