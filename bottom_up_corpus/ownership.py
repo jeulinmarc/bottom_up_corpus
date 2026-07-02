@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import date
 
 from .submission import parse_submission
 
@@ -307,9 +308,11 @@ def thirteenf_text(holdings: list[Holding], agg: dict, *, filer: str, report: st
     return "\n".join(lines)
 
 
-def thirteenf_rows(filer_cik: str, accession: str, holdings: list[Holding]) -> list[dict]:
+def thirteenf_rows(filer_cik: str, accession: str, holdings: list[Holding], filing_date: date) -> list[dict]:
+    unit = "USD" if filing_date >= date(2023, 1, 3) else "USD_thousands"
     return [{
         "cik": filer_cik, "accession": accession, "doc_type": "E2",
         "name_of_issuer": h.issuer, "cusip": h.cusip, "title_of_class": h.title_of_class,
         "value": h.value, "shares": h.shares, "share_type": h.share_type,
+        "value_unit": unit,
     } for h in holdings]

@@ -128,7 +128,7 @@ def test_parse_13f_holdings_and_aggregates():
     assert agg["num_positions"] == 2
     assert agg["total_value"] == 3500000
     assert agg["top"][0].issuer == "MICROSOFT CORP"  # largest by value
-    rows = thirteenf_rows("0001067983", "acc-13f", holdings)
+    rows = thirteenf_rows("0001067983", "acc-13f", holdings, date(2024, 5, 1))
     assert len(rows) == 2 and rows[0]["doc_type"] == "E2"
 
 
@@ -191,3 +191,25 @@ def test_process_ownership_dry_run_writes_nothing(make_fetcher, config):
     assert rep.parsed_insider == 0
     assert not (config.data_dir / "raw").exists()
     assert not config.ownership_dir.exists()
+
+
+def test_thirteenf_rows_value_unit_boundary():
+    from bottom_up_corpus.ownership import Holding, thirteenf_rows
+
+    h = Holding(issuer="ACME CORP", title_of_class="COM", cusip="000000000",
+                value=1000, shares=10, share_type="SH")
+
+    pre_rows = thirteenf_rows("0001234567", "acc-pre", [h], date(2022, 12, 31))
+    assert len(pre_rows) == 1
+    assert pre_rows[0]["value_unit"] == "USD_thousands"
+    assert pre_rows[0]["value"] == 1000
+
+    boundary_rows = thirteenf_rows("0001234567", "acc-bnd", [h], date(2023, 1, 3))
+    assert len(boundary_rows) == 1
+    assert boundary_rows[0]["value_unit"] == "USD"
+    assert boundary_rows[0]["value"] == 1000
+
+    post_rows = thirteenf_rows("0001234567", "acc-post", [h], date(2024, 1, 1))
+    assert len(post_rows) == 1
+    assert post_rows[0]["value_unit"] == "USD"
+    assert post_rows[0]["value"] == 1000
