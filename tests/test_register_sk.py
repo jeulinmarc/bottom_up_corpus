@@ -397,3 +397,53 @@ def test_map_ifrs_template_is_no_financials():
     assert m["values"] == {}
     assert m["unbalanced"] is False
     assert "__all__" in _suppressed_keys(m)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — SK identity (IČO / LEI->GLEIF registeredAs)
+# ---------------------------------------------------------------------------
+
+from bottom_up_corpus.registers.identity import _norm_ico, resolve_register_specs
+
+
+class _GleifFetcherSK:
+    """Stub GLEIF fetcher returning a fixed country + registeredAs."""
+
+    def __init__(self, country, registered_as):
+        self._c, self._r = country, registered_as
+
+    def get_json(self, url, **kw):
+        return {"data": {"attributes": {"entity": {
+            "legalName": {"name": "ACME SK S.R.O."},
+            "legalAddress": {"country": self._c},
+            "registeredAs": self._r,
+        }}}}
+
+
+def test_norm_ico_strips_and_pads():
+    """_norm_ico strips non-digits and left-pads to 8 digits."""
+    assert _norm_ico(" 31322832 ") == "31322832"
+    assert _norm_ico("31322832") == "31322832"
+    assert _norm_ico("SK31322832") == "31322832"
+
+
+def test_sk_lei_resolves_via_gleif_registeredas():
+    """A LEI for an SK entity resolves via GLEIF registeredAs -> ico."""
+    r = resolve_register_specs(
+        [{"lei": "L_SK1"}],
+        fetcher=_GleifFetcherSK("SK", "31322832"),
+    )[0]
+    assert r["ico"] == "31322832"
+    assert r["lei"] == "L_SK1"
+    assert r["status"] == "ok"
+    assert r["country"] == "SK"
+
+
+def test_non_sk_lei_is_unresolved():
+    """A LEI whose GLEIF country != SK must not produce an ico (no-guess)."""
+    r = resolve_register_specs(
+        [{"lei": "L_CZ1"}],
+        fetcher=_GleifFetcherSK("CZ", "27082440"),
+    )[0]
+    assert r.get("ico") is None
+    assert r["status"] == "unresolved"
