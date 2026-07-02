@@ -176,3 +176,53 @@ def test_empty_name_skips_eqs_only():
 def test_country_backends_includes_ch():
     from bottom_up_corpus.eu.acquire import COUNTRY_BACKENDS
     assert COUNTRY_BACKENDS["CH"] is DisclosureCH
+
+
+# ---------------------------------------------------------------------------
+# A-I2 regression: SIX pagination without a "total" field
+# ---------------------------------------------------------------------------
+
+def test_six_pagination_without_total_field():
+    """SIX feed returns 2 full pages then empty with NO 'total' field.
+    Old code defaulted absent total to 0 → ``len(items) >= 0`` always True → stopped
+    after page 1.  Fix: absent total keeps None → paginate until empty page."""
+    from urllib.parse import parse_qs, urlsplit
+
+    _PAGE = 100
+
+    def _six_item(i):
+        return {
+            "id": str(i),
+            "ad_hoc": False,
+            "news_date": 1740960000000,
+            "content": [{"title": f"Report {i}", "language": "en", "content": f"<p>Body {i}</p>"}],
+            "company": {"name": "TEST CO"},
+        }
+
+    page0 = [_six_item(i) for i in range(_PAGE)]
+    page1 = [_six_item(_PAGE + i) for i in range(_PAGE)]
+
+    class _NoTotalFetcher:
+        """SIX feed: 2 full pages then empty, NO 'total' key.  EQS: always empty."""
+
+        def get_json(self, url: str, **_):
+            q = parse_qs(urlsplit(url).query)
+            isin = q.get("isin", [""])[0]
+            if isin != _EQUITY_ISIN:
+                return {"data": []}              # unknown ISIN → empty
+            page = int(q.get("pageNumber", ["0"])[0])
+            if page == 0:
+                return {"data": page0}           # NO 'total' key
+            if page == 1:
+                return {"data": page1}           # NO 'total' key
+            return {"data": []}                  # empty → terminates
+
+        def get_text(self, url: str, *, params=None, **_):
+            return "<html></html>"               # EQS always empty
+
+    src = DisclosureCH(fetcher=_NoTotalFetcher())
+    docs = src.discover(ABB)
+    six_docs = [d for d in docs if d.native_meta["provider"] == "six"]
+    assert len(six_docs) == _PAGE * 2, (
+        f"expected {_PAGE * 2} SIX docs (2 pages × {_PAGE}), got {len(six_docs)}"
+    )

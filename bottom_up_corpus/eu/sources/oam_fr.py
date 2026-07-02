@@ -99,14 +99,18 @@ class InfoFinanciereFR(OamSource):
                 break
             batch = resp.get("results") or []
             if total_count is None:
-                total_count = resp.get("total_count", 0)
+                tc = resp.get("total_count")
+                if tc is not None:
+                    total_count = int(tc)
+                # When total_count is absent, pagination is driven by empty pages
+                # (mirrors FI/IT pattern) rather than a possibly-missing count.
             for rec in batch:  # defend against any offset overlap
                 uin = rec.get("uin_idt_uin")
                 if uin not in seen_uin:
                     seen_uin.add(uin)
                     results.append(rec)
             offset += _PAGE
-            if not batch or len(results) >= (total_count or 0):
+            if not batch or (total_count is not None and len(results) >= total_count):
                 break
         else:
             # Loop exhausted by the ODS deep-paging cap with records still missing.

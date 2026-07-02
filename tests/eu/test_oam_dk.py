@@ -422,6 +422,63 @@ def test_details_error_recorded_but_other_rows_continue():
     assert any(e["context"] == "details" for e in src.errors)
 
 
+def test_pagination_without_total_pages():
+    """Stub returns 2 full pages then empty with NO 'totalPages' field.
+    Old code defaulted absent totalPages to 1 → stopped after page 1.
+    Fix: absent totalPages drives pagination by empty rows instead."""
+
+    class _NoTotalPageStub:
+        def __init__(self):
+            self._config = json.loads((FIX / "dk_config.json").read_text())
+            self._details = json.loads((FIX / "dk_details.json").read_text())
+            self.post_calls: list[dict] = []
+
+        def get_json(self, url, **_):
+            if "/config" in url:
+                return self._config
+            return self._details
+
+        def post_json(self, url, body, **_):
+            self.post_calls.append(body)
+            page = body.get("page", 1)
+            if page <= 2:
+                rows = [
+                    {
+                        "id": f"row-{page}-{i}",
+                        "HeadlineColumn": f"Doc {page}-{i}",
+                        "IssuerColumn": "NOVO NORDISK A/S",
+                        "CategoryColumn": "YearlyFinancialReport",
+                        "PublicationDateColumn": "01-01-2025 00:00:00",
+                        "RegistrationDateColumn": "01-01-2025 00:00:00",
+                    }
+                    for i in range(3)
+                ]
+            else:
+                rows = []  # empty page → terminates
+            return {
+                "paging": {
+                    "page": page,
+                    "pageSize": 100,
+                    "totalCount": 6,
+                    # NO 'totalPages' key
+                },
+                "data": {"type": "table", "rows": rows},
+            }
+
+    stub = _NoTotalPageStub()
+    src = OamDK(fetcher=stub)
+    docs = src.discover(NOVO_ENTITY)
+
+    # 2 pages × 3 rows = 6 docs expected
+    assert len(docs) == 6, (
+        f"expected 6 docs from 2 pages without totalPages, got {len(docs)}"
+    )
+    assert len(stub.post_calls) == 3, (
+        f"expected 3 POST calls (page1, page2, empty page3), got {len(stub.post_calls)}"
+    )
+    assert not src.errors
+
+
 def test_doc_type_maps_english_detail_labels():
     """Live path: the search row's CategoryColumn is 'Udsteder'; the real category is
     the English label exposed in /details. Both forms must map."""

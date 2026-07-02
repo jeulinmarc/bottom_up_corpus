@@ -426,6 +426,47 @@ def test_peek_empty_isin_skipped():
     assert docs[0].doc_id == f"be-{item_a['requiredReportingTopicId']}"
 
 
+# ---------------------------------------------------------------------------
+# A-I2 regression: pagination without a resultCount field
+# ---------------------------------------------------------------------------
+
+def test_pagination_without_result_count():
+    """Stub returns 2 full pages then empty with NO resultCount field.
+    Old code defaulted absent resultCount to 0 → stopped after page 1.
+    Fix: absent resultCount keeps total=None → paginate until empty page."""
+    _PAGE_SIZE = 50
+    items_page1 = [_make_item(f"t-{i}", "001", f"f-{i}") for i in range(_PAGE_SIZE)]
+    items_page2 = [_make_item(f"t-{_PAGE_SIZE + i}", "001", f"f-{_PAGE_SIZE + i}")
+                   for i in range(_PAGE_SIZE)]
+
+    class _NoTotalStub:
+        def __init__(self):
+            self.full_calls = 0
+
+        def post_json(self, url, body, **_):
+            if body.get("pageSize") == 1:
+                # peek: return 1 item, NO resultCount
+                return {"storiResultItems": [dict(items_page1[0]) | {"companyNumber": "001"}]}
+            self.full_calls += 1
+            start = body.get("startRowIndex", 0)
+            if start == 0:
+                return {"storiResultItems": items_page1}       # NO resultCount
+            if start == _PAGE_SIZE:
+                return {"storiResultItems": items_page2}       # NO resultCount
+            return {"storiResultItems": []}                    # empty → terminates
+
+        def get_json(self, url, **_):
+            return {}
+
+    stub = _NoTotalStub()
+    src = StoriBE(http=stub)
+    docs = src.discover(Entity(lei=None, name="X", country="BE", isins=("BE0000000001",)))
+    assert len(docs) == _PAGE_SIZE * 2, (
+        f"expected {_PAGE_SIZE * 2} docs (2 pages), got {len(docs)}"
+    )
+    assert stub.full_calls == 3  # page1, page2, empty-terminates
+
+
 def test_peek_error_falls_through_to_full_search():
     """A transient peek failure must not drop the ISIN — falls through to full search."""
     company = "0417497106"

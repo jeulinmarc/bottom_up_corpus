@@ -197,9 +197,12 @@ class OamDK(OamSource):
             paging = resp.get("paging") or {}
             data_block = resp.get("data") or {}
             rows = data_block.get("rows") or []
-            total_pages = int(paging.get("totalPages") or 1)
+            _tp_raw = paging.get("totalPages")
+            total_pages = int(_tp_raw) if _tp_raw is not None else None
+            # When totalPages is absent, pagination is driven by empty pages
+            # (mirrors FI/IT pattern) rather than a possibly-missing count.
 
-            if page == 1 and total_pages > _MAX_PAGES:
+            if page == 1 and total_pages is not None and total_pages > _MAX_PAGES:
                 self._record_error(
                     "truncated",
                     f"{_BASE}/search",
@@ -253,8 +256,12 @@ class OamDK(OamSource):
                     },
                 ))
 
-            if page >= min(total_pages, _MAX_PAGES):
+            if not rows:
+                break  # empty page — all docs fetched (works with or without totalPages)
+            if total_pages is not None and page >= min(total_pages, _MAX_PAGES):
                 break
+            elif total_pages is None and page >= _MAX_PAGES:
+                break  # safety backstop when server omits totalPages
             page += 1
 
         return docs
