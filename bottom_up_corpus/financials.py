@@ -324,7 +324,7 @@ DERIVED_TTM_BY_KEY = {d.key: d for d in DERIVED_TTM}
 def compute_ttm_derived(
     *, t12: dict[str, float | None], avg_assets: float | None,
     avg_equity: float | None, pit_net_debt: float | None,
-    is_financial: bool = False,
+    is_financial: bool | None = False,
 ) -> dict[str, dict]:
     """Bloomberg-style TTM ratios from trailing-12m flows and average balances.
 
@@ -339,7 +339,7 @@ def compute_ttm_derived(
             return
         d = DERIVED_TTM_BY_KEY[key]
         out[key] = {"value": val, "unit": d.unit, "label": d.label,
-                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
+                    "sector_relevant": _sector_relevant(is_financial, key)}
 
     def div(a, b):
         return a / b if (a is not None and b not in (None, 0)) else None
@@ -462,6 +462,24 @@ def _attribution(tag: str | None) -> str | None:
     return None
 
 
+def _sector_relevant(is_financial: bool | None, key: str) -> bool | None:
+    """Whether a derived metric is sector-relevant for this issuer (E-I4).
+
+    Non-sector-sensitive metrics are always relevant. For the sector-sensitive block
+    (bank/insurer-low-information metrics), a financial issuer -> False, a KNOWN
+    non-financial issuer -> True, and an UNKNOWN sector (``is_financial is None`` --
+    e.g. an EU/ESEF issuer whose industry is not yet derived; see the NACE note in
+    ``eu/financials.py``) -> ``None``: we must not ASSERT a relevance we cannot back.
+    (Previously ``None`` silently collapsed to ``True``, falsely flagging every EU
+    bank/insurer metric as sector-relevant.)
+    """
+    if key not in SECTOR_SENSITIVE:
+        return True
+    if is_financial is None:
+        return None
+    return not is_financial
+
+
 def compute_derived(
     values: dict[str, dict], frequency: str = "annual", currency: str = "USD",
     is_financial: bool | None = False,
@@ -500,7 +518,7 @@ def compute_derived(
         else:
             unit = d.unit
         out[key] = {"value": val, "unit": unit, "label": d.label,
-                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
+                    "sector_relevant": _sector_relevant(is_financial, key)}
 
     def div(a: float | None, b: float | None) -> float | None:
         if a is None or b is None or b == 0:
@@ -732,10 +750,19 @@ class PeriodSummary:
     values: dict[str, dict] = field(default_factory=dict)
     currency: str = "USD"          # issuer's monetary reporting currency
     sic: str | None = None         # SEC SIC code (industry classification)
+    # False = the issuer's sector is UNKNOWN (no industry classification available,
+    # e.g. the EU/ESEF pillar), so is_financial resolves to None rather than a
+    # (false) non-financial. Defaults True: an absent SIC in a SIC-carrying pillar
+    # (SEC / registers) still means "not classified financial" (behavior unchanged).
+    sector_known: bool = True
     ttm: dict[str, dict] = field(default_factory=dict)
 
     @property
-    def is_financial(self) -> bool:
+    def is_financial(self) -> bool | None:
+        # None = sector unknown (see `sector_known`); the engine then declines to
+        # assert sector-relevance on the bank/insurer-sensitive derived metrics.
+        if not self.sector_known:
+            return None
         return _is_financial(self.sic)
 
     @property
@@ -960,10 +987,13 @@ def summaries_from_flat(
     flat: dict[str, list[dict]], *, concepts: tuple[Concept, ...],
     company: str, company_current: str, name_for_date=None,
     since_year: int | None = None, until_year: int | None = None,
-    sic: str | None = None,
+    sic: str | None = None, sector_known: bool = True,
 ) -> list[PeriodSummary]:
     """Group curated concepts into one summary per reporting period, from a
-    pre-flattened ``{tag: [points]}`` dict and an injectable concept pack."""
+    pre-flattened ``{tag: [points]}`` dict and an injectable concept pack.
+
+    ``sector_known=False`` marks the issuer's industry as unknown (no SIC/NACE
+    available, e.g. the EU/ESEF pillar) so ``is_financial`` resolves to None."""
     cbk = {c.key: c for c in concepts}
     currency = reporting_currency(flat)
     duration: dict[tuple[date, str], dict[str, list[dict]]] = {}
@@ -1020,7 +1050,7 @@ def summaries_from_flat(
             sec_form=first.get("form") or "XBRL",
             accession=first.get("accn") or f"XBRL-{end.isoformat()}-{freq}",
             company=pit or company, company_current=company_current, values=values,
-            currency=currency or "USD", sic=sic,
+            currency=currency or "USD", sic=sic, sector_known=sector_known,
         ))
     summaries.sort(key=lambda s: (s.period_end or date.min, s.frequency), reverse=True)
     return summaries

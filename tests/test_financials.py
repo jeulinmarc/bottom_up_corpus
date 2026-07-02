@@ -530,6 +530,37 @@ def test_non_financial_everything_sector_relevant():
     assert all(v["sector_relevant"] is True for v in d.values())
 
 
+def test_unknown_sector_does_not_assert_sector_relevance():
+    from bottom_up_corpus.financials import compute_derived
+    # is_financial=None (sector UNKNOWN, e.g. the EU/ESEF pillar) must NOT stamp the
+    # bank/insurer-sensitive metrics sector_relevant=True -- that asserts a relevance
+    # we can't back. They carry None (unknown); sector-neutral metrics stay True.
+    d = compute_derived(_sector_vals(), frequency="annual", is_financial=None)
+    for k in ("ebitda", "interest_coverage", "current_ratio", "net_debt", "gross_margin"):
+        assert d[k]["sector_relevant"] is None, k        # not True
+    assert d["net_margin"]["sector_relevant"] is True    # sector-neutral -> still True
+    assert d["total_debt"]["sector_relevant"] is True
+
+
+def test_period_summary_unknown_sector_yields_is_financial_none():
+    from bottom_up_corpus.financials import summaries_from_flat
+    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS
+    # An EU-style summary (sector_known=False) -> is_financial None, and its
+    # sector-sensitive derived metrics are not falsely stamped sector_relevant=True.
+    flat = {
+        "Revenue": [{"val": 100.0, "start": "2020-01-01", "end": "2020-12-31",
+                     "unit": "EUR", "tag": "Revenue", "filed": "2021-04-01", "form": "ar"}],
+        "ProfitLossFromOperatingActivities": [{"val": 20.0, "start": "2020-01-01", "end": "2020-12-31",
+                     "unit": "EUR", "tag": "ProfitLossFromOperatingActivities", "filed": "2021-04-01", "form": "ar"}],
+        "DepreciationAndAmortisationExpense": [{"val": 5.0, "start": "2020-01-01", "end": "2020-12-31",
+                     "unit": "EUR", "tag": "DepreciationAndAmortisationExpense", "filed": "2021-04-01", "form": "ar"}],
+    }
+    s = summaries_from_flat(flat, concepts=IFRS_CONCEPTS, company="X",
+                            company_current="X", sic=None, sector_known=False)[0]
+    assert s.is_financial is None
+    assert s.derived["ebitda"]["sector_relevant"] is None   # unknown, not True
+
+
 def test_period_summary_is_financial_from_sic():
     s = build_period_summaries(SAMPLE_FACTS, company="X", company_current="X", sic="6311")
     assert all(x.is_financial for x in s)
