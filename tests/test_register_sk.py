@@ -204,3 +204,196 @@ def test_iter_entity_ids_stops_on_error():
 
     ids = list(iter_entity_ids(fetcher=fetcher))
     assert ids == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — map_sk_vykaz: concept pack + NO-FALSE-DATA gate
+# ---------------------------------------------------------------------------
+
+def _suppressed_keys(mapped: dict) -> set:
+    return {k for k, _ in mapped["suppressed"]}
+
+
+def _synth_pod(assets, equity, liab, accruals, *, sablony=699, pristupnost="Verejné"):
+    """Minimal POD-shaped (vykaz, sablona) that yields the four gate cells.
+
+    Table 0 (assets) has 4 data columns → assets read from col 2.  Table 1
+    carries equity (r80), liabilities (r101) and accruals (r141) at col 0.
+    Values pass as ints/None; None → empty-string cell.
+    """
+    sablona = {"tabulky": [
+        {"pocetDatovychStlpcov": 4, "riadky": [{"cisloRiadku": 1}]},
+        {"pocetDatovychStlpcov": 2, "riadky": [
+            {"cisloRiadku": 80}, {"cisloRiadku": 101}, {"cisloRiadku": 141}]},
+    ]}
+    c = lambda x: "" if x is None else str(x)
+    vykaz = {
+        "idSablony": sablony,
+        "pristupnostDat": pristupnost,
+        "obsah": {
+            "titulnaStrana": {"ico": "99999999"},
+            "tabulky": [
+                {"data": ["", "", c(assets), ""]},                         # t0 r1 col2 = assets
+                {"data": [c(equity), "", c(liab), "", c(accruals), ""]},    # t1 r80/r101/r141 col0
+            ],
+        },
+    }
+    return vykaz, sablona
+
+
+def _synth_meta(sablony, pristupnost):
+    """A metadata-only (vykaz, sablona) with no positional tables."""
+    vykaz = {"idSablony": sablony, "pristupnostDat": pristupnost,
+             "obsah": {"titulnaStrana": {"ico": "99999999"}, "tabulky": []}}
+    return vykaz, {"tabulky": []}
+
+
+def test_map_pod_values_shape_and_balance():
+    """sk_36319007 POD: balanced (gate uses accruals) → curated values to the cent."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_36319007_POD.json"), _load("sk_sablona_699.json"))
+
+    assert m["basis"] == "company"
+    assert m["currency"] == "EUR"
+    assert m["unbalanced"] is False
+
+    v = m["values"]
+    assert v["assets"]["value"] == 1051307.0
+    assert v["equity"]["value"] == 262763.0
+    assert v["liabilities"]["value"] == 737181.0
+    assert v["net_income"]["value"] == 30719.0
+    assert v["operating_income"]["value"] == 58411.0
+    assert v["pretax_income"]["value"] == 34838.0
+    # every emitted value is EUR and carries an sk:r<cislo> provenance tag
+    assert v["assets"]["unit"] == "EUR"
+    assert v["equity"]["tag"] == "sk:r80"
+    assert v["net_income"]["tag"] == "sk:r61"
+
+
+def test_map_pod_gate_uses_accruals():
+    """POD balance is assets == equity + liabilities + accruals (51 363).
+
+    Without the accruals term equity+liabilities = 999 944 ≠ 1 051 307, so a
+    balanced result *proves* the POD-only accruals term is in the gate.
+    """
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_36319007_POD.json"), _load("sk_sablona_699.json"))
+    v = m["values"]
+    assert m["unbalanced"] is False
+    # equity + liabilities alone does NOT reach assets — accruals (51 363) close it.
+    assert v["equity"]["value"] + v["liabilities"]["value"] == 999944.0
+    assert v["equity"]["value"] + v["liabilities"]["value"] + 51363.0 == v["assets"]["value"]
+
+
+def test_map_pod_revenue_is_operating_revenue_total_not_net_turnover():
+    """revenue = operating_revenue_total (r2 = 2 005 372), NEVER net_turnover (r1 = 1 950 307)."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_36319007_POD.json"), _load("sk_sablona_699.json"))
+    v = m["values"]
+    assert v["revenue"]["value"] == 2005372.0        # operating_revenue_total (r2)
+    assert v["revenue"]["value"] != 1950307.0        # NOT net_turnover (r1)
+    assert v["revenue"]["tag"] == "sk:r2"
+    # the net_turnover trap is recorded as a suppression (auditable no-false-data)
+    assert "net_turnover" in _suppressed_keys(m)
+
+
+def test_map_pod_emits_borrowings_debt_block():
+    """Bank-loan lines present + nonzero → borrowings LT/ST emitted; interest positive as-is."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_36319007_POD.json"), _load("sk_sablona_699.json"))
+    v = m["values"]
+    assert v["long_term_debt"]["value"] == 150722.0
+    assert v["long_term_debt"]["tag"] == "sk:r121"
+    assert v["short_term_debt"]["value"] == 155854.0
+    assert v["short_term_debt"]["tag"] == "sk:r139"
+    assert v["interest_expense"]["value"] == 21002.0   # positive as-is, no abs()
+
+
+def test_map_pod_nodebt_suppresses_debt_block():
+    """sk_50296353: zero bank loans → debt block suppressed, equity/assets still emitted, gate holds."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_50296353_POD_nodebt.json"), _load("sk_sablona_699.json"))
+    v = m["values"]
+    assert m["unbalanced"] is False
+    assert "long_term_debt" not in v
+    assert "short_term_debt" not in v
+    assert {"long_term_debt", "short_term_debt"} <= _suppressed_keys(m)
+    assert v["equity"]["value"] == 8627.0
+    assert v["assets"]["value"] == 10152.0
+    # gate holds with no accruals term: 8 627 + 1 525 == 10 152
+    assert v["equity"]["value"] + v["liabilities"]["value"] == 10152.0
+
+
+def test_map_muj_map_and_gate_no_accruals_term():
+    """sk_54953006 MUJ (687): MUJ map; LT bank loan 16 303; gate assets == equity + liabilities."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_54953006_MUJ.json"), _load("sk_sablona_687.json"))
+    v = m["values"]
+    assert m["unbalanced"] is False
+    assert v["assets"]["value"] == 88449.0
+    assert v["equity"]["value"] == 6240.0
+    assert v["liabilities"]["value"] == 82209.0
+    assert v["revenue"]["value"] == 14408.0
+    assert v["long_term_debt"]["value"] == 16303.0
+    assert v["long_term_debt"]["tag"] == "sk:r37"
+    assert "short_term_debt" not in v            # absent bank-loan line → suppressed
+    assert v["interest_expense"]["value"] == 74.0
+    # MUJ gate has NO accruals term: assets == equity + liabilities exactly
+    assert v["equity"]["value"] + v["liabilities"]["value"] == v["assets"]["value"]
+
+
+def test_map_period_end_from_titulna_strana_month_end():
+    """period_end derives from titulnaStrana.obdobieDo (2023-12 → month-end 2023-12-31)."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_36319007_POD.json"), _load("sk_sablona_699.json"))
+    assert m["period_end"] == "2023-12-31"
+
+
+def test_map_synthetic_unbalanced_emits_no_values():
+    """assets ≠ equity + liabilities + accruals beyond tol → unbalanced, empty values."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    vykaz, sablona = _synth_pod(assets=1000, equity=100, liab=200, accruals=50)
+    m = map_sk_vykaz(vykaz, sablona)
+    assert m["unbalanced"] is True
+    assert m["values"] == {}
+    assert "__all__" in _suppressed_keys(m)
+
+
+def test_map_synthetic_balanced_within_tol():
+    """A synthetic POD that balances (incl. accruals) is not flagged unbalanced."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    vykaz, sablona = _synth_pod(assets=1000, equity=600, liab=350, accruals=50)
+    m = map_sk_vykaz(vykaz, sablona)
+    assert m["unbalanced"] is False
+    assert m["values"]["assets"]["value"] == 1000.0
+
+
+def test_map_non_public_is_no_financials():
+    """pristupnostDat != 'Verejné' → no financials (empty values, recorded reason)."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    vykaz, sablona = _synth_meta(699, "Neverejné")
+    m = map_sk_vykaz(vykaz, sablona)
+    assert m["values"] == {}
+    assert m["unbalanced"] is False
+    assert "__all__" in _suppressed_keys(m)
+
+
+def test_map_ifrs_template_is_no_financials():
+    """idSablony=695 (IFRS/other) is not a mapped template → no financials."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    vykaz, sablona = _synth_meta(695, "Verejné")
+    m = map_sk_vykaz(vykaz, sablona)
+    assert m["values"] == {}
+    assert m["unbalanced"] is False
+    assert "__all__" in _suppressed_keys(m)
