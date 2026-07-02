@@ -1010,8 +1010,9 @@ def _dk_esef_pipeline(
         out["no_financials"] += 1
         return
 
-    # M1: on the ESEF path the entity_id is the filer's LEI (ISO-17442 scheme) —
-    # surface it in the `lei` column too, keeping entity_id as-is.
+    # M1: on the ESEF (_from_files) path entity_id is the filer's LEI (ISO-17442).
+    # On the live-API path (build_dk_financials) entity_id is the CVR, so
+    # _lei_or_none(entity_id) returns None and `lei` falls back to the resolved LEI.
     row_lei = lei or _lei_or_none(entity_id)
     rows: list[dict] = []
     n = 0

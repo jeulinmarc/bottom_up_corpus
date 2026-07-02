@@ -27,7 +27,7 @@ def flat(**kw: float) -> dict:
 
 _SHOW_KEYS = (
     "revenue", "net_income",
-    "equity", "net_assets", "cash",
+    "equity", "cash",
     "assets", "liabilities", "liabilities_current", "long_term_debt",
 )
 
