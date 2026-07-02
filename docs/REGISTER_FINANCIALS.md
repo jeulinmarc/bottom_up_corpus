@@ -2,12 +2,12 @@
 
 `bottom_up_corpus/registers/` ingests **open-data statutory accounts** from national
 business registers and writes them in the same curated schema as the SEC and EU pillars.
-This document covers the purpose, source, schema, honest caveats, and CLI for seven
+This document covers the purpose, source, schema, honest caveats, and CLI for eight
 registers: **Norway's Brønnøysund Register Centre (Brreg)**, **UK Companies House**,
 **Belgium's BNB Central Balance Sheet Office (CBSO)**, **Luxembourg's LBR/STATEC
 Centrale des bilans**, **Finland's PRH avoindata XBRL platform**, **Denmark's
-Erhvervsstyrelsen / Virk "Regnskaber"**, and **Estonia's Äriregister (RIK
-avaandmed)**.
+Erhvervsstyrelsen / Virk "Regnskaber"**, **Estonia's Äriregister (RIK
+avaandmed)**, and **Slovakia's Register účtovných závierok (registeruz.sk)**.
 
 See also: [`FINANCIALS.md`](FINANCIALS.md) (the SEC/US-GAAP pillar that defines the
 shared schema and derived-metrics engine) and [`EU_FINANCIALS.md`](EU_FINANCIALS.md)
@@ -2095,6 +2095,387 @@ See also: [NO (Brreg)](#source--brreg-regnskapsregisteret-norway),
 [FI (PRH)](#source--finland-prh-avoindata-xbrl-open-api),
 [DK (Erhvervsstyrelsen / Virk)](#source--denmark-erhvervsstyrelsen--virk-regnskaber-xbrl),
 [EE (Äriregister/RIK)](#source--estonia-äriregister-rik-avaandmed-bulk-csv),
+[SK (registeruz.sk)](#source--slovakia-register-účtovných-závierok-registeruzsk),
+[`FINANCIALS.md`](FINANCIALS.md), [`EU_FINANCIALS.md`](EU_FINANCIALS.md).
+
+---
+
+## Source — Slovakia Register účtovných závierok (registeruz.sk)
+
+Slovakia's **Register účtovných závierok** (Register of Financial Statements) is
+operated by DataCentrum on behalf of the Ministry of Finance of the Slovak Republic
+(MF SR) and makes all public statutory annual accounts available through a
+**fully keyless REST API**:
+
+```
+GET https://www.registeruz.sk/cruz-public/api/uctovny-vykaz?id=<id>
+GET https://www.registeruz.sk/cruz-public/api/sablona?id=<idSablony>
+GET https://www.registeruz.sk/cruz-public/api/uctovna-jednotka?id=<id>
+GET https://www.registeruz.sk/cruz-public/api/uctovna-zavierka?id=<id>
+GET https://www.registeruz.sk/cruz-public/api/uctovne-jednotky?pokracovat-za-id=<cursor>&max-zaznamov=<n>
+```
+
+**No API key, no registration, no authentication required** — every endpoint is public
+and keyless. The register holds approximately **7.5–8 million public structured reports**
+covering statutory accounts from 2014 onwards. Near-universal coverage: every Slovak
+legal entity above the filing threshold is required to file annual accounts here.
+
+The traversal path is: paginate `uctovne-jednotky` (entity-ID list) → fetch
+`uctovna-jednotka` (entity metadata including IČO) → iterate `uctovna-zavierka` IDs
+(one per filing year) → fetch `uctovny-vykaz` (the financial statement) + `sablona`
+(the template definition that gives the positional layout). All responses are **plain
+JSON**; the parser uses **stdlib `json`** — no XBRL, no Arelle.
+
+**Format: structured positional-array-by-template.** The statement body
+(`obsah.tabulky[ti].data`) is a flat string array of numbers. The index formula is:
+
+```
+value[col] = data[row_arr_idx * pocetDatovychStlpcov + col]
+```
+
+where `pocetDatovychStlpcov` (column count) and the ordered row list are read
+**exclusively from the sablona** for table `ti`. The raw vykaz response may carry the
+same field in some cases but it is not authoritative. Empty strings parse to `None`;
+comma-decimal notation (`"1 051,30"`) is normalised before conversion.
+
+### Two mapped templates
+
+The engine handles exactly two statutory templates:
+
+| Template | ID | Applies to | Assets-table columns |
+|---|---|---|---|
+| **Úč POD** (regular / large entities) | **699** | Standard Slovak GAAP filers | **4** (brutto / korekcia / netto-current / netto-prior) |
+| **Úč MUJ** (micro / small entities) | **687** | Micro-entity and small filers | **2** (current / prior) |
+
+**Column rule.** For POD (699), the assets table (table index 0) carries four data
+columns; the meaningful current figure is **netto-current = column index 2**. Every
+other table on a POD filing — and every table on a MUJ (687) filing — carries two
+columns and the current period is **column index 0**. Reading the wrong column would
+silently substitute a gross or prior-year figure; the column rule is therefore part of
+the no-false-data correctness heart.
+
+All other templates — including Úč 695 (IFRS reporters) — are suppressed. Large listed
+Slovak groups that file under IFRS are ingested by the EU ESEF pillar
+(`data/financials_eu/`), not this register.
+
+## Schema — `data/financials_register/<ico>.jsonl`
+
+Output follows the same per-period row model as the other registers and the SEC/EU
+pillars (see [`FINANCIALS.md`](FINANCIALS.md) for the full curated-concepts definition):
+
+| Column | Value |
+|---|---|
+| `entity_id` | IČO (8-digit zero-padded string, e.g. `"36319007"`) |
+| `lei` | GLEIF LEI if resolved; `null` for the keyless `--sk-file` path |
+| `country` | `"SK"` |
+| `source` | `"registeruz"` |
+| `basis` | `"company"` (statutory individual accounts) |
+| `fy` | Fiscal year (integer, derived from `period_end`) |
+| `frequency` | `"annual"` (the register holds only annual statutory accounts) |
+| `currency` | `"EUR"` (Slovakia adopted the euro in 2009; all accounts are in EUR) |
+| `period_end` | ISO-8601 date string (derived from `titulnaStrana.obdobieDo`) |
+| `publication_date` | `null` (not exposed by the registeruz API) |
+
+Each `kind="reported"` row carries the row code as its `tag` (e.g. `"sk:r1"`,
+`"sk:r121"`), so downstream consumers can inspect the exact source line.
+
+**POD (699) concept pack** — 13 curated concepts across three tables:
+
+| Curated key | Table | Row | Notes |
+|---|---|---|---|
+| `assets` | 0 (assets) | r1 | Column 2 (netto-current) — primary gate anchor |
+| `non_current_assets` | 0 (assets) | r2 | Column 2 |
+| `assets_current` | 0 (assets) | r33 | Column 2 |
+| `cash` | 0 (assets) | r71 | Column 2 |
+| `equity` | 1 (passives) | r80 | Column 0 |
+| `liabilities` | 1 (passives) | r101 | Column 0 |
+| `long_term_debt` | 1 (passives) | r121 | Column 0; *Dlhodobé bankové úvery* — real LT bank loans |
+| `short_term_debt` | 1 (passives) | r139 | Column 0; *Bežné bankové úvery* — real ST bank loans |
+| `revenue` | 2 (P&L) | r2 | Column 0; *Výnosy z hospodárskej činnosti spolu* — **never r1** |
+| `operating_income` | 2 (P&L) | r27 | Column 0 |
+| `interest_expense` | 2 (P&L) | r49 | Column 0; positive as-is |
+| `pretax_income` | 2 (P&L) | r56 | Column 0 |
+| `net_income` | 2 (P&L) | r61 | Column 0 |
+
+**MUJ (687) concept pack** — same 13 concepts, all column 0, different row numbers:
+
+| Curated key | Table | Row | Notes |
+|---|---|---|---|
+| `assets` | 0 (assets) | r1 | Primary gate anchor |
+| `non_current_assets` | 0 (assets) | r2 | |
+| `assets_current` | 0 (assets) | r14 | |
+| `cash` | 0 (assets) | r22 | |
+| `equity` | 1 (passives) | r25 | |
+| `liabilities` | 1 (passives) | r34 | |
+| `long_term_debt` | 1 (passives) | r37 | *Dlhodobé bankové úvery* — real LT bank loans |
+| `short_term_debt` | 1 (passives) | r44 | *Bežné bankové úvery* — real ST bank loans |
+| `revenue` | 2 (P&L) | r1 | Operating revenues total |
+| `operating_income` | 2 (P&L) | r18 | |
+| `interest_expense` | 2 (P&L) | r31 | Positive as-is |
+| `pretax_income` | 2 (P&L) | r35 | |
+| `net_income` | 2 (P&L) | r38 | |
+
+The derived block produced from this pack (for a full filer with both debt lines
+present) includes:
+
+- **Aggregates:** `total_debt` (borrowings), `net_debt`, `net_cash`, `working_capital`,
+  `invested_capital`
+- **Profitability:** `operating_margin`, `net_margin`
+- **Returns:** `roe`, `roa`
+- **Coverage:** `interest_coverage` (operating income / interest expense)
+- **Leverage:** `debt_to_equity` (borrowings), `debt_to_assets` (borrowings)
+- **Liquidity:** `current_ratio`, `cash_ratio`
+- **Efficiency:** `asset_turnover`
+
+There is no `ebitda` (no depreciation / amortisation concept in the SK pack), no
+`effective_tax_rate` (no income-tax line), no `roic` (requires income tax), no
+`free_cash_flow`, `cfo_to_debt`, or `fcf_to_debt` (no cash-flow statement), and no
+`net_debt_to_ebitda`.
+
+A coverage report is written to `data/reports/register_coverage.jsonl` for every
+entity processed: `status="ok"` with a period count, `"no-financials"` (no usable
+values after gating), `"unbalanced"` (primary balance gate failed), or `"error"` (parse
+exception). When items are suppressed, a `suppressed` list records each key and the
+reason.
+
+## The confidence gate — no false data
+
+**Governing principle (from `concepts_sk.py`):** a number known to be wrong must
+never be emitted; a missing number is strictly better than a wrong one. Two
+Slovak-specific traps drive the gate.
+
+### Primary balance gate
+
+The balance-sheet identity differs by template:
+
+- **POD (699):** `|assets − (equity + liabilities + accruals_liab)| ≤ tol`
+
+  The Slovak passive side carries a separate *Časové rozlíšenie* (accruals / deferrals)
+  total at r141, sitting between liabilities and equity. The balance identity only
+  closes with this accruals term included. A mismatch → the filing is untrustworthy:
+  `unbalanced=True`, no values emitted.
+
+- **MUJ (687):** `|assets − (equity + liabilities)| ≤ tol`
+
+  The micro template has no separate accruals total on the passive side.
+
+Tolerance: `tol = max(2 EUR, 0.005 · |assets|)` (0.5 % of assets, never tighter than
+2 EUR for micro-entity rounding). Validated to the cent on all 8 real fixtures used in
+development.
+
+When any anchor (assets, equity, liabilities) is absent, the gate cannot run and
+directly-tagged values still stand — mirroring the BE/FI/DK siblings.
+
+### The net-turnover trap — revenue is operating_revenue_total, never net_turnover
+
+POD r1 (*Čistý obrat*, net turnover) **includes financial income** and therefore does
+not represent pure operating sales. The engine maps `revenue` exclusively to the
+**operating revenues total** (POD r2 — *Výnosy z hospodárskej činnosti spolu*;
+MUJ r1). `net_turnover` is never mapped: on every POD filing the engine records an
+explicit suppression for `net_turnover`, making the exclusion auditable in the coverage
+report. The distinction is material: on the validated POD fixture the operating revenue
+line was 2 005 372 EUR while net turnover was 1 950 307 EUR — a gap driven by financial
+income included in the turnover denominator.
+
+### Net-income cross-check
+
+When the equity-section net-income row is available the engine cross-checks it against
+the P&L net-income row. A mismatch beyond tolerance causes `net_income` to be
+suppressed with the mismatch reason recorded.
+
+## Leverage — borrowings-based (a rich register)
+
+SK is a **rich register for credit analysis**. Unlike Norway (Brreg) and UK (Companies
+House) — which expose only broad liabilities aggregates — the registeruz.sk templates
+tag **real bank-loan lines** disaggregated by maturity:
+
+| Concept | Template | Row | Slovak label |
+|---|---|---|---|
+| `long_term_debt` | POD (699) | r121 | *Dlhodobé bankové úvery* |
+| `short_term_debt` | POD (699) | r139 | *Bežné bankové úvery* |
+| `long_term_debt` | MUJ (687) | r37 | *Dlhodobé bankové úvery* |
+| `short_term_debt` | MUJ (687) | r44 | *Bežné bankové úvery* |
+
+Each line is emitted **only when present and nonzero** — these are real bank borrowings,
+not total-liabilities aggregates. When both lines are absent or zero (the common case
+for micro-entities with no bank debt), the entire debt block is suppressed: no
+fabricated `long_term_debt = 0` is written. The producer stamps
+`leverage_basis="borrowings"` on every derived leverage row, so the basis is always
+identifiable in the output.
+
+**`interest_coverage`** (operating income / interest expense) is available from this
+register: the interest-expense line (POD r49 / MUJ r31) is directly tagged in both
+templates. This sets SK apart from most registers in this corpus (EE, for instance,
+carries no interest element at all).
+
+**Never compare `debt_to_equity` from a SK row to a NO or UK row without first checking
+`source` and `leverage_basis`:** `source="registeruz"` is borrowings-based;
+`source="brreg"` and `source="companies_house"` are liabilities-based. The `source`
+and `leverage_basis` fields are the guards.
+
+## The `basis` field — SK
+
+All SK rows carry `basis="company"`. The registeruz.sk filings are statutory individual
+accounts for the Slovak legal entity. The register does not expose consolidated group
+accounts; Slovak groups that also file ESEF consolidated accounts under IFRS are handled
+separately by the EU ESEF pillar and must not be merged here.
+
+Note that `basis="company"` rows from the registeruz.sk register and
+`basis="consolidated"` rows from the EU ESEF pillar (`data/financials_eu/`) are already
+separated by output directory. They must **not** be merged without an explicit
+accounting and scope reconciliation: Slovak GAAP (based on the Slovak Accounting Act /
+*Zákon o účtovníctve*) differs from IFRS in the treatment of deferred tax, provisions,
+and lease accounting; and the obligor population (all Slovak legal entities above the
+filing threshold) overlaps only partly with the ESEF pillar (Slovak listed groups that
+issued regulated securities).
+
+## Identity — IČO and LEI
+
+**IČO (`entity_id`):** The Slovak company identification number (*Identifikačné číslo
+organizácie*) — an 8-digit zero-padded numeric string (e.g. `"36319007"`). Non-digit
+characters are stripped and the result is left-zero-padded to 8 digits. The IČO is
+extracted directly from `vykaz.obsah.titulnaStrana.ico`.
+
+The registeruz.sk API exposes entities by a numeric **entity ID** (an internal
+sequential integer, not the IČO). There is **no direct lookup endpoint by IČO**.
+Finding a specific company by IČO requires either traversing the entity-ID scan
+(building an IČO → entity-ID index offline) or using the `--sk-file` local path when
+the vykaz has already been downloaded. The `--sk-id` path takes numeric entity IDs,
+not IČOs.
+
+Two input modes:
+
+- **`--sk-file` path:** the IČO is extracted from `vykaz.obsah.titulnaStrana.ico`.
+  No entity-ID traversal is needed.
+- **`--sk-id` path:** one or more numeric registeruz entity IDs are passed directly.
+  The engine traverses entity → zavierka → vykaz for each, **accumulating all available
+  periods per IČO** (multi-year, like the NO producer).
+
+**LEI resolution:** When a spec carries a GLEIF LEI, the engine calls
+`GET https://api.gleif.org/api/v1/lei-records/{lei}` and extracts
+`entity.registeredAs`. This is accepted as the IČO **only when**
+`entity.legalAddress.country == "SK"` — the same country guard as the NO/BE/FI/DK/EE
+registers. A LEI from a non-Slovak jurisdiction returns `status="unresolved"` in the
+coverage report. For the keyless `--sk-file` path, no GLEIF call is made and `lei` is
+`null` in every output row.
+
+## CLI usage — SK
+
+```bash
+# dry-run (default): parse a local vykaz + sablona JSON pair, print summary
+bottom_up_corpus register-financials --sk-file sk_36319007_POD.json sk_sablona_699.json
+
+# write data/financials_register/<ico>.jsonl + coverage report
+bottom_up_corpus register-financials \
+  --sk-file sk_36319007_POD.json sk_sablona_699.json --write
+
+# traverse API by entity ID: fetch all periods (dry-run)
+bottom_up_corpus register-financials --sk-id 12345 67890
+
+# traverse API: multiple entity IDs, bounded batch, persist to disk
+bottom_up_corpus register-financials --sk-id 12345 67890 --limit 100 --write
+```
+
+`--write` is the only side-effecting flag. Omitting it is a safe dry-run that prints
+entity / period / unbalanced counts without touching disk. `--limit N` caps the number
+of entity IDs processed and is available for `--sk-id` only (no limit for `--sk-file`,
+which processes exactly the two supplied files).
+
+The `--sk-file` and `--sk-id` flags are mutually exclusive with each other and with
+`--orgnrs`, `--leis`, `--ch-bulk`, `--be-file`, `--be-numbers`, `--fi-file`,
+`--fi-businessid`, `--lu-file`, `--dk-file`, `--dk-cvr`, `--ee-file`, and `--ee-year`.
+
+The `--sk-file` path is entirely local (no network). The `--sk-id` path issues GET
+requests to `registeruz.sk` for each entity, with per-entity try / except error
+isolation (a single failed entity does not abort the batch).
+
+## Honest caveats — SK
+
+### Leverage is borrowings-based — suppressed for zero-debt micro-entities
+
+The SK register provides genuine bank-loan data (POD r121 / r139, MUJ r37 / r44) rather
+than total-liabilities aggregates. The derived `total_debt`, `debt_to_equity`,
+`debt_to_assets`, and `net_debt` all rest on this borrowings basis — qualitatively the
+same level as the BE and LU registers.
+
+**Most micro-entity filers carry no reported bank borrowings.** When both bank-loan
+lines are absent or zero the entire debt block — including `debt_to_equity`, `net_debt`,
+and `interest_coverage` — is suppressed. For the private and SME universe this is a
+common outcome: the absence of leverage metrics signals zero reported bank debt, not
+missing data. Apply a minimum-assets filter and check for the presence of
+`long_term_debt` or `short_term_debt` rows before computing portfolio-level leverage
+averages.
+
+**Never compare `debt_to_equity` from a SK row to a NO or UK row without first
+checking `source` and `leverage_basis`:** `source="registeruz"` is borrowings-based;
+`source="brreg"` and `source="companies_house"` are liabilities-based.
+
+### Entity-scan endpoint is WAF-throttled
+
+The `uctovne-jednotky` pagination endpoint is WAF-throttled at scale. A politeness
+delay of at least 1 second between pages is recommended. Full-register traversal
+(millions of entity IDs) requires a sustained crawl with appropriate throttling; this
+is a controller-level concern, not exercised in unit tests.
+
+### No direct IČO search — traverse or index
+
+The registeruz.sk API does not expose a per-IČO lookup on the entity-scan endpoint.
+Finding a specific entity by IČO requires either traversing the full entity-ID scan
+(building an IČO → entity-ID map offline) or using the `--sk-file` local path. The
+`--sk-id` path takes numeric entity IDs, not IČOs.
+
+### IFRS filers suppressed — use the ESEF pillar
+
+Large listed Slovak companies that report under IFRS file using template Úč 695.
+The registeruz.sk vykaz for IFRS reporters contains **PDF-embedded data only** — no
+structured positional tables. These filings are suppressed by the engine
+(`idSablony=695 → no-financials`). Their consolidated IFRS figures are available from
+the EU ESEF pillar (`data/financials_eu/`).
+
+### Non-public filings suppressed (~25%)
+
+Filings with `pristupnostDat != "Verejné"` are suppressed and recorded as
+`no-financials` in the coverage report. Approximately 25% of registeruz.sk filings are
+non-public. The structured public universe covers the remaining ~75% of the total
+filing count.
+
+### Slovak GAAP statutory — separate from ESEF
+
+SK statutory accounts follow **Slovak GAAP** (based on the Slovak Accounting Act /
+*Zákon o účtovníctve*). Slovak listed groups also file **ESEF consolidated accounts**
+under IFRS — those are ingested by the EU ESEF pillar (`data/financials_eu/`) and must
+**never be merged** with registeruz.sk rows: the GAAP regime, consolidation scope, and
+obligor populations all differ.
+
+### Annual accounts only
+
+Slovak statutory accounts are annual. `frequency` is always `"annual"`. There are no
+quarterly or semi-annual periods in the registeruz.sk API.
+
+### Small economy — near-universal structured coverage
+
+Slovakia is a small economy (~5.5 million population) but the register provides
+**near-universal structured coverage** of the corporate universe from 2014 onwards.
+This is qualitatively richer than some larger economies (e.g. UK) where only a fraction
+of filings carry structured data. After applying a minimum-assets filter the population
+of credit-relevant Slovak entities is modest in absolute terms compared with NO, UK, or
+BE, but data quality for the covered universe — full P&L, balance sheet, real bank
+borrowings, and interest coverage in a single structured JSON — is high.
+
+### No commercial fallback — ever
+
+If a filing is suppressed (IFRS / non-public / template not mapped) or absent, it is
+recorded as `"no-financials"`. Revenue, income, and balance-sheet figures are **never
+supplemented from commercial databases or any non-public source**. Open data only.
+
+See also: [NO (Brreg)](#source--brreg-regnskapsregisteret-norway),
+[UK (Companies House)](#source--uk-companies-house-statutory-accounts-ixbrl),
+[BE (BNB CBSO)](#source--belgium-bnb-cbso-annual-accounts-dimensional-xbrl),
+[LU (LBR/STATEC)](#source--luxembourg-lbrstatec-centrale-des-bilans-ecdf),
+[FI (PRH)](#source--finland-prh-avoindata-xbrl-open-api),
+[DK (Erhvervsstyrelsen / Virk)](#source--denmark-erhvervsstyrelsen--virk-regnskaber-xbrl),
+[EE (Äriregister/RIK)](#source--estonia-äriregister-rik-avaandmed-bulk-csv),
+[SK (registeruz.sk)](#source--slovakia-register-účtovných-závierok-registeruzsk),
 [`FINANCIALS.md`](FINANCIALS.md), [`EU_FINANCIALS.md`](EU_FINANCIALS.md).
 
 ---
@@ -2107,8 +2488,10 @@ House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), **Belgium BNB CBSO**
 **Luxembourg LBR/STATEC** (custom eCDF XML, stdlib only, keyless `--lu-file` path),
 **Finland PRH** (dimensional XBRL, stdlib only; fully keyless `--fi-file` +
 `--fi-businessid` paths), **Denmark Erhvervsstyrelsen / Virk** (bare XBRL, stdlib
-only; fully keyless `--dk-file` + `--dk-cvr` paths), and **Estonia Äriregister/RIK**
-(bulk CSV-join, stdlib only; fully keyless `--ee-file` + `--ee-year` paths).
+only; fully keyless `--dk-file` + `--dk-cvr` paths), **Estonia Äriregister/RIK**
+(bulk CSV-join, stdlib only; fully keyless `--ee-file` + `--ee-year` paths), and
+**Slovakia Register účtovných závierok (registeruz.sk)** (JSON, stdlib only; fully
+keyless `--sk-file` + `--sk-id` paths).
 
 For the **UK pillar** specifically, the following are deferred to follow-up PRs:
 
