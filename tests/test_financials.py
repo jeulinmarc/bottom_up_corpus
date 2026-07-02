@@ -362,6 +362,33 @@ def test_net_debt_no_double_count_for_combined_cash_tag():
     assert "cash_ratio" not in d
 
 
+def test_net_debt_excludes_generic_long_term_investments():
+    from bottom_up_corpus.financials import compute_derived
+    # The generic us-gaap:LongTermInvestments tag can hold illiquid equity-method
+    # / strategic stakes -> it must NOT be netted against debt (a levered
+    # industrial would otherwise read net_debt ~ 0).
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "cash": {"value": 100.0, "unit": "USD", "tag": "CashAndCashEquivalentsAtCarryingValue"},
+        "long_term_investments": {"value": 900.0, "unit": "USD", "tag": "LongTermInvestments"},
+    }
+    d = compute_derived(vals)
+    assert d["net_debt"]["value"] == 900          # 1000 - 100 - 0, NOT 0
+
+
+def test_net_debt_offsets_marketable_long_term_securities():
+    from bottom_up_corpus.financials import compute_derived
+    # Genuinely-marketable long-term securities (MarketableSecuritiesNoncurrent) ARE
+    # a liquid offset to debt (cash-rich issuers like Apple/Microsoft).
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "cash": {"value": 100.0, "unit": "USD", "tag": "CashAndCashEquivalentsAtCarryingValue"},
+        "long_term_investments": {"value": 900.0, "unit": "USD", "tag": "MarketableSecuritiesNoncurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["net_debt"]["value"] == 0            # 1000 - 100 - 900
+
+
 def test_negative_equity_suppresses_roe_and_dte():
     from bottom_up_corpus.financials import compute_derived
     vals = {

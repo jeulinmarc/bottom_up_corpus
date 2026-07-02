@@ -547,7 +547,14 @@ def compute_derived(
             sti = 0  # cash tag already includes short-term investments
         # Long-term marketable securities are a liquid offset to debt (Apple,
         # Microsoft, ...): excluding them overstates net debt / hides net cash.
-        net_debt = total_debt - cash - sti - opt("long_term_investments")
+        # But the generic us-gaap:LongTermInvestments fallback routinely bundles
+        # illiquid equity-method / strategic holdings; netting those against debt
+        # makes a levered industrial read net_debt ~ 0. So only genuinely
+        # marketable long-term securities are offset -- the generic tag is not.
+        lti = opt("long_term_investments")
+        if _src(values, "long_term_investments") == "LongTermInvestments":
+            lti = 0
+        net_debt = total_debt - cash - sti - lti
     put("net_debt", net_debt)
     # Friendly mirror: positive = net cash, negative = net debt.
     put("net_cash", -net_debt if net_debt is not None else None)
