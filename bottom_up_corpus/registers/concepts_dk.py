@@ -432,6 +432,9 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     )
 
     # Balance gate: Assets == Equity + Liabilities within tolerance.
+    # Parity with all other registers: DROP the summary when the gate fails rather
+    # than only warning — an unbalanced ESEF filing must NOT be emitted as "ok".
+    balanced: list = []
     for s in summaries:
         v = s.values
         assets = (v.get("assets") or {}).get("value")
@@ -444,8 +447,10 @@ def map_dk_esef(xml_bytes: bytes) -> list:
                 warnings.warn(
                     f"ESEF balance gate ({s.period_end}): Assets {assets:,.0f} != "
                     f"Equity {equity_v:,.0f} + Liabilities {liabilities:,.0f} "
-                    f"(diff={diff:.0f}, tol={tol:.0f}) — filing may be unreliable",
+                    f"(diff={diff:.0f}, tol={tol:.0f}) — summary dropped (unbalanced)",
                     stacklevel=2,
                 )
+                continue  # DROP: do not emit this period
+        balanced.append(s)
 
-    return summaries
+    return balanced

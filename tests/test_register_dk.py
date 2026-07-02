@@ -402,6 +402,90 @@ def test_map_dk_esef_balance_gate_holds():
     assert s.currency == "DKK"
 
 
+# ---------------------------------------------------------------------------
+# R-I2: DK-ESEF balance gate must DROP (not just warn) unbalanced summaries
+# ---------------------------------------------------------------------------
+
+# Minimal ESEF XML with Assets != Equity + Liabilities beyond tolerance.
+# Assets = 1_000_000, Equity = 600_000, Liabilities = 100_000
+# (sum = 700_000, diff = 300_000 >> tol ≈ 5_000)
+_ESEF_UNBALANCED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl
+    xmlns:xbrli="http://www.xbrl.org/2003/instance"
+    xmlns:ifrs-full="https://xbrl.ifrs.org/taxonomy/2024-03-27/ifrs-full"
+    xmlns:iso4217="http://www.xbrl.org/2003/iso4217">
+  <xbrli:context id="c_instant">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://standards.iso.org/iso/17442">529900UNBALLEDTEST001</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c_dur">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://standards.iso.org/iso/17442">529900UNBALLEDTEST001</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2025-01-01</xbrli:startDate>
+      <xbrli:endDate>2025-12-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+  <xbrli:unit id="DKK"><xbrli:measure>iso4217:DKK</xbrli:measure></xbrli:unit>
+  <!-- Assets = 1_000_000 but Equity+Liabilities = 700_000 (unbalanced by 300_000) -->
+  <ifrs-full:Assets contextRef="c_instant" decimals="0" unitRef="DKK">1000000</ifrs-full:Assets>
+  <ifrs-full:Equity contextRef="c_instant" decimals="0" unitRef="DKK">600000</ifrs-full:Equity>
+  <ifrs-full:Liabilities contextRef="c_instant" decimals="0" unitRef="DKK">100000</ifrs-full:Liabilities>
+  <ifrs-full:Revenue contextRef="c_dur" decimals="0" unitRef="DKK">2000000</ifrs-full:Revenue>
+</xbrli:xbrl>
+"""
+
+
+def test_ri2_map_dk_esef_drops_unbalanced_summary():
+    """R-I2 regression: map_dk_esef must DROP (not just warn) a summary where
+    Assets != Equity+Liabilities beyond tol → returns an empty list, not an 'ok' entry."""
+    import warnings
+    from bottom_up_corpus.registers.concepts_dk import map_dk_esef
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        summaries = map_dk_esef(_ESEF_UNBALANCED_XML)
+
+    # The summary must have been DROPPED — not emitted
+    assert summaries == [], (
+        f"Expected empty list (unbalanced summary dropped), got {len(summaries)} summaries"
+    )
+    # The warning must still be raised to aid debugging
+    assert any("balance gate" in str(x.message).lower() for x in w), (
+        "Expected a balance-gate warning for the unbalanced filing"
+    )
+
+
+def test_ri2_dk_esef_producer_does_not_emit_unbalanced_as_ok(tmp_path):
+    """R-I2 regression (producer): build_dk_financials_from_files on an unbalanced
+    ESEF file must NOT write a financials JSONL (not emitted as 'ok')."""
+    import warnings
+
+    p = tmp_path / "unbal_esef.xml"
+    p.write_bytes(_ESEF_UNBALANCED_XML)
+
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_dk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        out = build_dk_financials_from_files([str(p)], config=cfg, write=True)
+
+    # No financials must have been emitted as ok
+    assert out["with_financials"] == 0, (
+        f"Expected with_financials=0 for unbalanced ESEF, got {out['with_financials']}"
+    )
+    # No JSONL written for the unbalanced entity
+    jsonl_files = list((tmp_path / "financials_register").glob("*.jsonl"))
+    assert jsonl_files == [], (
+        f"Expected no JSONL for unbalanced entity, found: {jsonl_files}"
+    )
+
+
 # ===========================================================================
 # Fix 1 -- dimension detectors must check xbrli:segment, not only xbrli:scenario
 # ===========================================================================
