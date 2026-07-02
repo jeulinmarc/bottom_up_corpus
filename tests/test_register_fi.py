@@ -552,6 +552,12 @@ def test_build_fi_financials_from_files_writes_jsonl(tmp_path):
     assert "operating_margin" in derived_concepts, "operating_margin derived ratio missing"
     assert "interest_coverage" in derived_concepts, "interest_coverage derived ratio missing"
 
+    # C1: FI suppresses the maturity split, so the engine emits NO leverage rows
+    # (no total_debt / debt_to_equity) and nothing carries a leverage_basis.
+    assert "total_debt" not in derived_concepts
+    assert "debt_to_equity" not in derived_concepts
+    assert not any("leverage_basis" in r for r in rows)
+
 
 def test_build_fi_financials_from_files_dry_run(tmp_path):
     """write=False: no file written, counters correct."""

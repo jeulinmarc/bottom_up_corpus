@@ -540,6 +540,10 @@ class TestBuildLuFinancialsFromFiles:
         assert td_rows, "total_debt derived row missing"
         assert round(td_rows[0]["value"]) == 4_540_773_958
 
+        # C1: LU leverage is borrowings-based (real financial-debt lines) -> stamped.
+        assert dte_rows[0]["leverage_basis"] == "borrowings"
+        assert td_rows[0]["leverage_basis"] == "borrowings"
+
     def test_dry_run_no_file_written(self, tmp_path):
         """write=False: counters correct, no JSONL written."""
         from bottom_up_corpus.config import Config

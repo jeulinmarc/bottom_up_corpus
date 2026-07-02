@@ -1075,6 +1075,37 @@ def rows_from_base(base: dict, summary: PeriodSummary) -> list[dict]:
     return rows
 
 
+# The leverage-derived rows whose economic meaning depends on the register's debt
+# definition. BE / LU / DK-ESEF map real financial *borrowings*; NO / UK / EE /
+# DK-FSA map *total liabilities* as a gearing proxy. The engine computes these four
+# identically, so without an explicit tag a `d2e < 1` screen would blend true
+# leverage with a payables-inflated proxy. Only these four are stamped -- never the
+# asset / equity rows they divide.
+LEVERAGE_BASIS_CONCEPTS: frozenset[str] = frozenset(
+    {"total_debt", "debt_to_equity", "net_debt", "debt_to_assets"}
+)
+
+
+def stamp_leverage_basis(rows: list[dict], leverage_basis: str | None) -> list[dict]:
+    """Stamp ``leverage_basis`` onto the leverage-derived rows, in place.
+
+    ``leverage_basis`` is ``"borrowings"`` (real financial debt) or
+    ``"total_liabilities"`` (a gearing proxy). ``None`` -- the SEC and EU/ESEF
+    pillars, or any caller that does not distinguish -- is a no-op: the field
+    stays absent, so existing rows and their consumers are byte-for-byte
+    unchanged. Only the four keys in :data:`LEVERAGE_BASIS_CONCEPTS` are stamped,
+    and only on ``kind == "derived"`` rows (never the reported line items or the
+    asset / equity rows the ratios divide). Returns ``rows`` for convenience.
+    """
+    if leverage_basis is None:
+        return rows
+    for row in rows:
+        if (row.get("kind") == "derived"
+                and row.get("concept") in LEVERAGE_BASIS_CONCEPTS):
+            row["leverage_basis"] = leverage_basis
+    return rows
+
+
 def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
     base = {"cik": cik, "fy": summary.fy, "frequency": summary.frequency,
             "currency": summary.currency, "sic": summary.sic,

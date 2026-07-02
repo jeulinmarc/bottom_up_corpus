@@ -5,9 +5,11 @@ from datetime import date
 import pytest
 
 from bottom_up_corpus.financials import (
+    LEVERAGE_BASIS_CONCEPTS,
     build_period_summaries,
     normalized_rows,
     render_summary_html,
+    stamp_leverage_basis,
 )
 from tests.conftest import SAMPLE_FACTS
 
@@ -403,3 +405,47 @@ def test_edgar_xbrl_attaches_ttm_block(xbrl_fetcher, config):
     assert isinstance(fy.ttm, dict)
     # Margin-style TTM metrics need only the FY flow window -> present.
     assert "net_margin_ttm" in fy.ttm
+
+
+# ---------------------------------------------------------------------------
+# C1 — leverage-basis stamping (shared engine helper)
+# ---------------------------------------------------------------------------
+
+def _lev_rows(basis_field=False):
+    """A representative row list: reported + the four leverage derived rows +
+    a non-leverage derived row."""
+    return [
+        {"kind": "reported", "concept": "long_term_debt", "value": 350},
+        {"kind": "derived", "concept": "total_debt", "value": 600},
+        {"kind": "derived", "concept": "debt_to_equity", "value": 1.5},
+        {"kind": "derived", "concept": "net_debt", "value": 500},
+        {"kind": "derived", "concept": "debt_to_assets", "value": 0.6},
+        {"kind": "derived", "concept": "current_ratio", "value": 2.0},
+    ]
+
+
+def test_stamp_leverage_basis_stamps_only_the_four_leverage_rows():
+    rows = _lev_rows()
+    ret = stamp_leverage_basis(rows, "borrowings")
+    assert ret is rows                                   # returns the same list
+    assert LEVERAGE_BASIS_CONCEPTS == {
+        "total_debt", "debt_to_equity", "net_debt", "debt_to_assets"}
+    for r in rows:
+        if r["kind"] == "derived" and r["concept"] in LEVERAGE_BASIS_CONCEPTS:
+            assert r["leverage_basis"] == "borrowings"
+        else:                                            # reported + non-leverage derived
+            assert "leverage_basis" not in r
+
+
+def test_stamp_leverage_basis_none_is_a_noop():
+    """Backward-compat: None (SEC / EU-ESEF pillar) leaves every row untouched."""
+    rows = _lev_rows()
+    stamp_leverage_basis(rows, None)
+    assert not any("leverage_basis" in r for r in rows)
+
+
+def test_stamp_leverage_basis_accepts_total_liabilities():
+    rows = _lev_rows()
+    stamp_leverage_basis(rows, "total_liabilities")
+    d2e = next(r for r in rows if r["concept"] == "debt_to_equity")
+    assert d2e["leverage_basis"] == "total_liabilities"

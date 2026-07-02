@@ -361,7 +361,7 @@ When `FixedAssets` is tagged, `TotalAssetsLessCurrentLiabilities` must equal
 `FixedAssets + NetCurrentAssetsLiabilities`. A mismatch proves the balance-sheet inputs
 are internally inconsistent. On mismatch, **every derived balance-sheet item**
 (`assets`, `liabilities`, `liabilities_current`, `short_term_debt`, `long_term_debt`) is
-suppressed — the directly-tagged P&L lines and equity / net_assets / cash still stand.
+suppressed — the directly-tagged P&L lines and equity / cash still stand.
 The mismatch reason is recorded per key in the coverage `suppressed` list.
 
 ### The `assets` derivation — why TALCL, not `FixedAssets + CurrentAssets`
@@ -403,12 +403,16 @@ metrics (`debt_to_equity`, `debt_to_assets`, `net_debt`, `net_cash`) inherit thi
 total-liabilities basis. FRC-tagged filings do not consistently expose a pure borrowings
 breakdown, so this is the best available from the register.
 
+All leverage rows (`debt_to_equity`, `total_debt`, `net_debt`, `debt_to_assets`) carry a
+`leverage_basis` field (`"total_liabilities"` for UK/NO; `"borrowings"` for
+borrowings-based registers such as BE) so registers are never compared blindly.
+
 ### Coverage yields to correctness
 
 Suppressed items and their reasons are always recorded in the coverage report. The
 practical distribution in a typical bulk batch:
 
-- ~72% of filings yield at least `net_assets` / `equity` rows
+- ~72% of filings yield at least `equity` rows
 - Derived balance-sheet items (`assets`, `liabilities`) are available where TALCL and
   NetCurrentAssetsLiabilities are both tagged
 - Revenue and P&L are present in ~1.3% of filings
@@ -589,7 +593,7 @@ The concept pack mapped from the `m`-member dimensional space covers:
 | Curated key | XBRL rubric | Notes |
 |---|---|---|
 | `assets` | `m25/m1` | Total balance-sheet assets (= total passif anchor) |
-| `assets_fixed` | `m2/m1` | Fixed assets |
+| `non_current_assets` | `m2/m1` | Fixed / non-current assets |
 | `assets_current` | `m12/m1` | Current assets (BE-GAAP: includes receivables >1yr — see Caveats) |
 | `cash` | `m23/m1` | Cash and cash equivalents |
 | `inventory` | `m14/m1 sts=m2` | On-balance-sheet inventory |

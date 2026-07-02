@@ -173,6 +173,19 @@ def map_ee_report(
         else:
             emit(key, name, raw)
 
+    # --- Total liabilities = CurrentLiabilities + NonCurrentLiabilities — the same
+    #     value the balance gate already uses (absent bucket counts as 0). Emitted
+    #     when either bucket is tagged; the six sibling registers all carry a total
+    #     `liabilities`, so EE emits one too rather than only the CL/NCL split.
+    cl_raw = elements.get("CurrentLiabilities")
+    ncl_raw = elements.get("NonCurrentLiabilities")
+    if cl_raw is not None or ncl_raw is not None:
+        values["liabilities"] = {
+            "value": (cl_raw or 0.0) + (ncl_raw or 0.0), "unit": "EUR",
+            "label": "liabilities",
+            "tag": "et-gaap:CurrentLiabilities + NonCurrentLiabilities (derived)",
+        }
+
     # --- dep_amort: the source element is a negative cost line; store abs() so
     #     the engine's ebitda = operating_income + dep_amort adds it back.
     raw_da = elements.get(_DEP_AMORT_ELEMENT)
