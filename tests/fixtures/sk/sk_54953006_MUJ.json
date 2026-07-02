@@ -14,7 +14,6 @@
         "nazov": {
           "sk": "Strana aktív"
         },
-        "pocetDatovychStlpcov": 2,
         "data": [
           "88449",
           "5743",
@@ -68,7 +67,6 @@
         "nazov": {
           "sk": "Strana pasív"
         },
-        "pocetDatovychStlpcov": 2,
         "data": [
           "88449",
           "5743",
@@ -120,7 +118,6 @@
         "nazov": {
           "sk": "Výkaz ziskov a strát"
         },
-        "pocetDatovychStlpcov": 2,
         "data": [
           "14408",
           "1000",

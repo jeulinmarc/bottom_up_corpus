@@ -98,13 +98,16 @@ def parse_vykaz(vykaz: dict, sablona: dict) -> dict:
     response may or may not carry the same field; fixtures may inject it for
     convenience — the sablona is the authoritative source.
     """
-    id_sablony: int = vykaz["idSablony"]
+    # Defensive .get() chains so malformed filings (e.g. idSablony=716 with
+    # no titulnaStrana, 0 tables) return cells=={} without raising KeyError.
+    id_sablony: int = vykaz.get("idSablony")
     pristupnost: str | None = vykaz.get("pristupnostDat")
-    ico: str | None = vykaz["obsah"]["titulnaStrana"].get("ico")
+    obsah: dict = vykaz.get("obsah") or {}
+    ico: str | None = (obsah.get("titulnaStrana") or {}).get("ico")
 
     cells: dict[tuple[int, int], list[float | None]] = {}
 
-    tabulky = vykaz.get("obsah", {}).get("tabulky", [])
+    tabulky = obsah.get("tabulky", [])
     for ti, vt in enumerate(tabulky):
         st = sablona["tabulky"][ti]
         ncols: int = st["pocetDatovychStlpcov"]   # authoritative: from sablona

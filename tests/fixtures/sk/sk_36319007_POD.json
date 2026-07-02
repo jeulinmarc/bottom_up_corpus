@@ -15,7 +15,6 @@
           "sk": "Strana aktív",
           "en": "Assets"
         },
-        "pocetDatovychStlpcov": 4,
         "data": [
           "1418215",
           "366908",
@@ -336,7 +335,6 @@
           "sk": "Strana pasív",
           "en": "Liabilities and equity"
         },
-        "pocetDatovychStlpcov": 2,
         "data": [
           "1051307",
           "949885",
@@ -479,7 +477,6 @@
           "sk": "Výkaz ziskov a strát",
           "en": "Income statement"
         },
-        "pocetDatovychStlpcov": 2,
         "data": [
           "1950307",
           "2299655",

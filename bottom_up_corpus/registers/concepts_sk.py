@@ -167,6 +167,28 @@ def map_sk_vykaz(vykaz: dict, sablona: dict) -> dict:
     ``unbalanced`` is True only when the balance gate fails (then ``values`` is
     empty). Non-public / non-mapped filings return empty ``values`` with a
     recorded ``("__all__", reason)`` and ``unbalanced=False``."""
+    # --- Template-match guard (NO FALSE DATA — must be the first check).
+    #     On the manual --sk-file path an operator can pass a mismatched pair
+    #     (e.g. a 687/MUJ vykaz with the 699/POD sablona).  The positional
+    #     extractor then indexes with wrong row-order/ncols; gate anchors
+    #     resolve to None (gate is skipped) and up to 6 misaligned values are
+    #     emitted as plausible-but-wrong data.  Return no-financials
+    #     immediately instead.
+    _vykaz_sablona_id = vykaz.get("idSablony")
+    _sablona_id = sablona.get("id")
+    if _sablona_id != _vykaz_sablona_id:
+        return {
+            "period_end": _period_end(vykaz),
+            "basis": "company",
+            "currency": "EUR",
+            "values": {},
+            "suppressed": [("__all__",
+                            f"sablona/vykaz idSablony mismatch: "
+                            f"sablona.id={_sablona_id!r} != "
+                            f"vykaz.idSablony={_vykaz_sablona_id!r}")],
+            "unbalanced": False,
+        }
+
     parsed = parse_vykaz(vykaz, sablona)
     id_sablony = parsed["idSablony"]
     pristupnost = parsed["pristupnostDat"]

@@ -221,7 +221,7 @@ def _synth_pod(assets, equity, liab, accruals, *, sablony=699, pristupnost="Vere
     carries equity (r80), liabilities (r101) and accruals (r141) at col 0.
     Values pass as ints/None; None → empty-string cell.
     """
-    sablona = {"tabulky": [
+    sablona = {"id": sablony, "tabulky": [
         {"pocetDatovychStlpcov": 4, "riadky": [{"cisloRiadku": 1}]},
         {"pocetDatovychStlpcov": 2, "riadky": [
             {"cisloRiadku": 80}, {"cisloRiadku": 101}, {"cisloRiadku": 141}]},
@@ -245,7 +245,7 @@ def _synth_meta(sablony, pristupnost):
     """A metadata-only (vykaz, sablona) with no positional tables."""
     vykaz = {"idSablony": sablony, "pristupnostDat": pristupnost,
              "obsah": {"titulnaStrana": {"ico": "99999999"}, "tabulky": []}}
-    return vykaz, {"tabulky": []}
+    return vykaz, {"id": sablony, "tabulky": []}
 
 
 def test_map_pod_values_shape_and_balance():
@@ -394,6 +394,66 @@ def test_map_ifrs_template_is_no_financials():
 
     vykaz, sablona = _synth_meta(695, "Verejné")
     m = map_sk_vykaz(vykaz, sablona)
+    assert m["values"] == {}
+    assert m["unbalanced"] is False
+    assert "__all__" in _suppressed_keys(m)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes — Fix 1: template-match guard (no-false-data on --sk-file path)
+# ---------------------------------------------------------------------------
+
+def test_map_sablona_vykaz_id_mismatch_is_no_financials():
+    """MUJ vykaz (idSablony=687) + POD sablona (id=699): mismatch → no-financials.
+
+    This is the false-data vector on the manual --sk-file path: supplying the
+    wrong sablona causes the positional extractor to index with wrong row-order
+    and ncols, gate anchors resolve to None (gate skipped) and up to 6
+    misaligned values are emitted with unbalanced=False.  The guard must catch
+    this *before* any values are produced.
+    """
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    m = map_sk_vykaz(_load("sk_54953006_MUJ.json"), _load("sk_sablona_699.json"))
+    assert m["values"] == {}, "mismatch must suppress all values (not emit misaligned numbers)"
+    assert m["unbalanced"] is False
+    reason_map = dict(m["suppressed"])
+    assert "__all__" in reason_map, "suppressed must carry an __all__ reason"
+    assert "mismatch" in reason_map["__all__"], (
+        f"reason must mention 'mismatch'; got: {reason_map['__all__']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review fixes — Fix 2: parse_vykaz robust to malformed records (no KeyError)
+# ---------------------------------------------------------------------------
+
+def test_parse_vykaz_malformed_no_titulna_strana_no_raise():
+    """Malformed vykaz (no titulnaStrana, 0 tables) → parse_vykaz returns cells=={} without raising."""
+    from bottom_up_corpus.registers.sk_registeruz import parse_vykaz
+
+    malformed = {
+        "idSablony": 716,
+        "pristupnostDat": "Verejne",
+        "obsah": {"tabulky": []},   # no titulnaStrana key
+    }
+    sablona = {"tabulky": []}
+    p = parse_vykaz(malformed, sablona)   # must not raise
+    assert p["cells"] == {}
+    assert p["ico"] is None
+
+
+def test_map_malformed_vykaz_is_no_financials():
+    """Malformed vykaz (no titulnaStrana, idSablony=716) → no-financials, not an error/exception."""
+    from bottom_up_corpus.registers.concepts_sk import map_sk_vykaz
+
+    malformed = {
+        "idSablony": 716,
+        "pristupnostDat": "Verejne",
+        "obsah": {"tabulky": []},
+    }
+    sablona = {"id": 716, "tabulky": []}
+    m = map_sk_vykaz(malformed, sablona)   # must not raise
     assert m["values"] == {}
     assert m["unbalanced"] is False
     assert "__all__" in _suppressed_keys(m)
