@@ -191,7 +191,7 @@ data/
 ├── financials_register/<entity_id>.jsonl  # register statutory financials (committed)
 ├── ownership/<cik>.jsonl      # normalized insider / 13F rows (committed)
 ├── discovery_errors.jsonl     # append-only audit trail
-├── reports/                   # completeness matrices (incl. register_coverage.jsonl)
+├── reports/                   # completeness matrices (incl. register_coverage_<source>.jsonl per register source)
 └── raw/<cik>/<code>/<year>/   # the documents themselves (git-ignored, regenerable)
 ```
 
@@ -427,6 +427,8 @@ obligors, private companies, bank counterparties) that never file ESEF. Each row
 carries a `basis` label (`"company"` = legal-entity standalone; `"consolidated"` =
 economic group). A **no-false-data** confidence gate suppresses any derived value it
 cannot confirm from structural anchors; the reason is recorded per key in
-`data/reports/register_coverage.jsonl`. Registers are balance-sheet-primary and
+`data/reports/register_coverage_<source>.jsonl` (one file per source: brreg,
+companies_house, bnb, lbr, prh, erst-fsa, erst-ifrs, rik, registeruz). Registers are
+balance-sheet-primary and
 leverage is liabilities-based (total liabilities, not pure financial borrowings).
 See [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md) for the full accounting of caveats.

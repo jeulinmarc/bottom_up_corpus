@@ -109,8 +109,8 @@ value cannot be derived — the engine's TBV would collapse to `equity` and sile
 overstate it for any obligor carrying intangibles. Plain book value remains available as
 the reported `equity` line.
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
-processed: `status="ok"` with a period count, or `"no-financials"` / `"unresolved"`.
+A coverage report is written to `data/reports/register_coverage_brreg.jsonl` for every
+entity processed: `status="ok"` with a period count, or `"no-financials"` / `"unresolved"`.
 
 ## The `basis` field — statutory entity vs. consolidated group
 
@@ -331,11 +331,11 @@ goodwill/intangibles breakdown, so the engine's TBV would collapse to equity and
 silently overstate it for any filer carrying intangibles; suppressed via the shared
 `_SUPPRESSED_CONCEPTS` filter, the same mechanism as the NO register).
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every filing
-processed: `status="ok"` with a period count, `"no-financials"` (no usable iXBRL facts
-or empty values after gating), `"unbalanced"` (primary gate rejected the filing), or
-`"error"` (parse exception). When items were suppressed by the confidence gate, a
-`suppressed` list records each key name and the reason.
+A coverage report is written to `data/reports/register_coverage_companies_house.jsonl`
+for every filing processed: `status="ok"` with a period count, `"no-financials"` (no
+usable iXBRL facts or empty values after gating), `"unbalanced"` (primary gate rejected
+the filing), or `"error"` (parse exception). When items were suppressed by the confidence
+gate, a `suppressed` list records each key name and the reason.
 
 ## The confidence gate — no false data
 
@@ -627,9 +627,9 @@ are **not emitted** in the current release — `operating_profit` (m44) is suppr
 pending a second real validated example. When it is unblocked, the `dep_amort` mapping
 already in place means EBITDA will be automatically computable without further work.
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
-processed: `status="ok"` with a period count, `"no-financials"` (no usable facts after
-gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
+A coverage report is written to `data/reports/register_coverage_bnb.jsonl` for every
+entity processed: `status="ok"` with a period count, `"no-financials"` (no usable facts
+after gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
 exception). When items are suppressed by the confidence gate or the always-suppress
 list, a `suppressed` list records each key and the reason.
 
@@ -914,7 +914,7 @@ FI produces **no** `total_debt`, `net_debt`, `net_cash`, `debt_to_equity`,
 — see the confidence gate below for the precise reasons. There is no `ebitda` (no
 D&A in the pack) and no `effective_tax_rate` (income tax suppressed).
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every
+A coverage report is written to `data/reports/register_coverage_prh.jsonl` for every
 entity processed: `status="ok"` with a period count, `"no-financials"` (no usable
 facts after gating), `"unbalanced"` (primary balance gate failed), `"unresolved"`
 (identity lookup failed), or `"error"` (parse exception). Suppressed items and their
@@ -1215,9 +1215,9 @@ EBITDA and EBITDA-dependent metrics are not produced (no D&A concept in the eCDF
 schema). There is no cash-flow statement in the eCDF schema, so `free_cash_flow`,
 `cfo_to_debt`, `fcf_to_debt`, and `net_debt_to_ebitda` are not emitted.
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
-processed: `status="ok"` with a period count, `"no-financials"` (no usable values after
-gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
+A coverage report is written to `data/reports/register_coverage_lbr.jsonl` for every
+entity processed: `status="ok"` with a period count, `"no-financials"` (no usable values
+after gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
 exception). Suppressed items and their reasons are recorded in the `suppressed` list.
 
 ## The confidence gate — no false data
@@ -1588,11 +1588,12 @@ carrying its source tag) or `kind="derived"` (single-period metrics from the sha
 the FSA pack) and no `free_cash_flow`, `cfo_to_debt`, or `fcf_to_debt` (no cash-flow
 statement).
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
-processed: `status="ok"` with a period count, `"no-financials"` (no usable facts after
-gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
-exception). Suppressed items and their reasons are always recorded in the `suppressed`
-list.
+Coverage is written per source: `data/reports/register_coverage_erst-ifrs.jsonl` (Path A
+— listed ESEF) and `data/reports/register_coverage_erst-fsa.jsonl` (Path B — DK-GAAP
+FSA), for every entity processed: `status="ok"` with a period count, `"no-financials"`
+(no usable facts after gating), `"unbalanced"` (primary gate rejected the filing), or
+`"error"` (parse exception). Suppressed items and their reasons are always recorded in
+the `suppressed` list.
 
 ## The confidence gate — no false data
 
@@ -1884,7 +1885,7 @@ borrowings element (confirmed across the full dataset); it is always suppressed 
 recorded in the coverage report. `net_debt_to_ebitda`, `free_cash_flow`, `cfo_to_debt`,
 and `fcf_to_debt` are not emitted (no cash-flow statement in the bulk).
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every
+A coverage report is written to `data/reports/register_coverage_rik.jsonl` for every
 entity processed: `status="ok"` with a period count, `"no-financials"` (NGO/non-profit
 template detected — see gate), `"unbalanced"` (primary gate rejected the filing), or
 `"error"` (parse exception). Suppressed items and their reasons are always recorded in
@@ -2232,8 +2233,8 @@ There is no `ebitda` (no depreciation / amortisation concept in the SK pack), no
 `free_cash_flow`, `cfo_to_debt`, or `fcf_to_debt` (no cash-flow statement), and no
 `net_debt_to_ebitda`.
 
-A coverage report is written to `data/reports/register_coverage.jsonl` for every
-entity processed: `status="ok"` with a period count, `"no-financials"` (no usable
+A coverage report is written to `data/reports/register_coverage_registeruz.jsonl` for
+every entity processed: `status="ok"` with a period count, `"no-financials"` (no usable
 values after gating), `"unbalanced"` (primary balance gate failed), or `"error"` (parse
 exception). When items are suppressed, a `suppressed` list records each key and the
 reason.

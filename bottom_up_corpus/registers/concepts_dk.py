@@ -412,10 +412,9 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     Pipeline: ``parse_virk_esef_xml`` → ``summaries_from_flat(IFRS_CONCEPTS)``
     (100 % reuse of the EU IFRS engine — no Arelle, borrowings-based leverage
     via ``NoncurrentBorrowings`` + ``CurrentBorrowings``). The balance gate
-    ``Assets == Equity + Liabilities`` is verified for each summary and a
-    warning is emitted when it fails; the summary is retained rather than
-    discarded (partial financials are still useful downstream, and the caller
-    can apply stricter filtering).
+    ``Assets == Equity + Liabilities`` is enforced: summaries that fail the
+    gate are **dropped** and never emitted (parity with all other register
+    engines — an unbalanced ESEF summary must not be propagated downstream).
 
     Returns a list of :class:`PeriodSummary` objects (same type that
     ``eu.financials.build_eu_financials`` produces), ready for
