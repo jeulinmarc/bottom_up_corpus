@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..eu.oim import flatten_oim_json
-from ..financials import PeriodSummary, rows_from_base
+from ..financials import PeriodSummary, rows_from_base, stamp_leverage_basis
 from ..storage import Storage, _atomic_write_text
 from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
 from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
@@ -39,6 +39,23 @@ from .prh_api import fetch_fi_financial, list_fi_dates
 
 # Y-tunnus pattern: NNNNNNN-N (7 digits, hyphen, 1 check digit)
 _YTUNNUS_RE = re.compile(r"(\d{7}-\d)")
+
+# Leverage basis (C1): whether a register's total_debt / debt_to_equity / net_debt
+# / debt_to_assets are built from real financial *borrowings* or from *total
+# liabilities* (a gearing proxy). Stamped onto those four derived rows so a
+# leverage screen can tell true debt from a payables-inflated proxy.
+_BASIS_BORROWINGS = "borrowings"
+_BASIS_TOTAL_LIABILITIES = "total_liabilities"
+
+# ISO-17442 LEI: exactly 20 upper-case alphanumerics. Used on the DK path to
+# populate the `lei` column when the entity_id is itself a LEI (ESEF filers).
+_LEI_RE = re.compile(r"[A-Z0-9]{20}\Z")
+
+
+def _lei_or_none(entity_id: str) -> "str | None":
+    """Return ``entity_id`` when it is a syntactic LEI (ISO-17442), else None."""
+    return entity_id if _LEI_RE.match(entity_id or "") else None
+
 
 # Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
 # never breaks out goodwill / intangibles, so the engine's tangible_book_value
@@ -97,7 +114,7 @@ def _base(
 def _emit_entity_rows(
     entity_id: str, rows: list[dict], n_periods: int,
     cov_base: dict, storage: Storage, out: dict, coverage: list[dict],
-    *, write: bool,
+    *, write: bool, leverage_basis: "str | None" = None,
 ) -> None:
     """Shared tail: write the financials table, update counters, append coverage entry.
 
@@ -116,11 +133,18 @@ def _emit_entity_rows(
                 / ``paths`` are updated in-place.
     coverage:   Mutable list; one entry is appended.
     write:      When False, skip the disk write and ``paths`` update.
+    leverage_basis:  ``"borrowings"`` or ``"total_liabilities"`` — the producer
+                declares which debt definition backs the leverage-derived rows; it
+                is stamped onto them (see :func:`stamp_leverage_basis`). ``None``
+                (the default, e.g. FI which emits no leverage rows) leaves the
+                field absent.
     """
     # Single choke point: drop concepts that are structurally unprovable from any
     # register source.  Filtering here — rather than in each individual producer —
     # means no new producer can accidentally emit them.
     rows = [row for row in rows if row.get("concept") not in _SUPPRESSED_CONCEPTS]
+    # C1: stamp the leverage basis onto the leverage-derived rows (no-op if None).
+    stamp_leverage_basis(rows, leverage_basis)
     if not rows:
         coverage.append({**cov_base, "status": "no-financials"})
         out["no_financials"] += 1
@@ -157,8 +181,9 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
                           country="NO", source="brreg"), s))
                 n += 1
             cov_base = {"orgnr": r["orgnr"], "lei": r.get("lei")}
+            # NO/NGAAP gives total liabilities, not pure borrowings -> gearing proxy.
             _emit_entity_rows(r["orgnr"], rows, n, cov_base, storage, out, coverage,
-                              write=write)
+                              write=write, leverage_basis=_BASIS_TOTAL_LIABILITIES)
         except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
             coverage.append({"orgnr": r["orgnr"], "lei": r.get("lei"),
                              "status": "error", "error": str(exc)})
@@ -275,8 +300,10 @@ def build_ch_financials(
                 cov = dict(cov_base)
                 if mapped.get("suppressed"):
                     cov["suppressed"] = mapped["suppressed"]
+                # UK short_term_debt mirrors current liabilities so total_debt
+                # reconstructs total liabilities -> a gearing proxy, not borrowings.
                 _emit_entity_rows(ch_number, rows, 1, cov, storage, out, coverage,
-                                  write=write)
+                                  write=write, leverage_basis=_BASIS_TOTAL_LIABILITIES)
 
             except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch
                 coverage.append({**cov_base, "status": "error", "error": str(exc)})
@@ -353,7 +380,9 @@ def _be_pipeline(
     cov = dict(cov_base)
     if mapped.get("suppressed"):
         cov["suppressed"] = mapped["suppressed"]
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+    # BE emits real m51 financial borrowings (x-checked) -> borrowings-based leverage.
+    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write,
+                      leverage_basis=_BASIS_BORROWINGS)
 
 
 def build_be_financials_from_files(
@@ -504,8 +533,9 @@ def build_lu_financials_from_files(
                 cov = dict(cov_base)
                 if mapped.get("suppressed"):
                     cov["suppressed"] = mapped["suppressed"]
+                # LU maps real borrowings (ecdf financial-debt lines) -> borrowings basis.
                 _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
-                                  write=write)
+                                  write=write, leverage_basis=_BASIS_BORROWINGS)
 
             except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
                 coverage.append({**cov_base, "status": "error", "error": str(exc)})
@@ -682,6 +712,8 @@ def _fi_pipeline(
     cov = dict(cov_base)
     if mapped.get("suppressed"):
         cov["suppressed"] = mapped["suppressed"]
+    # FI suppresses the maturity split, so the engine emits NO leverage rows —
+    # there is nothing to stamp, hence no leverage_basis (left None).
     _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
 
 
@@ -938,13 +970,17 @@ def _dk_fsa_pipeline(
         sec_form="erst-fsa",
         accession=f"erst-fsa-{entity_id}-{mapped['period_end']}",
     )
-    base = _base(entity_id, lei, mapped, s, country="DK", source="erst-fsa")
+    # M1: when the entity_id is itself a LEI, surface it in the `lei` column too.
+    row_lei = lei or _lei_or_none(entity_id)
+    base = _base(entity_id, row_lei, mapped, s, country="DK", source="erst-fsa")
     rows = list(rows_from_base(base, s))
 
     cov = dict(cov_base)
     if mapped.get("suppressed"):
         cov["suppressed"] = mapped["suppressed"]
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+    # DK-GAAP FSA maps the maturity split of TOTAL liabilities -> gearing proxy.
+    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write,
+                      leverage_basis=_BASIS_TOTAL_LIABILITIES)
 
 
 def _dk_esef_pipeline(
@@ -974,6 +1010,9 @@ def _dk_esef_pipeline(
         out["no_financials"] += 1
         return
 
+    # M1: on the ESEF path the entity_id is the filer's LEI (ISO-17442 scheme) —
+    # surface it in the `lei` column too, keeping entity_id as-is.
+    row_lei = lei or _lei_or_none(entity_id)
     rows: list[dict] = []
     n = 0
     for s in summaries:
@@ -984,12 +1023,15 @@ def _dk_esef_pipeline(
             "currency": s.currency,
             "period_end": s.period_end.isoformat(),
         }
-        base = _base(entity_id, lei, mapped, s, country="DK", source="erst-ifrs")
+        base = _base(entity_id, row_lei, mapped, s, country="DK", source="erst-ifrs")
         rows.extend(rows_from_base(base, s))
         n += 1
 
     cov = dict(cov_base)
-    _emit_entity_rows(entity_id, rows, n, cov, storage, out, coverage, write=write)
+    # DK-ESEF reuses the IFRS engine: NoncurrentBorrowings + CurrentBorrowings ->
+    # real borrowings-based leverage (same as the EU pillar).
+    _emit_entity_rows(entity_id, rows, n, cov, storage, out, coverage, write=write,
+                      leverage_basis=_BASIS_BORROWINGS)
 
 
 def _select_best_dk_doc(
@@ -1345,8 +1387,10 @@ def build_ee_financials_from_files(
                 out["unbalanced"] += 1
                 continue
 
+            # EE maps CurrentLiabilities/NonCurrentLiabilities as the debt split ->
+            # total-liabilities-based gearing proxy (no borrowings line in the RIK bulk).
             _emit_entity_rows(registrikood, rows, n_periods, cov, storage, out, coverage,
-                              write=write)
+                              write=write, leverage_basis=_BASIS_TOTAL_LIABILITIES)
 
         except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
             coverage.append({**cov_base, "status": "error", "error": str(exc)})

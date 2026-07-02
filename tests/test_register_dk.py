@@ -829,6 +829,55 @@ def test_build_dk_financials_from_files_fsa_dry_run(tmp_path):
     assert not out_file.exists(), "Dry-run must not write any file"
 
 
+# Minimal but structurally-valid DK-GAAP FSA instance with BOTH maturity buckets
+# reconciling to derived total liabilities (600 = 250 short + 350 long); the real
+# micro-B fixtures tag only the short bucket, so none of them yield total_debt.
+_FSA_TWO_BUCKET_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"\n'
+    '            xmlns:fsa="http://xbrl.dcca.dk/fsa">\n'
+    '  <xbrli:context id="c0">\n'
+    '    <xbrli:entity>\n'
+    '      <xbrli:identifier scheme="http://www.dcca.dk/cvr">12345678</xbrli:identifier>\n'
+    '    </xbrli:entity>\n'
+    '    <xbrli:period><xbrli:instant>2024-12-31</xbrli:instant></xbrli:period>\n'
+    '  </xbrli:context>\n'
+    '  <xbrli:unit id="u0"><xbrli:measure>iso4217:DKK</xbrli:measure></xbrli:unit>\n'
+    '  <fsa:Assets contextRef="c0" unitRef="u0" decimals="0">1000</fsa:Assets>\n'
+    '  <fsa:LiabilitiesAndEquity contextRef="c0" unitRef="u0" decimals="0">1000</fsa:LiabilitiesAndEquity>\n'
+    '  <fsa:Equity contextRef="c0" unitRef="u0" decimals="0">400</fsa:Equity>\n'
+    '  <fsa:ShorttermLiabilitiesOtherThanProvisions contextRef="c0" unitRef="u0" decimals="0">250</fsa:ShorttermLiabilitiesOtherThanProvisions>\n'
+    '  <fsa:LongtermLiabilitiesOtherThanProvisions contextRef="c0" unitRef="u0" decimals="0">350</fsa:LongtermLiabilitiesOtherThanProvisions>\n'
+    '</xbrli:xbrl>\n'
+)
+
+
+def test_build_dk_financials_from_files_fsa_leverage_basis_total_liabilities(tmp_path):
+    """C1: a DK-GAAP FSA filing whose maturity buckets reconcile yields total_debt
+    /debt_to_equity, and those leverage rows carry leverage_basis='total_liabilities'
+    (a gearing proxy — DK-GAAP class-B never tags borrowings by instrument)."""
+    p = tmp_path / "dk_12345678_twobucket.xml"
+    p.write_text(_FSA_TWO_BUCKET_XML)
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_dk_financials_from_files([str(p)], config=cfg, write=True)
+    assert out["with_financials"] == 1 and out["errors"] == 0
+
+    rows = [
+        _json.loads(ln)
+        for f in (tmp_path / "financials_register").glob("*.jsonl")
+        for ln in f.read_text().splitlines() if ln.strip()
+    ]
+    lev = [r for r in rows if r["kind"] == "derived"
+           and r["concept"] in ("total_debt", "debt_to_equity")]
+    assert lev, "expected total_debt/debt_to_equity leverage rows"
+    for r in lev:
+        assert r["source"] == "erst-fsa"
+        assert r["leverage_basis"] == "total_liabilities"
+    # FSA entity_id is a CVR (not a LEI) -> the `lei` column stays null (M1 no-op).
+    assert all(r["lei"] is None for r in rows)
+
+
 # ---------------------------------------------------------------------------
 # Path A (ESEF / IFRS) — from_files
 # ---------------------------------------------------------------------------
@@ -865,11 +914,20 @@ def test_build_dk_financials_from_files_esef_source_and_dkk(tmp_path):
         assert row["source"] == "erst-ifrs"
         assert row["country"] == "DK"
         assert row["currency"] == "DKK"
+        # M1: on the ESEF path the entity_id is the filer's LEI (ISO-17442) -> it is
+        # surfaced in the `lei` column too, with entity_id kept as-is.
+        assert row["entity_id"] == "529900TESTLEI0000001"
+        assert row["lei"] == "529900TESTLEI0000001"
 
     derived_concepts = {r["concept"] for r in rows if r["kind"] == "derived"}
     assert "debt_to_equity" in derived_concepts, (
         f"borrowings-based debt_to_equity missing; derived: {derived_concepts}"
     )
+    # C1: DK-ESEF reuses the IFRS engine (NoncurrentBorrowings + CurrentBorrowings)
+    # -> borrowings-based leverage, stamped on the leverage-derived rows.
+    dte = next(r for r in rows
+               if r["kind"] == "derived" and r["concept"] == "debt_to_equity")
+    assert dte["leverage_basis"] == "borrowings"
 
 
 # ---------------------------------------------------------------------------

@@ -213,7 +213,7 @@ def test_be_pack_shape():
     """The pack is (bas, part, required-members) triples for the documented keys."""
     for key in ("assets", "equity", "revenue", "net_income", "income_tax",
                 "dep_amort", "inventory", "receivables", "liabilities",
-                "liabilities_current", "provisions", "cash", "assets_fixed",
+                "liabilities_current", "provisions", "cash", "non_current_assets",
                 "assets_current"):
         assert key in BE_PACK
         bas, part, required = BE_PACK[key]
@@ -523,6 +523,10 @@ def test_build_be_financials_from_files_writes_jsonl(tmp_path):
     td_rows = [r for r in rows if r["concept"] == "total_debt" and r["kind"] == "derived"]
     assert td_rows, "total_debt derived row missing"
     assert round(td_rows[0]["value"]) == 6_639_783_828
+
+    # C1: BE leverage is borrowings-based (real m51 financial debt) -> stamped.
+    assert dte_rows[0]["leverage_basis"] == "borrowings"
+    assert td_rows[0]["leverage_basis"] == "borrowings"
 
 
 def test_build_be_financials_from_files_dry_run(tmp_path):

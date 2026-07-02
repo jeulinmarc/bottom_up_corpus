@@ -21,7 +21,7 @@ The confidence gate (independently-tagged anchors only):
   ``TotalAssetsLessCurrentLiabilities == FixedAssets + NetCurrentAssets``; on
   mismatch the inputs are proven inconsistent, so EVERY derived balance item
   (assets, liabilities, liabilities_current, short/long-term debt) is suppressed
-  — the P&L and directly-tagged equity/net_assets/cash still stand.
+  — the P&L and directly-tagged equity/cash still stand.
 - **Completeness:** the derived liability/debt block is emitted atomically, only
   when BOTH the current (``CA − NCA``) and long-term (``TALCL − NetAssets``)
   halves are derivable; if only one is, the whole block is withheld so the
@@ -42,8 +42,8 @@ import re
 _CURRENCY_RE = re.compile(r'^[A-Z]{3}$')
 
 # curated key -> FRC local-name fallbacks, highest priority first. First present
-# (in the current period) wins. NetAssetsLiabilities is handled separately (it is
-# both the gate anchor and its own ``net_assets`` output key).
+# (in the current period) wins. NetAssetsLiabilities is handled separately — it is
+# the balance-gate anchor only, never emitted as a row (it duplicates ``equity``).
 UK_FIELDS: dict[str, tuple[str, ...]] = {
     "revenue": ("TurnoverRevenue",),
     "gross_profit": ("GrossProfitLoss",),
@@ -123,8 +123,9 @@ def map_ch_facts(flat: dict[str, list[dict]]) -> dict | None:
             if name in T:
                 emit(key, T[name], name)
                 break
-    if "NetAssetsLiabilities" in T:                       # gate anchor + output key
-        emit("net_assets", T["NetAssetsLiabilities"], "NetAssetsLiabilities")
+    # NetAssetsLiabilities is NOT emitted as a row: it duplicates `equity` (the
+    # Primary gate forces NA == E) and is a non-canonical, UK-only key. It is read
+    # below purely as the balance-gate anchor.
 
     # 3. Confidence gate — independently-tagged structural anchors only.
     E = T.get("Equity")
@@ -147,7 +148,7 @@ def map_ch_facts(flat: dict[str, list[dict]]) -> dict | None:
     # Anchor: when FixedAssets is tagged, TALCL must reconcile to FA + NCA. On
     # mismatch the balance-sheet inputs are proven inconsistent, so EVERY derived
     # balance item is suppressed below (recorded per-key), keeping only the P&L
-    # and directly-tagged equity / net_assets / cash.
+    # and directly-tagged equity / cash.
     suppress_balance = False
     if FA is not None and TALCL is not None and NCA is not None:
         if abs(TALCL - (FA + NCA)) > _tol(TALCL):

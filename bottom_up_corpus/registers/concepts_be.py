@@ -58,7 +58,7 @@ _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 # status member that names the on-balance-sheet total.
 BE_PACK: dict[str, tuple[str, str, dict[str, str]]] = {
     "assets":              ("m25", "m1", {}),
-    "assets_fixed":        ("m2",  "m1", {}),
+    "non_current_assets":  ("m2",  "m1", {}),   # canonical key (was assets_fixed)
     "assets_current":      ("m12", "m1", {}),
     "cash":                ("m23", "m1", {}),
     "inventory":           ("m14", "m1", {"sts": "m2"}),

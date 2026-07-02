@@ -56,11 +56,12 @@ def test_negative_equity_distressed():   # 11515034
     # (= TALCL - NetAssets = 13002) IS derivable, but emitting it alone would let
     # the engine compute total_debt = 13002, understating true total liabilities.
     # Per the completeness rule the whole derived balance block is suppressed;
-    # only directly-tagged equity/net_assets and the P&L survive.
+    # only directly-tagged equity and the P&L survive.
     m = map_ch_facts(flat(TurnoverRevenue=0, ProfitLoss=0, NetCurrentAssetsLiabilities=-10541,
         TotalAssetsLessCurrentLiabilities=-10541, NetAssetsLiabilities=-23543, Equity=-23543))
     v = {k: m["values"][k]["value"] for k in m["values"]}
-    assert v["equity"] == -23543 and v["net_assets"] == -23543 and v["revenue"] == 0
+    assert v["equity"] == -23543 and v["revenue"] == 0
+    assert "net_assets" not in v            # M2: net_assets is no longer emitted
     for key in ("long_term_debt", "liabilities", "liabilities_current",
                 "short_term_debt", "assets"):
         assert key not in v
@@ -79,7 +80,7 @@ def test_reconciliation_mismatch_suppresses_all_derived_balance():   # crafted
     # Primary NA==E passes (1100==1100) but the Anchor reconciliation fails:
     # TALCL 1200 != FixedAssets 1000 + NetCurrentAssets 100. The inputs are
     # proven inconsistent, so EVERY derived balance item is suppressed — not just
-    # assets/liabilities. Directly-tagged equity/net_assets still stand; this is a
+    # assets/liabilities. Directly-tagged equity still stands; this is a
     # partial suppression, not a whole-filing reject (unbalanced stays False).
     m = map_ch_facts(flat(FixedAssets=1000, CurrentAssets=500, NetCurrentAssetsLiabilities=100,
         TotalAssetsLessCurrentLiabilities=1200, NetAssetsLiabilities=1100, Equity=1100))
@@ -87,7 +88,8 @@ def test_reconciliation_mismatch_suppresses_all_derived_balance():   # crafted
     for key in ("assets", "liabilities", "liabilities_current",
                 "short_term_debt", "long_term_debt"):
         assert key not in v
-    assert v["equity"] == 1100 and v["net_assets"] == 1100
+    assert v["equity"] == 1100
+    assert "net_assets" not in v            # M2: net_assets is no longer emitted
     suppressed_keys = {k for k, _ in m["suppressed"]}
     assert {"assets", "liabilities", "liabilities_current",
             "short_term_debt", "long_term_debt"} <= suppressed_keys
@@ -367,6 +369,15 @@ def test_build_ch_financials_unit(monkeypatch, tmp_path):
     assert assets_row["value"] == 304205
     equity_row = next(r for r in rows_micro if r["kind"] == "reported" and r["concept"] == "equity")
     assert equity_row["value"] == 24699
+
+    # C1: UK leverage is total-liabilities-based (short_term_debt mirrors current
+    # liabilities) -> stamped on the leverage-derived rows.
+    dte_row = next(r for r in rows_micro
+                   if r["kind"] == "derived" and r["concept"] == "debt_to_equity")
+    assert dte_row["leverage_basis"] == "total_liabilities"
+    td_row = next(r for r in rows_micro
+                  if r["kind"] == "derived" and r["concept"] == "total_debt")
+    assert td_row["leverage_basis"] == "total_liabilities"
 
     # SC741022 rows: revenue + equity
     path_pl = tmp_path / "financials_register" / "SC741022.jsonl"

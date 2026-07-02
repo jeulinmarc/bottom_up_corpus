@@ -235,6 +235,9 @@ def test_build_register_financials_real_fixture(tmp_path):
     sd2e = next(r for r in rows if r["kind"] == "derived"
                 and r["concept"] == "debt_to_equity" and r["basis"] == "company")
     assert abs(sd2e["value"] - (108428000000 / 50914000000)) < 1e-6   # ~2.13
+    # C1: NGAAP gearing is total-liabilities-based -> stamped on the leverage rows.
+    assert kd2e["leverage_basis"] == "total_liabilities"
+    assert sd2e["leverage_basis"] == "total_liabilities"
     # No TTM rows are ever written for register inputs (annual-only -> inert).
     assert not any(r["kind"] == "derived_ttm" for r in rows)
 

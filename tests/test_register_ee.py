@@ -100,6 +100,10 @@ def test_map_ee_balance_sheet_values_3361693():
     # Balance gate identity holds to the cent: Assets == Equity + CL + NCL.
     assert (v["equity"]["value"] + v["short_term_debt"]["value"]
             + v["long_term_debt"]["value"]) == v["assets"]["value"]
+    # I2: a total `liabilities` row is emitted = CL + NCL (same value the gate uses).
+    assert v["liabilities"]["value"] == 1891693.0 + 53423.0
+    assert v["liabilities"]["tag"] == \
+        "et-gaap:CurrentLiabilities + NonCurrentLiabilities (derived)"
 
 
 def test_map_ee_debt_to_equity_is_liabilities_based_3361693():
@@ -305,6 +309,15 @@ def test_build_ee_financials_from_files_writes_jsonl(tmp_path):
     lt_rows = [r for r in rows if r["concept"] == "long_term_debt" and r["kind"] == "reported"]
     assert st_rows and st_rows[0]["value"] == 1_891_693.0
     assert lt_rows and lt_rows[0]["value"] == 53_423.0
+
+    # I2: EE emits a total `liabilities` row (= CurrentLiabilities + NonCurrentLiabilities)
+    liab_rows = [r for r in rows if r["concept"] == "liabilities" and r["kind"] == "reported"]
+    assert liab_rows, "liabilities reported row missing"
+    assert liab_rows[0]["value"] == 1_891_693.0 + 53_423.0
+
+    # C1: EE leverage is total-liabilities-based -> stamped on the leverage rows.
+    dte_rows = [r for r in rows if r["concept"] == "debt_to_equity" and r["kind"] == "derived"]
+    assert dte_rows and dte_rows[0]["leverage_basis"] == "total_liabilities"
 
 
 def test_build_ee_financials_from_files_dry_run(tmp_path):
