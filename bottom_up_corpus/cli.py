@@ -33,6 +33,8 @@ from .registers.financials import (
     build_be_financials,
     build_be_financials_from_files,
     build_ch_financials,
+    build_dk_financials,
+    build_dk_financials_from_files,
     build_ee_financials,
     build_ee_financials_from_files,
     build_fi_financials,
@@ -657,6 +659,32 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
             print(f"  coverage: {rep['coverage_path']}")
         return 0
 
+    # --- Denmark keyless path: one or more local Virk XBRL .xml files ---
+    if getattr(args, "dk_file", None):
+        rep = build_dk_financials_from_files(args.dk_file, config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- Denmark API path: CVR numbers resolved via Virk Regnskaber (keyless) ---
+    if getattr(args, "dk_cvr", None):
+        specs = [{"cvr": c} for c in args.dk_cvr]
+        rep = build_dk_financials(
+            specs, fetcher=Fetcher(cfg), config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
     # --- Norway / LEI path ---
     rep = build_register_financials(
         _register_specs(args), fetcher=Fetcher(cfg), config=cfg, write=args.write)
@@ -950,6 +978,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="one or more Finnish Y-tunnus values (FI, PRH open API, keyless)")
     rfsrc.add_argument("--lu-file", nargs="+", metavar="PATH", dest="lu_file",
                        help="one or more LBR eCDF XML files (LU, keyless parse)")
+    rfsrc.add_argument("--dk-file", nargs="+", metavar="PATH", dest="dk_file",
+                       help="one or more Virk XBRL .xml files (DK, keyless local parse, ESEF or FSA)")
+    rfsrc.add_argument("--dk-cvr", nargs="+", metavar="CVR", dest="dk_cvr",
+                       help="one or more Danish CVR numbers (DK, Virk Regnskaber API, keyless)")
     rfsrc.add_argument("--ee-file", nargs=2, metavar=("ELEM", "META"), dest="ee_file",
                        help="EE Äriregister: elements CSV/zip + metadata CSV/zip (EE, keyless)")
     rfsrc.add_argument("--ee-year", type=int, metavar="YYYY", dest="ee_year",

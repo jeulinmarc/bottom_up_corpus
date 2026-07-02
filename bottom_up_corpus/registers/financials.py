@@ -822,6 +822,399 @@ def build_fi_financials(
 
 
 # ---------------------------------------------------------------------------
+# Denmark Erhvervsstyrelsen / Virk register producer
+# ---------------------------------------------------------------------------
+# Two paths (both keyless via Virk Regnskaber — no API key required):
+#
+#   Path A (ESEF / IFRS) — listed issuers file bare XBRL tagged with the
+#       ifrs-full taxonomy.  ``map_dk_esef`` → ``summaries_from_flat(IFRS_CONCEPTS)``
+#       (100 % reuse of the EU IFRS engine) → borrowings-based leverage, same
+#       ``debt_to_equity`` formula as the EU pillar.  source="erst-ifrs".
+#
+#   Path B (FSA / DK-GAAP) — private companies file bare XBRL tagged with
+#       the Erhvervsstyrelsen FSA taxonomy (http://xbrl.dcca.dk/fsa).
+#       ``parse_fsa_facts`` → ``map_fsa_facts`` → ``_emit_entity_rows``
+#       (liabilities-based leverage, NO-FALSE-DATA gate, §32 revenue suppression).
+#       source="erst-fsa".
+#
+# entity_id = CVR (8 digits, from xbrli:identifier scheme dcca.dk/cvr for FSA;
+# or LEI from xbrli:identifier scheme iso/17442 for ESEF; or filename fallback).
+# Currency: DKK.  basis="company" (statutory individual accounts).
+
+_NS_XBRLI_STR = "http://www.xbrl.org/2003/instance"
+_CVR_8DIGIT_RE = re.compile(r"(\d{8})")
+
+
+def _route_dk_xml(xml_bytes: bytes) -> "str | None":
+    """Route DK XML bytes to ``'esef'`` or ``'fsa'`` by sniffing the first 8 KB.
+
+    ``'esef'``: ``ifrs-full`` namespace marker found → listed ESEF XBRL (Path A).
+    ``'fsa'``:  ``xbrl.dcca.dk/fsa`` namespace found → DK-GAAP FSA XBRL (Path B).
+    ``None``:   unrecognised document — skip.
+    """
+    header = xml_bytes[:8192]
+    if b"ifrs.org" in header and b"ifrs-full" in header:
+        return "esef"
+    if b"xbrl.dcca.dk/fsa" in header:
+        return "fsa"
+    return None
+
+
+def _dk_entity_id_from_xml(xml_bytes: bytes, path_obj: Path, route: str) -> str:
+    """Extract entity_id from the XBRL document's ``xbrli:identifier``.
+
+    FSA (Path B): CVR from a scheme URI containing ``dcca`` (e.g.
+    ``http://www.dcca.dk/cvr``).  Falls back to the first 8-digit sequence
+    in the filename stem.
+
+    ESEF (Path A): LEI from a scheme URI containing ``17442`` (ISO 17442).
+    Falls back to the filename stem.
+
+    The first matching identifier in document order wins (all contexts in a
+    filing share the same entity identifier).
+    """
+    import xml.etree.ElementTree as _ET_DK
+    ident_tag = f"{{{_NS_XBRLI_STR}}}identifier"
+    try:
+        root = _ET_DK.fromstring(xml_bytes)
+        for ident in root.iter(ident_tag):
+            scheme = ident.get("scheme", "")
+            val = (ident.text or "").strip()
+            if not val:
+                continue
+            if route == "fsa" and "dcca" in scheme:
+                return val
+            if route == "esef" and "17442" in scheme:
+                return val
+    except Exception:  # noqa: BLE001
+        pass
+    # Filename fallback
+    if route == "fsa":
+        m = _CVR_8DIGIT_RE.search(path_obj.stem)
+        return m.group(1) if m else path_obj.stem
+    return path_obj.stem
+
+
+def _dk_fsa_pipeline(
+    xml_bytes: bytes,
+    entity_id: str,
+    lei,
+    *,
+    storage: Storage,
+    out: dict,
+    coverage: list[dict],
+    write: bool,
+) -> None:
+    """Parse, map, and emit rows for one DK-GAAP FSA XBRL source (Path B).
+
+    Raises on any parse or mapping error — callers must wrap in ``try/except``.
+    """
+    from .dk_fsa_xbrl import parse_fsa_facts
+    from .concepts_dk import map_fsa_facts
+
+    parsed = parse_fsa_facts(xml_bytes)
+    mapped = map_fsa_facts(parsed)
+
+    cov_base: dict = {"cvr": entity_id, "lei": lei}
+
+    if mapped["unbalanced"]:
+        cov = {**cov_base, "status": "unbalanced"}
+        if mapped.get("suppressed"):
+            cov["suppressed"] = mapped["suppressed"]
+        coverage.append(cov)
+        out["unbalanced"] += 1
+        return
+
+    if not mapped.get("values"):
+        cov = {**cov_base, "status": "no-financials"}
+        if mapped.get("suppressed"):
+            cov["suppressed"] = mapped["suppressed"]
+        coverage.append(cov)
+        out["no_financials"] += 1
+        return
+
+    s = _summary(
+        mapped, entity_id,
+        sec_form="erst-fsa",
+        accession=f"erst-fsa-{entity_id}-{mapped['period_end']}",
+    )
+    base = _base(entity_id, lei, mapped, s, country="DK", source="erst-fsa")
+    rows = list(rows_from_base(base, s))
+
+    cov = dict(cov_base)
+    if mapped.get("suppressed"):
+        cov["suppressed"] = mapped["suppressed"]
+    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+
+
+def _dk_esef_pipeline(
+    xml_bytes: bytes,
+    entity_id: str,
+    lei,
+    *,
+    storage: Storage,
+    out: dict,
+    coverage: list[dict],
+    write: bool,
+) -> None:
+    """Parse, map, and emit rows for one ESEF IFRS XBRL source (Path A).
+
+    Reuses ``map_dk_esef`` → ``summaries_from_flat(IFRS_CONCEPTS)`` — 100 %
+    EU-pillar reuse, borrowings-based ``debt_to_equity`` for free.
+    source="erst-ifrs".  Raises on errors — callers must wrap in ``try/except``.
+    """
+    from .concepts_dk import map_dk_esef
+
+    summaries = map_dk_esef(xml_bytes)
+
+    cov_base: dict = {"cvr": entity_id, "lei": lei}
+
+    if not summaries:
+        coverage.append({**cov_base, "status": "no-financials"})
+        out["no_financials"] += 1
+        return
+
+    rows: list[dict] = []
+    n = 0
+    for s in summaries:
+        # Build a thin ``mapped``-compatible dict to satisfy ``_base()``'s keys.
+        # The PeriodSummary already carries period_end/currency/values/derived.
+        mapped = {
+            "basis": "company",
+            "currency": s.currency,
+            "period_end": s.period_end.isoformat(),
+        }
+        base = _base(entity_id, lei, mapped, s, country="DK", source="erst-ifrs")
+        rows.extend(rows_from_base(base, s))
+        n += 1
+
+    cov = dict(cov_base)
+    _emit_entity_rows(entity_id, rows, n, cov, storage, out, coverage, write=write)
+
+
+def _select_best_dk_doc(
+    filings: list[dict],
+) -> "tuple[str, str] | tuple[None, None]":
+    """Return (route, url) for the best document URL found across all filings.
+
+    Scans every filing's ``dokumenter`` list (filings assumed newest-first) and
+    collects the first ESEF URL and the first FSA URL.  Returns ESEF when one
+    exists; falls back to FSA otherwise.  Returns ``(None, None)`` when nothing
+    routable is found.
+
+    This preference is critical for **listed companies** whose annual-report
+    filing carries both an ``AARSRAPPORT`` (DK-GAAP management-review, XML but
+    no balance-sheet / P&L facts) *and* an ``AARSRAPPORT_ESEF`` (the real IFRS
+    financials).  The old code picked the first routable document — typically the
+    FSA one — and silently yielded no-financials.  Preferring ESEF guarantees
+    Path A (``source="erst-ifrs"``) is always used for listed issuers while the
+    FSA fallback is preserved for private companies that only file DK-GAAP.
+    """
+    from .virk_api import route_document
+
+    esef_url: "str | None" = None
+    fsa_url: "str | None" = None
+
+    for filing in filings:
+        for doc in filing.get("dokumenter", []):
+            r = route_document(doc)
+            url = doc.get("dokumentUrl")
+            if not url:
+                continue
+            if r == "esef" and esef_url is None:
+                esef_url = url
+            elif r == "fsa" and fsa_url is None:
+                fsa_url = url
+
+    if esef_url is not None:
+        return "esef", esef_url
+    if fsa_url is not None:
+        return "fsa", fsa_url
+    return None, None
+
+
+def build_dk_financials_from_files(
+    paths,
+    *,
+    config: Config,
+    write: bool = True,
+) -> dict:
+    """Parse a list of local Virk XBRL .xml files → the curated schema.
+
+    Routes each file to Path A (ESEF/IFRS, ``source="erst-ifrs"``) or Path B
+    (FSA/DK-GAAP, ``source="erst-fsa"``) by sniffing the first 8 KB for the
+    ``ifrs-full`` or ``xbrl.dcca.dk/fsa`` namespace marker.
+
+    entity_id extraction:
+
+    * **FSA**: ``xbrli:identifier`` with scheme ``http://www.dcca.dk/cvr``
+      → CVR (8 digits).  Falls back to first 8-digit sequence in filename stem.
+    * **ESEF**: ``xbrli:identifier`` with ISO 17442 LEI scheme → LEI string.
+      Falls back to filename stem.
+
+    Parameters
+    ----------
+    paths:
+        Iterable of file paths (str or Path) pointing to Virk XBRL .xml files.
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for path in paths:
+        out["entities"] += 1
+        path_obj = Path(str(path))
+        # Tentative cov_base before we know entity_id (updated once route is known).
+        cov_base: dict = {"cvr": path_obj.stem, "lei": None}
+
+        try:
+            xml_bytes = path_obj.read_bytes()
+            route = _route_dk_xml(xml_bytes)
+
+            if route is None:
+                coverage.append({**cov_base, "status": "no-financials",
+                                 "note": "unrecognised document type (not esef/fsa)"})
+                out["no_financials"] += 1
+                continue
+
+            entity_id = _dk_entity_id_from_xml(xml_bytes, path_obj, route)
+            cov_base = {"cvr": entity_id, "lei": None}
+
+            if route == "fsa":
+                _dk_fsa_pipeline(
+                    xml_bytes, entity_id, None,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
+            else:  # esef
+                _dk_esef_pipeline(
+                    xml_bytes, entity_id, None,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_dk_financials(
+    specs,
+    *,
+    fetcher,
+    config: Config,
+    write: bool = True,
+) -> dict:
+    """Fetch Virk XBRL via the keyless Regnskaber API and emit the curated schema.
+
+    Resolves each spec to a CVR via :func:`resolve_register_specs`, calls
+    :func:`~.virk_api.search_virk_filings` (sorted newest-first), iterates the
+    ``dokumenter`` list of each filing to find the first routable document
+    (``route_document`` → ``"esef"`` or ``"fsa"``), fetches it with
+    :func:`~.virk_api.fetch_virk_document` (auto-gunzip), and runs the
+    appropriate pipeline (Path A or B).
+
+    Keyless — no API key required.  Live / scale validation — rate limits,
+    filing completeness — is a controller step, intentionally out of scope here.
+    Unit-test with a stubbed fetcher returning fixture bytes.
+
+    Parameters
+    ----------
+    specs:
+        List of spec dicts (e.g. ``[{"cvr": "30830725"}]`` or ``[{"lei": "…"}]``).
+    fetcher:
+        A :class:`~bottom_up_corpus.http.Fetcher` (or any object exposing
+        ``get_json``, ``get``, ``post_json``).
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    from .virk_api import fetch_virk_document, search_virk_filings
+
+    resolved = resolve_register_specs(specs, fetcher=fetcher)
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    for r in resolved:
+        out["entities"] += 1
+        cvr = r.get("cvr")
+        lei = r.get("lei")
+        cov_base: dict = {"cvr": cvr, "lei": lei}
+
+        if not cvr:
+            coverage.append({**cov_base, "status": "unresolved"})
+            out["no_financials"] += 1
+            continue
+
+        try:
+            filings = search_virk_filings(cvr, fetcher=fetcher)
+            if not filings:
+                coverage.append({**cov_base, "status": "no-financials"})
+                out["no_financials"] += 1
+                continue
+
+            # Select best document: ESEF preferred over FSA across all filings.
+            # Listed companies file both AARSRAPPORT (management-review, no
+            # balance-sheet facts) and AARSRAPPORT_ESEF (real IFRS financials);
+            # we must pick the ESEF first to reach Path A (source="erst-ifrs").
+            route_dk, _best_url = _select_best_dk_doc(filings)
+            xml_bytes_dk: "bytes | None" = (
+                fetch_virk_document(_best_url, fetcher=fetcher)
+                if _best_url is not None else None
+            )
+
+            if xml_bytes_dk is None or route_dk is None:
+                coverage.append({**cov_base, "status": "no-financials"})
+                out["no_financials"] += 1
+                continue
+
+            if route_dk == "fsa":
+                _dk_fsa_pipeline(
+                    xml_bytes_dk, cvr, lei,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
+            else:  # esef
+                _dk_esef_pipeline(
+                    xml_bytes_dk, cvr, lei,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Estonia Äriregister (RIK) bulk-CSV register producer
 # ---------------------------------------------------------------------------
 # Keyless open-data — no subscription key required.  stdlib csv + zipfile only.
