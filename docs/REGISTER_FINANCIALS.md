@@ -2,10 +2,11 @@
 
 `bottom_up_corpus/registers/` ingests **open-data statutory accounts** from national
 business registers and writes them in the same curated schema as the SEC and EU pillars.
-This document covers the purpose, source, schema, honest caveats, and CLI for five
+This document covers the purpose, source, schema, honest caveats, and CLI for six
 registers: **Norway's Brønnøysund Register Centre (Brreg)**, **UK Companies House**,
 **Belgium's BNB Central Balance Sheet Office (CBSO)**, **Luxembourg's LBR/STATEC
-Centrale des bilans**, and **Finland's PRH avoindata XBRL platform**.
+Centrale des bilans**, **Finland's PRH avoindata XBRL platform**, and **Denmark's
+Erhvervsstyrelsen / Virk "Regnskaber"**.
 
 See also: [`FINANCIALS.md`](FINANCIALS.md) (the SEC/US-GAAP pillar that defines the
 shared schema and derived-metrics engine) and [`EU_FINANCIALS.md`](EU_FINANCIALS.md)
@@ -1455,22 +1456,351 @@ multiple quarterly archives.
 
 ---
 
+## Source — Denmark Erhvervsstyrelsen / Virk "Regnskaber" (XBRL)
+
+Denmark's **Erhvervsstyrelsen** (Business Authority) requires annual statutory accounts
+from all Danish legal entities above the filing threshold. They are collected and made
+publicly available through the **Virk "Regnskaber"** (accounts) open-data portal. The
+engine queries the Virk **Elasticsearch** endpoint:
+
+```
+POST http://distribution.virk.dk/offentliggoerelser/_search
+```
+
+**No API key, account, or registration is required** — the endpoint is fully public and
+keyless, returning up to 50 hits sorted newest-first via a `term` query on `cvrNummer`.
+Documents (bare XBRL and PDF) are fetched by individual HTTP GETs. The corpus holds
+approximately **4 million XBRL filings** covering the private and listed Danish universe.
+
+**Gzip caveat:** The Virk document server sends payloads as gzip-compressed bytes but
+**omits the `Content-Encoding: gzip` response header**. The HTTP layer therefore does not
+auto-decompress. The engine inspects the first two bytes of every downloaded document:
+if they match the gzip magic (`\x1f\x8b`), the payload is decompressed explicitly before
+parsing. Passing a compressed payload directly to the XML parser without this step would
+raise a parse error.
+
+### Two acquisition and parsing paths
+
+The engine distinguishes two XBRL formats, routing by sniffing the first 8 KB of the
+document for known namespace markers:
+
+| Path | `source` | Format | Parser | Leverage basis |
+|---|---|---|---|---|
+| **A — listed ESEF/IFRS** | `"erst-ifrs"` | `ifrs-full` bare XBRL | stdlib (`parse_virk_esef_xml`) | **Borrowings-based** |
+| **B — private DK-GAAP/FSA** | `"erst-fsa"` | FSA taxonomy bare XBRL | stdlib (`parse_fsa_facts`) | **Liabilities-based** |
+
+#### Path A — listed ESEF/IFRS (`source="erst-ifrs"`)
+
+Listed Danish issuers file a bare `ifrs-full` XBRL instance. The parser
+(`registers/concepts_dk.py::parse_virk_esef_xml`) is **stdlib `xml.etree.ElementTree`
+only — no Arelle, no taxonomy bundle**. It:
+
+- Locates the `ifrs-full` namespace URI by substring (handles both the 2023-03-27 and
+  2024-03-27 taxonomy vintages without relying on the `ifrs-full` prefix, which filing
+  tools can remap).
+- Indexes **no-dimension** contexts only: any `xbrli:context` whose `xbrli:scenario`
+  carries child elements (equity-component splits, maturity buckets, …) is excluded,
+  preventing disaggregated facts from leaking into the top-line totals.
+- Produces the flat `{local_name: [datapoint]}` shape that feeds directly into
+  **`summaries_from_flat(flat, concepts=IFRS_CONCEPTS)`** — 100% reuse of the existing
+  EU IFRS engine with no new infrastructure.
+
+Because the IFRS engine is reused without modification, Path A automatically gets
+**borrowings-based leverage** via `ifrs-full:NoncurrentBorrowings` +
+`ifrs-full:CurrentBorrowings`, the same formula applied by the EU ESEF pillar.
+
+#### Path B — private DK-GAAP/FSA (`source="erst-fsa"`)
+
+Private companies file bare XBRL under the **Erhvervsstyrelsen FSA taxonomy**
+(`http://xbrl.dcca.dk/fsa`). The parser (`registers/dk_fsa_xbrl.py::parse_fsa_facts`)
+is also **stdlib `xml.etree` only — no Arelle, no taxonomy bundle**. Namespaces are
+matched by URI in Clark notation (`{uri}LocalName`) — never by prefix, since filing
+tools may reassign prefix names.
+
+**Context selection:** Private (class-B) DK filings carry no `ConsolidatedSoloDimension`
+— their contexts have no scenario at all. Selection priority is: no-dimension contexts
+(no `xbrli:scenario` child, or an empty one), then `cmn:ConsolidatedSoloDimension =
+SoloMember`, then `ConsolidatedMember`. Mixed-basis facts are never emitted together.
+
+**Current-period selection (no period-mixing):** A DK-GAAP filing carries the current
+year and prior-year comparative figures side by side. The parser anchors on the **max
+`xbrli:instant`** across the selected contexts as `period_end`; only facts from contexts
+whose date equals `period_end` are emitted. Prior-year comparative facts are excluded
+entirely — they can never leak into the current-period row, so the balance-sheet identity
+holds for the current period alone even when the entity changed size year over year.
+
+The concept pack mapped from FSA local names is:
+
+| Curated key | FSA element | Notes |
+|---|---|---|
+| `assets` | `fsa:Assets` | Total balance-sheet assets (primary gate anchor) |
+| `assets_current` | `fsa:CurrentAssets` | Current assets |
+| `cash` | `fsa:CashAndCashEquivalents` | Cash and equivalents |
+| `equity` | `fsa:Equity` | Shareholders' equity |
+| `net_income` | `fsa:ProfitLoss` | Period net result |
+| `gross_profit` | `fsa:GrossProfitLoss` | Bruttoresultat — **not revenue** (see §32 gate below) |
+| `liabilities` | derived: `LiabilitiesAndEquity − Equity` | Captures provisions automatically |
+| `provisions` | `fsa:Provisions` | Directly tagged; reported separately, never counted as debt |
+| `revenue` | `fsa:Revenue` | Suppressed when absent (§32 — see confidence gate below) |
+| `short_term_debt` | `fsa:ShorttermLiabilitiesOtherThanProvisions` | Emitted only when reconciling (see gate) |
+| `long_term_debt` | `fsa:LongtermLiabilitiesOtherThanProvisions` | Emitted only when reconciling (see gate) |
+
+`financial_debt` (borrowings-by-instrument) is always suppressed — class-B filings carry
+no bank/bond/lease split.
+
+## Schema — `data/financials_register/<cvr>.jsonl`
+
+Output follows the same per-period row model as the other registers and the SEC/EU
+pillars (see [`FINANCIALS.md`](FINANCIALS.md) for the full curated-concepts definition).
+Both paths write to the same per-CVR file; the `source` column distinguishes them:
+
+| Column | Value |
+|---|---|
+| `entity_id` | CVR number (8-digit string, e.g. `"30830725"`) |
+| `lei` | GLEIF LEI if resolved; `null` for the keyless `--dk-file` FSA path |
+| `country` | `"DK"` |
+| `source` | `"erst-ifrs"` (Path A — listed ESEF) or `"erst-fsa"` (Path B — DK-GAAP FSA) |
+| `basis` | `"company"` (statutory individual accounts) |
+| `fy` | Fiscal year (integer, derived from `period_end`) |
+| `frequency` | `"annual"` |
+| `currency` | `"DKK"` (both paths; never EUR) |
+| `period_end` | ISO-8601 date string |
+| `publication_date` | `null` (not exposed by the Virk API) |
+
+Each row is `kind="reported"` (directly-tagged or cleanly derived curated concepts, each
+carrying its source tag) or `kind="derived"` (single-period metrics from the shared
+`compute_derived` engine). No `derived_ttm` rows (annual accounts only).
+
+**Path A derived block** (for a full ESEF filer): the IFRS engine's standard output —
+`total_debt` (borrowings), `net_debt`, `net_cash`, `debt_to_equity` (borrowings-based),
+`debt_to_assets` (borrowings-based), `operating_margin`, `net_margin`, `roe`, `roa`,
+`current_ratio`, `interest_coverage`, and more — exactly as the EU ESEF pillar produces.
+
+**Path B derived block** (for a full DK-GAAP filer, when the maturity split reconciles):
+`total_debt` (= total liabilities, liabilities-based), `net_debt`, `net_cash`,
+`working_capital`, `debt_to_equity` (liabilities-based), `debt_to_assets`
+(liabilities-based), `net_margin`, `roe`, `roa`. There is no `ebitda` (no D&A concept in
+the FSA pack) and no `free_cash_flow`, `cfo_to_debt`, or `fcf_to_debt` (no cash-flow
+statement).
+
+A coverage report is written to `data/reports/register_coverage.jsonl` for every entity
+processed: `status="ok"` with a period count, `"no-financials"` (no usable facts after
+gating), `"unbalanced"` (primary gate rejected the filing), or `"error"` (parse
+exception). Suppressed items and their reasons are always recorded in the `suppressed`
+list.
+
+## The confidence gate — no false data
+
+**Governing principle:** a number we cannot confirm must never be emitted; a missing
+number is strictly better than a wrong one. Two DK-GAAP traps specific to the FSA
+taxonomy drive the Path B gate design.
+
+### The §32 / GrossProfitLoss ≠ revenue trap (Path B)
+
+Under ÅRL (the Danish Financial Statements Act) §32, class-B and micro-entity filers are
+permitted to present only **Bruttoresultat** (gross result) as their top P&L line —
+revenue minus cost of goods sold and external costs — and to **omit `fsa:Revenue`
+entirely**. Bruttoresultat is tagged as `fsa:GrossProfitLoss`.
+
+**`fsa:GrossProfitLoss` is not revenue.** Mapping it to `revenue` would silently
+understate the top line — the difference equals the cost of goods sold and external
+costs, which can be very large. The engine therefore:
+
+- Emits `revenue` **only from `fsa:Revenue`** when that tag is present.
+- When `fsa:Revenue` is absent (the §32 case), **suppresses `revenue` entirely** and
+  records the reason.
+- Emits `gross_profit` from `fsa:GrossProfitLoss` under its own correctly-labelled key.
+
+`gross_profit` and `revenue` are thus never confused. A query on `revenue` for a §32
+filer returns no rows — not a wrong value.
+
+### Primary gate: `Assets == LiabilitiesAndEquity` (Path B)
+
+`fsa:Assets` and `fsa:LiabilitiesAndEquity` are independently tagged. If they disagree
+beyond `max(2 DKK, 0.5% of the larger figure)`, the **entire filing is rejected**:
+`status="unbalanced"`, no values emitted. A balance sheet that does not close is
+untrustworthy by construction.
+
+When either anchor is absent the gate cannot run; the parser proceeds and emits whatever
+directly-tagged values are present, mirroring the BE/FI/UK siblings.
+
+### Total liabilities — derived, captures provisions automatically
+
+`liabilities` is derived as `LiabilitiesAndEquity − Equity`. Under DK-GAAP, the passiv
+comprises equity + provisions + liabilities proper — provisions sit between equity and
+liabilities (similar to BE-GAAP). Deriving from the total captures provisions
+automatically; no separate provisions gate is needed.
+
+### Leverage: maturity split gated, atomic emission (Path B)
+
+The FSA taxonomy labels the maturity buckets unambiguously:
+`fsa:ShorttermLiabilitiesOtherThanProvisions` (short) and
+`fsa:LongtermLiabilitiesOtherThanProvisions` (long). No guessing is required. The split
+is emitted **only when**:
+
+1. At least one bucket is tagged in the filing.
+2. `short + long + provisions` reconciles to the derived total liabilities within
+   tolerance — the split fully accounts for the passiv.
+
+When the reconciliation holds, each tagged bucket is emitted with its confirmed taxonomy
+label. A bucket the filing did not tag is left absent (never synthesised — a zero long-
+term tranche is genuinely unknown without the tag). When the reconciliation fails — or
+neither bucket is present — the **entire split is suppressed atomically** and the reason
+is recorded; provisions are always kept separate and never counted as debt.
+
+This is a **liabilities-based** approximation (total non-provision liabilities, not pure
+financial borrowings), analogous to the NO and UK registers. Class-B filings do not tag
+borrowings by instrument; class-C/D confirmation is a deferred fast-follow (see Caveats).
+
+### Balance gate: `Assets == Equity + Liabilities` (Path A)
+
+For ESEF/IFRS filings the engine verifies the IFRS balance-sheet identity after
+`summaries_from_flat`: `Assets == Equity + Liabilities` within tolerance. On failure the
+summary is retained with a warning rather than discarded (partial financials remain
+useful downstream); callers may apply stricter filtering if needed.
+
+## The `basis` field — DK
+
+All DK rows carry `basis="company"`. Both paths ingest statutory individual accounts.
+Consolidated-group detection is deferred to a follow-up PR.
+
+The output directory (`data/financials_register/`) is separate from the EU ESEF pillar
+(`data/financials_eu/`). Rows from the two pillars must **never** be merged:
+
+- Path A (`source="erst-ifrs"`) rows contain IFRS figures from the `ifrs-full` taxonomy,
+  but are filed at Erhvervsstyrelsen rather than through the ESEF mandatory chain — they
+  may cover entities not in the ESEF corpus, and the filing provenance differs.
+- Path B (`source="erst-fsa"`) rows follow DK-GAAP (ÅRL), which differs from IFRS in
+  the treatment of provisions, appropriations, and depreciation.
+
+## Identity — CVR and LEI
+
+**CVR (`entity_id`):** The Danish CVR (Central Business Register) number — an 8-digit
+string (e.g. `"30830725"`) — is the canonical legal-entity identifier.
+
+- **FSA path (Path B):** CVR is extracted from the `xbrli:identifier` element whose
+  `scheme` URI contains `dcca` (e.g. `http://www.dcca.dk/cvr`). Falls back to the first
+  8-digit sequence in the filename stem when not found in the XML.
+- **ESEF path (Path A) via file:** The `xbrli:identifier` uses an ISO 17442 LEI scheme
+  (scheme URI contains `17442`); the extracted value is the LEI. CVR requires a GLEIF
+  hop (see below) and is not embedded in the ESEF XML.
+- **`--dk-cvr` API path:** CVR numbers are passed directly on the command line.
+
+**LEI resolution:** When a spec carries a GLEIF LEI, the engine calls
+`GET https://api.gleif.org/api/v1/lei-records/{lei}` and extracts
+`entity.registeredAs`. This is accepted as the CVR **only when**
+`entity.legalAddress.country == "DK"` — the same country guard as the NO/BE/FI
+registers. A LEI from a non-Danish jurisdiction returns `status="unresolved"` in the
+coverage report. The resolved `lei` (if available) is carried through to every output row.
+
+## CLI usage — DK
+
+```bash
+# keyless local path: parse one or more Virk XBRL .xml files (dry-run, ESEF or FSA)
+bottom_up_corpus register-financials --dk-file dk_30830725_fsa_2025.xml
+
+# keyless local path: multiple files, persist to disk
+bottom_up_corpus register-financials \
+  --dk-file dk_30830725_fsa_2025.xml dk_42566551_fsa_2024.xml --write
+
+# keyless API path: fetch latest annual report from Virk Regnskaber by CVR (dry-run)
+bottom_up_corpus register-financials --dk-cvr 30830725
+
+# keyless API path: multiple CVR numbers, persist
+bottom_up_corpus register-financials --dk-cvr 30830725 42566551 --write
+```
+
+`--write` is the only side-effecting flag. Omitting it is a safe dry-run that prints
+entity / period / unbalanced counts without touching disk. The `--dk-file` and
+`--dk-cvr` flags are mutually exclusive with each other and with `--orgnrs`, `--leis`,
+`--ch-bulk`, `--be-file`, `--be-numbers`, `--fi-file`, `--fi-businessid`, and
+`--lu-file`.
+
+The `--dk-file` path is entirely local (no network). The `--dk-cvr` path issues a `POST`
+to `distribution.virk.dk/offentliggoerelser/_search` and then one or more `GET` requests
+per filing, with auto-gunzip applied to every document. No API key, environment variable,
+or registration is required for either path.
+
+## Honest caveats — DK
+
+### Currency DKK — never compare to EUR registers
+
+All DK rows carry `currency="DKK"`. Denmark has not adopted the euro. **Never compare
+monetary values across DK rows and the EUR-currency registers (BE, LU, FI) without
+applying an exchange-rate conversion.** The `currency` column in every row is the guard.
+
+### Path B is liabilities-based — class-C/D borrowings fast-follow
+
+DK-GAAP class-B filings do not tag borrowings by instrument (bank debt, bonds, leases).
+The maturity split approximates `short_term_debt` / `long_term_debt` as total
+non-provision liabilities — not pure financial borrowings. All derived gearing
+(`debt_to_equity`, `debt_to_assets`, `net_debt`) for `source="erst-fsa"` rows is
+therefore **liabilities-based**, not borrowings-based, analogous to the NO and UK
+registers.
+
+Whether class-C and class-D (large Danish companies) filings in the FSA taxonomy expose
+borrowings-by-instrument tags is a **deferred confirmation**. If confirmed, the engine
+can be extended under the existing maturity-split gate without schema changes.
+
+### Path A is borrowings-based — never blend with Path B
+
+Path A (`source="erst-ifrs"`) uses the IFRS `NoncurrentBorrowings` / `CurrentBorrowings`
+concepts — pure financial borrowings, the same basis as the BE and LU registers. Path B
+(`source="erst-fsa"`) is liabilities-based. **Never compare `debt_to_equity` from an
+`erst-ifrs` row to one from an `erst-fsa` row without first confirming that both rest on
+the same debt basis.** The `source` field is the guard.
+
+### Revenue absent for §32 / class-B filers
+
+Class-B and micro-entity filers under ÅRL §32 typically omit `fsa:Revenue` and present
+only `fsa:GrossProfitLoss` (Bruttoresultat). For these filers `revenue` is suppressed
+and recorded in the coverage report's `suppressed` list. `gross_profit` (Bruttoresultat)
+is emitted under its own key. Do not screen DK-GAAP filers by revenue without first
+filtering for filers that actually carry the `revenue` concept; use `gross_profit` as the
+top-line metric for class-B filings.
+
+### DK-GAAP statutory (Path B) — separate from ESEF
+
+Path B rows follow **DK-GAAP (ÅRL)** — the statutory accounting standard for Danish
+private legal entities. Danish listed groups also file **ESEF consolidated accounts**
+under IFRS; those are ingested by the EU ESEF pillar (`data/financials_eu/`) and must
+**never be merged** with `source="erst-fsa"` rows: the GAAP regime, consolidation scope,
+and entity population all differ.
+
+Path A rows (`source="erst-ifrs"`) come from the same `ifrs-full` taxonomy as the ESEF
+pillar but are filed through Virk rather than the ESEF mandatory chain — they should
+also be kept in `data/financials_register/` and reconciled explicitly before any merge
+with `data/financials_eu/`.
+
+### Annual accounts only
+
+Danish statutory accounts are annual. `frequency` is always `"annual"`. There are no
+quarterly or semi-annual periods in the Virk Regnskaber data.
+
+### No commercial fallback — ever
+
+If Virk returns no XBRL filing for a CVR, the entity is recorded as `"no-financials"`.
+Revenue and balance-sheet figures are **never supplemented from commercial databases or
+any non-public source**. Open data only.
+
+See also: [NO (Brreg)](#source--brreg-regnskapsregisteret-norway),
+[UK (Companies House)](#source--uk-companies-house-statutory-accounts-ixbrl),
+[BE (BNB CBSO)](#source--belgium-bnb-cbso-annual-accounts-dimensional-xbrl),
+[LU (LBR/STATEC)](#source--luxembourg-lbrstatec-centrale-des-bilans-ecdf),
+[FI (PRH)](#source--finland-prh-avoindata-xbrl-open-api),
+[`FINANCIALS.md`](FINANCIALS.md), [`EU_FINANCIALS.md`](EU_FINANCIALS.md).
+
+---
+
 ## Out of scope — future PRs
 
 The current implementation covers **Norway (Brreg)** (JSON, no XBRL), **UK Companies
 House** (iXBRL via Arelle, keyless bulk `--ch-bulk` path), **Belgium BNB CBSO**
-(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path), and
-**Luxembourg LBR/STATEC** (custom eCDF XML, stdlib only, keyless `--lu-file` path), and
+(dimensional XBRL, stdlib only; keyless `--be-file` + `--be-numbers` API path),
+**Luxembourg LBR/STATEC** (custom eCDF XML, stdlib only, keyless `--lu-file` path),
 **Finland PRH** (dimensional XBRL, stdlib only; fully keyless `--fi-file` +
-`--fi-businessid` paths).
-
-National registers not yet supported:
-
-- **Denmark (Erhvervsstyrelsen / Virk)** — XBRL / iXBRL
-
-Denmark will require the **Tier B Arelle bridge** (already built for the ESEF pillar and
-reused for UK; see [`EU_FINANCIALS.md`](EU_FINANCIALS.md)) to be adapted to the Danish
-register's taxonomy and delivery format.
+`--fi-businessid` paths), and **Denmark Erhvervsstyrelsen / Virk** (bare XBRL, stdlib
+only; fully keyless `--dk-file` + `--dk-cvr` paths).
 
 For the **UK pillar** specifically, the following are deferred to follow-up PRs:
 
