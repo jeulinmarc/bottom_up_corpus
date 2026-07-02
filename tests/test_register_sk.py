@@ -447,3 +447,256 @@ def test_non_sk_lei_is_unresolved():
     )[0]
     assert r.get("ico") is None
     assert r["status"] == "unresolved"
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — producer (build_sk_financials_from_files) + CLI
+# ---------------------------------------------------------------------------
+
+def test_build_sk_financials_from_files_writes_jsonl(tmp_path):
+    """build_sk_financials_from_files writes data/financials_register/36319007.jsonl."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    assert out["entities"] == 1
+    assert out["with_financials"] == 1
+    assert out["no_financials"] == 0
+    assert out["unbalanced"] == 0
+    assert out["errors"] == 0
+
+    out_file = tmp_path / "financials_register" / "36319007.jsonl"
+    assert out_file.exists(), f"Expected {out_file} to be written"
+
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert rows, "JSONL must not be empty"
+
+
+def test_build_sk_financials_from_files_row_fields(tmp_path):
+    """All rows carry source='registeruz', country='SK', basis='company', currency='EUR'."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    out_file = tmp_path / "financials_register" / "36319007.jsonl"
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    for row in rows:
+        assert row["source"] == "registeruz", f"unexpected source: {row['source']}"
+        assert row["country"] == "SK", f"unexpected country: {row['country']}"
+        assert row["basis"] == "company", f"unexpected basis: {row['basis']}"
+        assert row["currency"] == "EUR", f"unexpected currency: {row['currency']}"
+        assert row["period_end"] == "2023-12-31"
+        assert row["fy"] == 2023
+
+
+def test_build_sk_financials_from_files_equity_value(tmp_path):
+    """Equity reported row carries value=262763.0."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "financials_register" / "36319007.jsonl").read_text().splitlines()
+            if ln.strip()]
+    eq_rows = [r for r in rows if r["concept"] == "equity" and r["kind"] == "reported"]
+    assert eq_rows, "equity reported row missing"
+    assert eq_rows[0]["value"] == 262763.0
+
+
+def test_build_sk_financials_from_files_debt_to_equity_present(tmp_path):
+    """debt_to_equity derived row is present when bank loans are non-zero."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "financials_register" / "36319007.jsonl").read_text().splitlines()
+            if ln.strip()]
+    derived_concepts = {r["concept"] for r in rows if r["kind"] == "derived"}
+    assert "debt_to_equity" in derived_concepts, (
+        f"debt_to_equity missing; derived: {sorted(derived_concepts)}"
+    )
+
+
+def test_build_sk_financials_from_files_leverage_basis_borrowings(tmp_path):
+    """debt_to_equity and total_debt rows carry leverage_basis='borrowings'."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "financials_register" / "36319007.jsonl").read_text().splitlines()
+            if ln.strip()]
+    dte_rows = [r for r in rows if r["concept"] == "debt_to_equity" and r["kind"] == "derived"]
+    assert dte_rows, "debt_to_equity derived row missing"
+    assert dte_rows[0]["leverage_basis"] == "borrowings", (
+        f"expected 'borrowings', got {dte_rows[0].get('leverage_basis')!r}"
+    )
+
+
+def test_build_sk_financials_from_files_interest_coverage_present(tmp_path):
+    """interest_coverage derived row is present (operating_income / interest_expense)."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "financials_register" / "36319007.jsonl").read_text().splitlines()
+            if ln.strip()]
+    ic_rows = [r for r in rows if r["concept"] == "interest_coverage" and r["kind"] == "derived"]
+    assert ic_rows, "interest_coverage derived row missing"
+
+
+def test_build_sk_financials_from_files_nodebt_no_debt_to_equity(tmp_path):
+    """No-debt fixture: zero bank loans → debt_to_equity absent, gate holds."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_sk_financials_from_files(
+        FIXTURES / "sk_50296353_POD_nodebt.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=True,
+    )
+
+    assert out["with_financials"] == 1
+    assert out["unbalanced"] == 0
+    ico = "50296353"
+    out_file = tmp_path / "financials_register" / f"{ico}.jsonl"
+    assert out_file.exists()
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    derived_concepts = {r["concept"] for r in rows if r["kind"] == "derived"}
+    assert "debt_to_equity" not in derived_concepts, (
+        f"debt_to_equity must be absent for no-debt filing; derived: {sorted(derived_concepts)}"
+    )
+
+
+def test_build_sk_financials_from_files_dry_run(tmp_path):
+    """write=False: no file written, coverage_path=None, counters correct."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials_from_files
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_sk_financials_from_files(
+        FIXTURES / "sk_36319007_POD.json",
+        FIXTURES / "sk_sablona_699.json",
+        config=cfg,
+        write=False,
+    )
+
+    assert out["with_financials"] == 1
+    assert out["paths"] == []
+    assert out["coverage_path"] is None
+    assert not (tmp_path / "financials_register" / "36319007.jsonl").exists()
+
+
+def test_build_sk_financials_stubbed_fetcher(tmp_path):
+    """build_sk_financials with a stubbed fetcher accumulates periods per IČO."""
+    from bottom_up_corpus.config import Config
+    from bottom_up_corpus.registers.financials import build_sk_financials
+
+    vykaz_data = json.loads((FIXTURES / "sk_36319007_POD.json").read_bytes())
+    sablona_data = json.loads((FIXTURES / "sk_sablona_699.json").read_bytes())
+
+    entity_resp = {"ico": "36319007", "idUctovnychZavierok": [1001]}
+    zavierka_resp = {"id": 1001, "idUctovnychVykazov": [9001]}
+
+    def get_json(url, *, params=None, **_):
+        if "uctovna-jednotka" in url:
+            return entity_resp
+        if "uctovna-zavierka" in url:
+            return zavierka_resp
+        if "uctovny-vykaz" in url:
+            return vykaz_data
+        if "sablona" in url:
+            return sablona_data
+        raise ValueError(f"Unexpected URL: {url}")
+
+    fetcher = MagicMock()
+    fetcher.get_json.side_effect = get_json
+
+    cfg = Config(data_dir=tmp_path)
+    out = build_sk_financials([12345], fetcher=fetcher, config=cfg, write=True)
+
+    assert out["with_financials"] == 1
+    out_file = tmp_path / "financials_register" / "36319007.jsonl"
+    assert out_file.exists()
+    rows = [json.loads(ln) for ln in out_file.read_text().splitlines() if ln.strip()]
+    assert any(r["source"] == "registeruz" for r in rows)
+    assert any(r["country"] == "SK" for r in rows)
+
+
+# --- CLI -------------------------------------------------------------------
+
+def test_cli_sk_file_dry_run(tmp_path):
+    """register-financials --sk-file dry-run: rc=0, no JSONL written."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--sk-file", str(FIXTURES / "sk_36319007_POD.json"),
+        str(FIXTURES / "sk_sablona_699.json"),
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "36319007.jsonl"
+    assert not out_file.exists(), "Dry-run must not write any file"
+
+
+def test_cli_sk_file_write(tmp_path):
+    """register-financials --sk-file --write: rc=0, JSONL written."""
+    from bottom_up_corpus.cli import main
+
+    rc = main([
+        "--data-dir", str(tmp_path),
+        "register-financials",
+        "--sk-file", str(FIXTURES / "sk_36319007_POD.json"),
+        str(FIXTURES / "sk_sablona_699.json"),
+        "--write",
+    ])
+    assert rc == 0
+    out_file = tmp_path / "financials_register" / "36319007.jsonl"
+    assert out_file.exists()

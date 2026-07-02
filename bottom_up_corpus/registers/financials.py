@@ -29,6 +29,7 @@ from .concepts_ee import map_ee_report as _map_ee_report
 from .concepts_fi import map_fi_facts
 from .concepts_lu import map_lu_entity
 from .concepts_no import map_brreg_entry
+from .concepts_sk import map_sk_vykaz as _map_sk_vykaz
 from .concepts_uk import map_ch_facts
 from .ee_csv import download_ee_bulk as _download_ee_bulk, iter_ee_reports as _iter_ee_reports
 from .fi_prh_xbrl import parse_fi_facts
@@ -36,6 +37,12 @@ from .identity import resolve_register_specs
 from .lu_cdb import iter_lu_declarers
 from .no_brreg import fetch_brreg_accounts
 from .prh_api import fetch_fi_financial, list_fi_dates
+from .sk_registeruz import (
+    fetch_entity as _sk_fetch_entity,
+    fetch_sablona as _sk_fetch_sablona,
+    fetch_vykaz as _sk_fetch_vykaz,
+    fetch_zavierka as _sk_fetch_zavierka,
+)
 
 # Y-tunnus pattern: NNNNNNN-N (7 digits, hyphen, 1 check digit)
 _YTUNNUS_RE = re.compile(r"(\d{7}-\d)")
@@ -1447,3 +1454,241 @@ def build_ee_financials(
     return build_ee_financials_from_files(
         elem_bytes, meta_bytes, config=config, write=write, limit=limit
     )
+
+
+def build_sk_financials_from_files(
+    vykaz_path,
+    sablona_path,
+    *,
+    config: Config,
+    write: bool = True,
+) -> dict:
+    """Load a single SK registeruz.sk vykaz JSON + sablona JSON → the curated schema.
+
+    Loads the two files from disk, runs :func:`map_sk_vykaz`, and emits the
+    curated financials row set via the shared ``_emit_entity_rows`` tail.
+
+    Parameters
+    ----------
+    vykaz_path:
+        File path to the ``/uctovny-vykaz`` JSON (str or Path).
+    sablona_path:
+        File path to the ``/sablona`` JSON (str or Path).
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    """
+    import json as _json_mod
+
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+
+    out["entities"] += 1
+    with open(vykaz_path, encoding="utf-8") as fh:
+        vykaz = _json_mod.load(fh)
+    with open(sablona_path, encoding="utf-8") as fh:
+        sablona = _json_mod.load(fh)
+
+    ico = (vykaz.get("obsah") or {}).get("titulnaStrana", {}).get("ico")
+    entity_id = ico or Path(str(vykaz_path)).stem
+    cov_base: dict = {"ico": entity_id, "lei": None}
+
+    try:
+        mapped = _map_sk_vykaz(vykaz, sablona)
+
+        if mapped["unbalanced"]:
+            cov = {**cov_base, "status": "unbalanced"}
+            if mapped.get("suppressed"):
+                cov["suppressed"] = mapped["suppressed"]
+            coverage.append(cov)
+            out["unbalanced"] += 1
+
+        elif not mapped.get("values"):
+            cov = {**cov_base, "status": "no-financials"}
+            if mapped.get("suppressed"):
+                cov["suppressed"] = mapped["suppressed"]
+            coverage.append(cov)
+            out["no_financials"] += 1
+
+        else:
+            s = _summary(
+                mapped, entity_id,
+                sec_form="registeruz",
+                accession=f"registeruz-{entity_id}-{mapped['period_end']}",
+            )
+            base = _base(entity_id, None, mapped, s, country="SK", source="registeruz")
+            rows = list(rows_from_base(base, s))
+            cov = dict(cov_base)
+            if mapped.get("suppressed"):
+                cov["suppressed"] = mapped["suppressed"]
+            # SK maps real bank-loan borrowings → borrowings-based leverage.
+            _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
+                              write=write, leverage_basis=_BASIS_BORROWINGS)
+
+    except Exception as exc:  # noqa: BLE001 — record + skip
+        coverage.append({**cov_base, "status": "error", "error": str(exc)})
+        out["errors"] += 1
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
+
+
+def build_sk_financials(
+    entity_ids,
+    *,
+    fetcher,
+    config: Config,
+    write: bool = True,
+    limit: int | None = None,
+) -> dict:
+    """Traverse registeruz.sk entity IDs → fetch → accumulate → emit curated schema.
+
+    For each numeric entity ID, fetches:
+    * the entity record (/uctovna-jednotka) → ``ico`` + ``idUctovnychZavierok``
+    * for each zavierka (/uctovna-zavierka) → ``idUctovnychVykazov``
+    * for each vykaz (/uctovny-vykaz) + its sablona (/sablona, cached by id)
+
+    **Accumulates all periods per IČO** (multi-year; write once per entity,
+    dedupe by period_end — last-seen wins for same-period resubmissions).
+    Per-entity try/except ensures one bad entity does not abort the batch.
+
+    Parameters
+    ----------
+    entity_ids:
+        Iterable of numeric registeruz entity IDs (or a single int).
+    fetcher:
+        HTTP fetcher (exposes ``get_json(url, *, params)``).
+    config:
+        Config instance (``data_dir`` for output).
+    write:
+        Persist rows + coverage (default True); False for dry-run.
+    limit:
+        Cap on the number of entities processed. ``None`` = no cap.
+    """
+    storage = Storage(config)
+    coverage: list[dict] = []
+    out: dict = {
+        "entities": 0, "with_financials": 0, "no_financials": 0,
+        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
+    }
+    sablona_cache: dict[int, dict] = {}  # id_sablony → sablona dict (few distinct values)
+
+    n_entities = 0
+    for entity_id in entity_ids:
+        if limit is not None and n_entities >= limit:
+            break
+        n_entities += 1
+        out["entities"] += 1
+        cov_base: dict = {"entity_id": entity_id, "ico": None, "lei": None}
+
+        try:
+            entity = _sk_fetch_entity(entity_id, fetcher=fetcher)
+            if not entity:
+                coverage.append({**cov_base, "status": "no-financials",
+                                 "note": "entity not found"})
+                out["no_financials"] += 1
+                continue
+
+            ico = entity.get("ico")
+            if not ico:
+                coverage.append({**cov_base, "status": "no-financials",
+                                 "note": "no IČO on entity record"})
+                out["no_financials"] += 1
+                continue
+            cov_base = {"ico": ico, "lei": None}
+
+            # --- Accumulate all periods for this IČO.
+            # Dedupe key = period_end; last-seen vykaz for a given period wins.
+            period_map: dict[str, dict] = {}   # period_key → mapped
+            had_unbalanced = False
+            suppressed_all: list = []
+
+            for zavierka_id in (entity.get("idUctovnychZavierok") or []):
+                zavierka = _sk_fetch_zavierka(zavierka_id, fetcher=fetcher)
+                if not zavierka:
+                    continue
+                for vykaz_id in (zavierka.get("idUctovnychVykazov") or []):
+                    vykaz = _sk_fetch_vykaz(vykaz_id, fetcher=fetcher)
+                    if not vykaz:
+                        continue
+                    id_sablony = vykaz.get("idSablony")
+                    if id_sablony is None:
+                        continue
+                    # Cache sablony — there are very few distinct ids.
+                    sablona = sablona_cache.get(id_sablony)
+                    if sablona is None:
+                        sablona = _sk_fetch_sablona(id_sablony, fetcher=fetcher)
+                        if sablona:
+                            sablona_cache[id_sablony] = sablona
+                    if not sablona:
+                        continue
+
+                    mapped = _map_sk_vykaz(vykaz, sablona)
+                    if mapped.get("suppressed"):
+                        suppressed_all.extend(mapped["suppressed"])
+                    if mapped["unbalanced"]:
+                        had_unbalanced = True
+                        continue
+                    if not mapped.get("values"):
+                        continue
+                    period_end = mapped.get("period_end")
+                    period_key = (
+                        period_end if period_end is not None
+                        else f"_none_{vykaz_id}"
+                    )
+                    period_map[period_key] = mapped   # last-seen wins
+
+            # --- Build rows from all accumulated periods (sorted by period_end).
+            rows: list[dict] = []
+            n_periods = 0
+            for period_key in sorted(period_map):
+                mapped = period_map[period_key]
+                s = _summary(
+                    mapped, ico,
+                    sec_form="registeruz",
+                    accession=f"registeruz-{ico}-{mapped['period_end']}",
+                )
+                base = _base(ico, None, mapped, s, country="SK", source="registeruz")
+                rows.extend(rows_from_base(base, s))
+                n_periods += 1
+
+            cov = dict(cov_base)
+            if suppressed_all:
+                cov["suppressed"] = suppressed_all
+
+            # If no period produced rows and all failures were balance-gate rejections,
+            # classify as "unbalanced" rather than "no-financials".
+            if not rows and had_unbalanced:
+                cov["status"] = "unbalanced"
+                coverage.append(cov)
+                out["unbalanced"] += 1
+                continue
+
+            # SK maps real bank borrowings → borrowings-based leverage.
+            _emit_entity_rows(ico, rows, n_periods, cov, storage, out, coverage,
+                              write=write, leverage_basis=_BASIS_BORROWINGS)
+
+        except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
+            coverage.append({**cov_base, "status": "error", "error": str(exc)})
+            out["errors"] += 1
+            continue
+
+    if write:
+        cov_path = config.data_dir / "reports" / "register_coverage.jsonl"
+        _atomic_write_text(
+            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
+        out["coverage_path"] = str(cov_path)
+    else:
+        out["coverage_path"] = None
+    return out
