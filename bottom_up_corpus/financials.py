@@ -432,6 +432,35 @@ _ROLLUP_LTD_TAGS: frozenset[str] = frozenset({
 # from a roll-up, a short_term_debt resolving to one of these is NOT added again.
 _ROLLUP_OWN_CURRENT_TAGS: frozenset[str] = frozenset({"DebtCurrent", "CurrentBorrowings"})
 
+# E-I3 (parent-vs-consolidated equity base). The `equity` and `net_income` concepts
+# are DEFINED on the parent-attributable base (owners of the parent). Both packs
+# carry a consolidated-total fallback (`Equity` / `ProfitLoss`, incl. NCI) for filers
+# that omit the parent-attributable tag. When the two sides resolve to DIFFERENT bases
+# -- a parent numerator over a consolidated equity denominator (or vice-versa) -- and
+# non-controlling interests are material, ROE / per-common-share book value would be a
+# mixed-base number that is simply wrong. These sets let the engine tell which base a
+# value resolved from, so it can gate the affected ratios (see compute_derived).
+_PARENT_ATTRIB_TAGS: frozenset[str] = frozenset({
+    "StockholdersEquity", "EquityAttributableToOwnersOfParent",   # equity (owners of parent)
+    "NetIncomeLoss", "ProfitLossAttributableToOwnersOfParent",    # earnings (owners of parent)
+})
+_TOTAL_ATTRIB_TAGS: frozenset[str] = frozenset({
+    "Equity",        # IFRS consolidated equity (incl. NCI)
+    "ProfitLoss",    # consolidated profit (incl. NCI); us-gaap ProfitLoss is also the total
+})
+# NCI counts as "material" (not a rounding artifact) above 1% of the equity base --
+# below that the parent/consolidated mix moves ROE by <1% and gating would drop good data.
+_NCI_MATERIALITY = 0.01
+
+
+def _attribution(tag: str | None) -> str | None:
+    """'parent' | 'total' | None -- the attribution base of an equity/earnings tag."""
+    if tag in _PARENT_ATTRIB_TAGS:
+        return "parent"
+    if tag in _TOTAL_ATTRIB_TAGS:
+        return "total"
+    return None
+
 
 def compute_derived(
     values: dict[str, dict], frequency: str = "annual", currency: str = "USD",
@@ -502,6 +531,24 @@ def compute_derived(
     assets = _num(values, "assets")
     ac, lc = _num(values, "assets_current"), _num(values, "liabilities_current")
     cash = _num(values, "cash")
+
+    # E-I3: gate equity-attribution-mixed ratios when NCI is material. If `equity`
+    # and `net_income` resolved from DIFFERENT attribution bases -- a parent-only
+    # numerator over a consolidated (incl.-NCI) equity base, or vice-versa -- and
+    # non-controlling interests are material, ROE and per-common-share book value
+    # would be a mixed-base number that is simply wrong; gate them instead of
+    # emitting it. With no material NCI (the common case, incl. every no-NCI
+    # DK-ESEF filer whose `Equity` legitimately == parent equity) nothing changes.
+    # (debt_to_equity is intentionally NOT gated: debt has no attribution, so
+    # debt/equity is a well-defined ratio on whichever single equity base, not a mix.)
+    nci = _num(values, "noncontrolling_interest")
+    mixed_equity_base = (
+        nci is not None and eq not in (None, 0)
+        and abs(nci) > _NCI_MATERIALITY * abs(eq)
+        and _attribution(_src(values, "equity")) is not None
+        and _attribution(_src(values, "net_income")) is not None
+        and _attribution(_src(values, "equity")) != _attribution(_src(values, "net_income"))
+    )
 
     # Aggregates. total_debt is emitted whenever ANY debt component is present
     # (long-term, its current portion, or short-term), summed additively -- so a
@@ -609,7 +656,7 @@ def compute_derived(
 
     # Returns / tax (%). ROE is on COMMON equity: (net income - preferred dividends).
     ni_common = (ni - opt("preferred_dividends")) if ni is not None else None
-    put("roe", pct_pos(ni_common, eq))
+    put("roe", None if mixed_equity_base else pct_pos(ni_common, eq))
     put("roa", pct(ni, assets))
     put("effective_tax_rate", pct_pos(inc_tax, pretax))
 
@@ -654,9 +701,12 @@ def compute_derived(
     put("dpo", dpo)
     if dso is not None and dio is not None and dpo is not None:
         put("ccc", dso + dio - dpo)
+    # Per-common-share book value is equity-denominated: gate it on the same mixed
+    # NCI base as ROE -- off a consolidated (incl.-NCI) equity it overstates the
+    # common holder's per-share stake.
     shares = _num(values, "shares_outstanding")
-    put("book_value_per_share", div(common_eq, shares))
-    put("tangible_book_value_per_share", div(tbv, shares))
+    put("book_value_per_share", None if mixed_equity_base else div(common_eq, shares))
+    put("tangible_book_value_per_share", None if mixed_equity_base else div(tbv, shares))
 
     return out
 

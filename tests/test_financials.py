@@ -409,6 +409,64 @@ def test_nonpositive_pretax_suppresses_effective_tax_rate():
     assert "effective_tax_rate" not in compute_derived(vals)
 
 
+def test_roe_gated_on_mixed_parent_vs_consolidated_nci_base():
+    from bottom_up_corpus.financials import compute_derived
+    # net_income = parent-attributable (ProfitLossAttributableToOwnersOfParent) but
+    # equity = the consolidated `Equity` total (incl. NCI), with MATERIAL NCI ->
+    # ROE would divide a parent numerator by a consolidated equity base (mixed,
+    # wrong). Gate ROE + per-common-share book value; roa (assets base) is fine.
+    vals = {
+        "net_income": {"value": 100.0, "unit": "EUR", "tag": "ProfitLossAttributableToOwnersOfParent"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "noncontrolling_interest": {"value": 200.0, "unit": "EUR", "tag": "NoncontrollingInterests"},
+        "assets": {"value": 3000.0, "unit": "EUR"},
+        "shares_outstanding": {"value": 100.0, "unit": "shares"},
+    }
+    d = compute_derived(vals, currency="EUR")  # annual
+    assert "roe" not in d                       # mixed base -> gated
+    assert "book_value_per_share" not in d      # equity-denominated -> gated
+    assert d["roa"]["value"] == pytest.approx(100 / 3000 * 100)  # unaffected
+
+
+def test_roe_not_gated_without_material_nci_dk_esef_style():
+    from bottom_up_corpus.financials import compute_derived
+    # DK-ESEF style: equity resolves to the `Equity` total tag but there is NO NCI,
+    # so `Equity` IS parent equity. Parent-attributable NI. No mix -> ROE unchanged.
+    vals = {
+        "net_income": {"value": 100.0, "unit": "EUR", "tag": "ProfitLossAttributableToOwnersOfParent"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "assets": {"value": 3000.0, "unit": "EUR"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["roe"]["value"] == pytest.approx(10.0)  # 100 / 1000, unchanged
+
+
+def test_roe_not_gated_when_both_bases_consolidated():
+    from bottom_up_corpus.financials import compute_derived
+    # Both sides consolidated (equity=Equity total, net_income=ProfitLoss total) with
+    # material NCI -> a consistent consolidated ROE, not a mix -> emitted, not gated.
+    vals = {
+        "net_income": {"value": 120.0, "unit": "EUR", "tag": "ProfitLoss"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "noncontrolling_interest": {"value": 200.0, "unit": "EUR", "tag": "NoncontrollingInterests"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["roe"]["value"] == pytest.approx(12.0)  # 120 / 1000, consolidated
+
+
+def test_roe_not_gated_when_nci_immaterial():
+    from bottom_up_corpus.financials import compute_derived
+    # Mixed tags but NCI is 0.5% of equity (< 1% materiality) -> the base mix moves
+    # ROE by <1%, so we keep the number rather than drop good data.
+    vals = {
+        "net_income": {"value": 100.0, "unit": "EUR", "tag": "ProfitLossAttributableToOwnersOfParent"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "noncontrolling_interest": {"value": 5.0, "unit": "EUR", "tag": "NoncontrollingInterests"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["roe"]["value"] == pytest.approx(10.0)  # immaterial NCI -> not gated
+
+
 def test_roe_roa_are_annual_only():
     from bottom_up_corpus.financials import compute_derived
     vals = {"net_income": {"value": 10.0, "unit": "USD"},
