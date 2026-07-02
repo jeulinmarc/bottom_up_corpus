@@ -41,6 +41,8 @@ from .registers.financials import (
     build_fi_financials_from_files,
     build_lu_financials_from_files,
     build_register_financials,
+    build_sk_financials,
+    build_sk_financials_from_files,
 )
 from .openfigi import coverage_hint, map_identifiers
 from .rag import iter_items
@@ -532,8 +534,9 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
         getattr(args, "ch_bulk", None)
         or getattr(args, "ee_file", None)
         or getattr(args, "ee_year", None)
+        or getattr(args, "sk_id", None)
     ):
-        raise SystemExit("error: --limit requires --ch-bulk, --ee-file, or --ee-year")
+        raise SystemExit("error: --limit requires --ch-bulk, --ee-file, --ee-year, or --sk-id")
 
     # --- Estonia keyless path: elements CSV + metadata CSV (local files or bytes) ---
     if getattr(args, "ee_file", None):
@@ -676,6 +679,34 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
         specs = [{"cvr": c} for c in args.dk_cvr]
         rep = build_dk_financials(
             specs, fetcher=Fetcher(cfg), config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- Slovakia keyless path: one vykaz JSON + one sablona JSON (local files) ---
+    if getattr(args, "sk_file", None):
+        vykaz_path, sablona_path = args.sk_file
+        rep = build_sk_financials_from_files(
+            vykaz_path, sablona_path, config=cfg, write=args.write)
+        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+        print(f"register-financials [{mode}] — {rep['entities']} entities, "
+              f"{rep['with_financials']} with financials, "
+              f"{rep.get('unbalanced', 0)} unbalanced, "
+              f"{rep['periods']} period summaries")
+        if rep.get("coverage_path"):
+            print(f"  coverage: {rep['coverage_path']}")
+        return 0
+
+    # --- Slovakia API traverse path: entity IDs → registeruz.sk (keyless) ---
+    if getattr(args, "sk_id", None):
+        rep = build_sk_financials(
+            args.sk_id, fetcher=Fetcher(cfg), config=cfg, write=args.write,
+            limit=getattr(args, "limit", None))
         mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
         print(f"register-financials [{mode}] — {rep['entities']} entities, "
               f"{rep['with_financials']} with financials, "
@@ -986,6 +1017,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="EE Äriregister: elements CSV/zip + metadata CSV/zip (EE, keyless)")
     rfsrc.add_argument("--ee-year", type=int, metavar="YYYY", dest="ee_year",
                        help="EE Äriregister: download bulk CSVs for this year (EE, keyless online)")
+    rfsrc.add_argument("--sk-file", nargs=2, metavar=("VYKAZ", "SABLONA"), dest="sk_file",
+                       help="SK registeruz.sk: vykaz JSON + sablona JSON (SK, keyless local parse)")
+    rfsrc.add_argument("--sk-id", nargs="+", metavar="ENTITY_ID", dest="sk_id",
+                       type=int,
+                       help="one or more SK registeruz.sk entity IDs (SK, keyless traverse API)")
     rf.add_argument("--ee-elem-url", metavar="URL", dest="ee_elem_url", default=None,
                     help="explicit elements-zip URL (--ee-year; RIK snapshot date rotates)")
     rf.add_argument("--ee-meta-url", metavar="URL", dest="ee_meta_url", default=None,
