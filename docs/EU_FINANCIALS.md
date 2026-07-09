@@ -60,7 +60,7 @@ appears as `no-financials` — never a silent drop.
 
 ## IFRS concept pack
 
-The `IFRS_CONCEPTS` pack in `bottom_up_corpus/eu/ifrs_concepts.py` maps the same
+The `IFRS_CONCEPTS` pack in `bottom_up_corpus/xbrl/ifrs_concepts.py` maps the same
 curated keys as the SEC pack to `ifrs-full` tags (e.g. `Revenue`,
 `ProfitLossFromOperatingActivities`, `CashFlowsFromUsedInOperatingActivities`,
 `Equity`). The shared engine (`summaries_from_flat`, `compute_derived`,
