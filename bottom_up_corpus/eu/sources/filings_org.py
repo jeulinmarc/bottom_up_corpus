@@ -21,9 +21,6 @@ class FilingsXbrlOrg(OamSource):
     country = "EU"
     BASE = "https://filings.xbrl.org"
 
-    def list_issuers(self) -> list[IssuerRef]:
-        return []  # complementary backend: discovery is per-entity, not enumerated here
-
     def discover(self, entity: Entity) -> list[Document]:
         if not entity.lei:
             return []

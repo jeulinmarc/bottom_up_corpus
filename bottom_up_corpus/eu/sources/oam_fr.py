@@ -63,9 +63,6 @@ class InfoFinanciereFR(OamSource):
     name = "oam-fr"
     country = "FR"
 
-    def list_issuers(self) -> list[IssuerRef]:
-        return []  # full enumeration via ODS facets is a scale-up concern; not needed for the bounded test
-
     def discover(self, entity: Entity) -> list[Document]:
         from urllib.parse import quote
         if not entity.lei and not entity.isins:

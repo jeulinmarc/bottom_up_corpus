@@ -86,10 +86,6 @@ class OneInfoIT(OamSource):
     # Public API
     # ------------------------------------------------------------------
 
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
-
     def discover(self, entity: Entity) -> list[Document]:
         ndg = self._resolve_ndg(entity.name)
         if ndg is None:

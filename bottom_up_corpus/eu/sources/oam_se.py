@@ -127,9 +127,6 @@ class OamSE(OamSource):
     name = "oam-se"
     country = "SE"
 
-    def list_issuers(self) -> list[IssuerRef]:
-        return []
-
     def discover(self, entity: Entity) -> list[Document]:
         if not entity.name:
             return []

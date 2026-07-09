@@ -161,10 +161,6 @@ class EuronextSource(OamSource):
         super().__init__(fetcher, config)
         self._force_mic = force_mic
 
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
-
     def discover(self, entity: Entity) -> list[Document]:
         """Return the issuer's Euronext notices.
 

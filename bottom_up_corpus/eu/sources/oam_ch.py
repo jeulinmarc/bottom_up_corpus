@@ -169,10 +169,6 @@ class DisclosureCH(OamSource):
     name = "oam-ch"
     country = "CH"
 
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

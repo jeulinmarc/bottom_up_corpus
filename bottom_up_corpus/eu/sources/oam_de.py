@@ -123,10 +123,6 @@ class BundesanzeigerDE(OamSource):
     name = "oam-de"
     country = "DE"
 
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
-
     def discover(self, entity: Entity) -> list[Document]:
         if not entity.name:
             return []
