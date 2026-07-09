@@ -62,6 +62,9 @@ The confidence gate (§4 of the design doc):
 """
 from __future__ import annotations
 
+import xml.etree.ElementTree as _ET
+from datetime import date as _date
+
 from ._common import _tol
 
 # ---------------------------------------------------------------------------
@@ -252,9 +255,6 @@ def _emit_maturity_split(emit, suppress, liabilities, short, long, provisions):
 # ===========================================================================
 # Path A — Virk ESEF bare-XBRL parser (listed issuers, IFRS)
 # ===========================================================================
-
-import xml.etree.ElementTree as _ET
-from datetime import date as _date
 
 # XBRL instance namespace URIs
 _NS_XBRLI = "http://www.xbrl.org/2003/instance"

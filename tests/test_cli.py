@@ -174,7 +174,7 @@ def test_build_universe_from_file_keeps_collision_preferring_cusip(monkeypatch, 
     assert by_ticker["DT"].cik == "0000999999"
     assert by_ticker["DT"].resolution.startswith("collision")
     coll = Universe(cfg).path("u").with_name("u_collisions.jsonl")
-    rows = [json.loads(l) for l in coll.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in coll.read_text().splitlines() if line.strip()]
     assert rows[0]["ticker"] == "DT" and rows[0]["kind"] == "name_mismatch"
 
 
