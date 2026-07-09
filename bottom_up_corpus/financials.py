@@ -821,14 +821,6 @@ def flatten_points(facts: dict) -> dict[str, list[dict]]:
     return out
 
 
-def _points_for(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
-    """Points for the first fallback tag that has data."""
-    for tag in concept.tags:
-        if tag in flat:
-            return flat[tag]
-    return []
-
-
 def _points_by_priority(concept: Concept, flat: dict[str, list[dict]]) -> list[dict]:
     """All points across the concept's fallback tags, each carrying its tag's
     priority index (``_prio``).

@@ -1191,17 +1191,15 @@ def build_sk_financials_from_files(
     write:
         Persist rows + coverage (default True); False for dry-run.
     """
-    import json as _json_mod
-
     storage = Storage(config)
     coverage: list[dict] = []
     out = _make_out()
 
     out["entities"] += 1
     with open(vykaz_path, encoding="utf-8") as fh:
-        vykaz = _json_mod.load(fh)
+        vykaz = json.load(fh)
     with open(sablona_path, encoding="utf-8") as fh:
-        sablona = _json_mod.load(fh)
+        sablona = json.load(fh)
 
     ico = (vykaz.get("obsah") or {}).get("titulnaStrana", {}).get("ico")
     entity_id = ico or Path(str(vykaz_path)).stem

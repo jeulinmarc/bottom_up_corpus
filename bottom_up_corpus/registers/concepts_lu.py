@@ -60,11 +60,6 @@ from ._common import _tol
 
 # Balance-sheet / P&L declaration type names.
 _FULL_BILAN = "CA_BILAN"
-_ABR_BILAN = "CA_BILANABR"
-_SOPARFI_BILAN = "CA_BILANSOPARFI"
-
-# Passif-derived keys — suppressed together when the structural gate (b) fails.
-_PASSIF_KEYS = ("equity", "provisions", "net_result_bs", "liabilities")
 
 
 def map_lu_entity(declarations: list[dict]) -> dict:
