@@ -20,7 +20,15 @@ from ..config import Config
 from ..eu.oim import flatten_oim_json
 from ..financials import PeriodSummary, make_row_base, rows_from_base, stamp_leverage_basis
 from ..storage import Storage, _atomic_write_text
-from ._common import _finalise_coverage, _make_out
+from ._common import (
+    _base,
+    _emit_entity_rows,
+    _emit_mapped,
+    _finalise_coverage,
+    _lei_or_none,
+    _make_out,
+    _summary,
+)
 from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
 from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
@@ -55,24 +63,6 @@ _YTUNNUS_RE = re.compile(r"(\d{7}-\d)")
 _BASIS_BORROWINGS = "borrowings"
 _BASIS_TOTAL_LIABILITIES = "total_liabilities"
 
-# ISO-17442 LEI: exactly 20 upper-case alphanumerics. Used on the DK path to
-# populate the `lei` column when the entity_id is itself a LEI (ESEF filers).
-_LEI_RE = re.compile(r"[A-Z0-9]{20}\Z")
-
-
-def _lei_or_none(entity_id: str) -> "str | None":
-    """Return ``entity_id`` when it is a syntactic LEI (ISO-17442), else None."""
-    return entity_id if _LEI_RE.match(entity_id or "") else None
-
-
-# Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
-# never breaks out goodwill / intangibles, so the engine's tangible_book_value
-# (= common equity − goodwill − intangibles, both defaulting to 0) collapses to `equity`
-# and would silently OVERSTATE true TBV for any obligor carrying intangibles. We
-# structurally cannot compute it from the register, so we suppress it (and its per-share
-# form, already absent for want of a share count) rather than emit a misleading figure.
-_SUPPRESSED_CONCEPTS = {"tangible_book_value", "tangible_book_value_per_share"}
-
 
 def _dedupe_latest(entries: list[dict]) -> list[dict]:
     """Collapse raw Brreg entries so each (regnskapsperiode.tilDato, regnskapstype)
@@ -93,92 +83,6 @@ def _dedupe_latest(entries: list[dict]) -> list[dict]:
         if not isinstance(e_id, int) or not isinstance(cur_id, int) or e_id >= cur_id:
             best[key] = e
     return list(best.values())
-
-
-def _summary(
-    mapped: dict, name: str,
-    *, sec_form: str = "brreg", accession: str | None = None,
-) -> PeriodSummary:
-    """Build a PeriodSummary from a ``mapped`` dict (NO or UK)."""
-    pe = date.fromisoformat(mapped["period_end"])
-    acc = accession if accession is not None else f"{sec_form}-{pe.isoformat()}"
-    return PeriodSummary(
-        period_end=pe, frequency="annual", publication_date=None, sec_form=sec_form,
-        accession=acc, company=name, company_current=name,
-        values=mapped["values"], currency=mapped["currency"], sic=None)
-
-
-# ARCH-C1: which national identifier a register's ``entity_id`` is, keyed by the
-# register ``source``. erst-ifrs is special — its entity_id is the filer's LEI on the
-# from-files path but the CVR on the live-API path — so ``_base`` resolves ``id_scheme``
-# to "lei" whenever the entity_id is a syntactic LEI, and only otherwise consults this map.
-_SOURCE_ID_SCHEME: dict[str, str] = {
-    "brreg": "orgnr", "companies_house": "companies_house", "bnb": "kbo",
-    "lbr": "rcs", "prh": "ytunnus", "erst-fsa": "cvr", "erst-ifrs": "cvr",
-    "rik": "registrikood", "registeruz": "ico",
-}
-
-
-def _base(
-    entity_id: str, lei, mapped: dict, summary: PeriodSummary,
-    *, country: str, source: str,
-) -> dict:
-    """Build the canonical RowBase (identity + provenance + period columns), register-
-    filled: entity_id = the national number (or the LEI, for ESEF filers), id_scheme
-    per :data:`_SOURCE_ID_SCHEME`, source = the register tag, accession = the summary's
-    computed accession. sic / is_financial are None (registers carry no industry
-    classification); basis is the register's company/consolidated flag. ``frequency``
-    now comes from the summary (annual) rather than being hardcoded (ARCH-C1)."""
-    id_scheme = "lei" if _lei_or_none(entity_id) else _SOURCE_ID_SCHEME.get(source)
-    return make_row_base(
-        summary, entity_id=entity_id, id_scheme=id_scheme, lei=lei, country=country,
-        source=source, form=None, accession=summary.accession,
-        sic=None, is_financial=None, basis=mapped["basis"])
-
-
-def _emit_entity_rows(
-    entity_id: str, rows: list[dict], n_periods: int,
-    cov_base: dict, storage: Storage, out: dict, coverage: list[dict],
-    *, write: bool, leverage_basis: "str | None" = None,
-) -> None:
-    """Shared tail: write the financials table, update counters, append coverage entry.
-
-    Handles both the ``no-financials`` (empty rows) and ``ok`` paths. Error and
-    ``unbalanced`` paths are handled by the individual producers before calling here.
-
-    Parameters
-    ----------
-    entity_id:  Key for ``write_register_financials_table`` and ``paths``.
-    rows:       Pre-built row list from ``rows_from_base``; may be empty.
-    n_periods:  Number of source periods that contributed rows (for the coverage entry).
-    cov_base:   Dict of coverage-identifying fields (e.g. ``{"orgnr": …}`` for NO,
-                ``{"ch_number": …}`` for UK); ``status`` and ``periods`` are added here.
-    storage:    Storage instance for ``write_register_financials_table``.
-    out:        Mutable summary dict; ``no_financials`` / ``with_financials`` / ``periods``
-                / ``paths`` are updated in-place.
-    coverage:   Mutable list; one entry is appended.
-    write:      When False, skip the disk write and ``paths`` update.
-    leverage_basis:  ``"borrowings"`` or ``"total_liabilities"`` — the producer
-                declares which debt definition backs the leverage-derived rows; it
-                is stamped onto them (see :func:`stamp_leverage_basis`). ``None``
-                (the default, e.g. FI which emits no leverage rows) leaves the
-                field absent.
-    """
-    # Single choke point: drop concepts that are structurally unprovable from any
-    # register source.  Filtering here — rather than in each individual producer —
-    # means no new producer can accidentally emit them.
-    rows = [row for row in rows if row.get("concept") not in _SUPPRESSED_CONCEPTS]
-    # C1: stamp the leverage basis onto the leverage-derived rows (no-op if None).
-    stamp_leverage_basis(rows, leverage_basis)
-    if not rows:
-        coverage.append({**cov_base, "status": "no-financials"})
-        out["no_financials"] += 1
-        return
-    out["periods"] += n_periods
-    out["with_financials"] += 1
-    if write:
-        out["paths"].append(storage.write_register_financials_table(entity_id, rows))
-    coverage.append({**cov_base, "status": "ok", "periods": n_periods})
 
 
 def build_register_financials(specs, *, fetcher, config: Config, write: bool = True) -> dict:
