@@ -201,40 +201,15 @@ def build_ch_financials(
                     out["no_financials"] += 1
                     continue
 
-                # NetAssets != Equity -> whole filing rejected
-                if mapped["unbalanced"]:
-                    cov = {**cov_base, "status": "unbalanced"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["unbalanced"] += 1
-                    continue
-
-                # No emittable values (but not an outright unbalanced rejection)
-                if not mapped.get("values"):
-                    cov = {**cov_base, "status": "no-financials"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["no_financials"] += 1
-                    continue
-
-                s = _summary(
-                    mapped, ch_number,
-                    sec_form="companies_house",
-                    accession=f"ch-{ch_number}-{mapped['period_end']}",
-                )
-                base = _base(ch_number, None, mapped, s, country="GB",
-                             source="companies_house")
-                rows = list(rows_from_base(base, s))
-
-                cov = dict(cov_base)
-                if mapped.get("suppressed"):
-                    cov["suppressed"] = mapped["suppressed"]
                 # UK short_term_debt mirrors current liabilities so total_debt
                 # reconstructs total liabilities -> a gearing proxy, not borrowings.
-                _emit_entity_rows(ch_number, rows, 1, cov, storage, out, coverage,
-                                  write=write, leverage_basis=_BASIS_TOTAL_LIABILITIES)
+                # (accession prefix "ch" differs from source "companies_house".)
+                _emit_mapped(
+                    mapped, ch_number, None, None, cov_base,
+                    country="GB", source="companies_house", form="ch",
+                    leverage_basis=_BASIS_TOTAL_LIABILITIES,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
 
             except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch
                 coverage.append({**cov_base, "status": "error", "error": str(exc)})
@@ -275,38 +250,12 @@ def _be_pipeline(
     flat, pe = parse_bnb_document(xbrl_source)
     mapped = map_bnb_facts(flat, period_end=pe)
 
-    cov_base: dict = {"be_number": entity_id, "lei": lei}
-
-    if mapped["unbalanced"]:
-        cov = {**cov_base, "status": "unbalanced"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["unbalanced"] += 1
-        return
-
-    if not mapped.get("values"):
-        cov = {**cov_base, "status": "no-financials"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["no_financials"] += 1
-        return
-
-    s = _summary(
-        mapped, name or entity_id,
-        sec_form="bnb",
-        accession=f"bnb-{entity_id}-{mapped['period_end']}",
-    )
-    base = _base(entity_id, lei, mapped, s, country="BE", source="bnb")
-    rows = list(rows_from_base(base, s))
-
-    cov = dict(cov_base)
-    if mapped.get("suppressed"):
-        cov["suppressed"] = mapped["suppressed"]
     # BE emits real m51 financial borrowings (x-checked) -> borrowings-based leverage.
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write,
-                      leverage_basis=_BASIS_BORROWINGS)
+    _emit_mapped(
+        mapped, entity_id, lei, name, {"be_number": entity_id, "lei": lei},
+        country="BE", source="bnb", form="bnb", leverage_basis=_BASIS_BORROWINGS,
+        storage=storage, out=out, coverage=coverage, write=write,
+    )
 
 
 def build_be_financials_from_files(
@@ -417,36 +366,13 @@ def build_lu_financials_from_files(
             try:
                 mapped = map_lu_entity(declarer["declarations"])
 
-                if mapped["unbalanced"]:
-                    cov = {**cov_base, "status": "unbalanced"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["unbalanced"] += 1
-                    continue
-
-                if not mapped.get("values"):
-                    cov = {**cov_base, "status": "no-financials"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["no_financials"] += 1
-                    continue
-
-                s = _summary(
-                    mapped, declarer.get("name") or entity_id,
-                    sec_form="lbr",
-                    accession=f"lbr-{entity_id}-{mapped['period_end']}",
-                )
-                base = _base(entity_id, None, mapped, s, country="LU", source="lbr")
-                rows = list(rows_from_base(base, s))
-
-                cov = dict(cov_base)
-                if mapped.get("suppressed"):
-                    cov["suppressed"] = mapped["suppressed"]
                 # LU maps real borrowings (ecdf financial-debt lines) -> borrowings basis.
-                _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
-                                  write=write, leverage_basis=_BASIS_BORROWINGS)
+                _emit_mapped(
+                    mapped, entity_id, None, declarer.get("name"), cov_base,
+                    country="LU", source="lbr", form="lbr",
+                    leverage_basis=_BASIS_BORROWINGS,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
 
             except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
                 coverage.append({**cov_base, "status": "error", "error": str(exc)})
@@ -577,38 +503,13 @@ def _fi_pipeline(
     parsed = parse_fi_facts(xbrl_source)
     mapped = map_fi_facts(parsed)
 
-    cov_base: dict = {"business_id": entity_id, "lei": lei}
-
-    if mapped["unbalanced"]:
-        cov = {**cov_base, "status": "unbalanced"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["unbalanced"] += 1
-        return
-
-    if not mapped.get("values"):
-        cov = {**cov_base, "status": "no-financials"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["no_financials"] += 1
-        return
-
-    s = _summary(
-        mapped, name or entity_id,
-        sec_form="prh",
-        accession=f"prh-{entity_id}-{mapped['period_end']}",
-    )
-    base = _base(entity_id, lei, mapped, s, country="FI", source="prh")
-    rows = list(rows_from_base(base, s))
-
-    cov = dict(cov_base)
-    if mapped.get("suppressed"):
-        cov["suppressed"] = mapped["suppressed"]
     # FI suppresses the maturity split, so the engine emits NO leverage rows —
     # there is nothing to stamp, hence no leverage_basis (left None).
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+    _emit_mapped(
+        mapped, entity_id, lei, name, {"business_id": entity_id, "lei": lei},
+        country="FI", source="prh", form="prh", leverage_basis=None,
+        storage=storage, out=out, coverage=coverage, write=write,
+    )
 
 
 def build_fi_financials_from_files(
@@ -821,40 +722,14 @@ def _dk_fsa_pipeline(
     parsed = parse_fsa_facts(xml_bytes)
     mapped = map_fsa_facts(parsed)
 
-    cov_base: dict = {"cvr": entity_id, "lei": lei}
-
-    if mapped["unbalanced"]:
-        cov = {**cov_base, "status": "unbalanced"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["unbalanced"] += 1
-        return
-
-    if not mapped.get("values"):
-        cov = {**cov_base, "status": "no-financials"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["no_financials"] += 1
-        return
-
-    s = _summary(
-        mapped, entity_id,
-        sec_form="erst-fsa",
-        accession=f"erst-fsa-{entity_id}-{mapped['period_end']}",
-    )
-    # M1: when the entity_id is itself a LEI, surface it in the `lei` column too.
-    row_lei = lei or _lei_or_none(entity_id)
-    base = _base(entity_id, row_lei, mapped, s, country="DK", source="erst-fsa")
-    rows = list(rows_from_base(base, s))
-
-    cov = dict(cov_base)
-    if mapped.get("suppressed"):
-        cov["suppressed"] = mapped["suppressed"]
     # DK-GAAP FSA maps the maturity split of TOTAL liabilities -> gearing proxy.
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write,
-                      leverage_basis=_BASIS_TOTAL_LIABILITIES)
+    # _emit_mapped surfaces a LEI entity_id into the `lei` column (M1) for free.
+    _emit_mapped(
+        mapped, entity_id, lei, None, {"cvr": entity_id, "lei": lei},
+        country="DK", source="erst-fsa", form="erst-fsa",
+        leverage_basis=_BASIS_TOTAL_LIABILITIES,
+        storage=storage, out=out, coverage=coverage, write=write,
+    )
 
 
 def _dk_esef_pipeline(
@@ -1335,34 +1210,13 @@ def build_sk_financials_from_files(
     try:
         mapped = _map_sk_vykaz(vykaz, sablona)
 
-        if mapped["unbalanced"]:
-            cov = {**cov_base, "status": "unbalanced"}
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            coverage.append(cov)
-            out["unbalanced"] += 1
-
-        elif not mapped.get("values"):
-            cov = {**cov_base, "status": "no-financials"}
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            coverage.append(cov)
-            out["no_financials"] += 1
-
-        else:
-            s = _summary(
-                mapped, entity_id,
-                sec_form="registeruz",
-                accession=f"registeruz-{entity_id}-{mapped['period_end']}",
-            )
-            base = _base(entity_id, None, mapped, s, country="SK", source="registeruz")
-            rows = list(rows_from_base(base, s))
-            cov = dict(cov_base)
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            # SK maps real bank-loan borrowings → borrowings-based leverage.
-            _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
-                              write=write, leverage_basis=_BASIS_BORROWINGS)
+        # SK maps real bank-loan borrowings → borrowings-based leverage.
+        _emit_mapped(
+            mapped, entity_id, None, None, cov_base,
+            country="SK", source="registeruz", form="registeruz",
+            leverage_basis=_BASIS_BORROWINGS,
+            storage=storage, out=out, coverage=coverage, write=write,
+        )
 
     except Exception as exc:  # noqa: BLE001 — record + skip
         coverage.append({**cov_base, "status": "error", "error": str(exc)})
