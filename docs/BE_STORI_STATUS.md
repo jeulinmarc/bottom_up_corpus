@@ -94,21 +94,23 @@ What is **not** yet known (no archived result page; the bug-prone parts): the
 search-**result** row structure and the document **download** URL pattern. Those
 need one real search execution — which `scripts/capture_be_stori.py` performs.
 
-## Finish plan (≈ one build cycle once fixtures land)
+## How it was built (completed steps)
 
-1. Run `python scripts/capture_be_stori.py` from a residential/office network
-   (or `--isin BE0974293251` for AB InBev). It saves real
-   `tests/fixtures/eu/be_stori_{search,result,document}.*` and prints the live
-   field names + result-row/download structure.
-2. Build `bottom_up_corpus/eu/sources/oam_be.py` (`OamSource`, `country="BE"`),
-   mirroring `oam_es.py`: GET `Search.aspx` → scrape `__VIEWSTATE` → POST by ISIN
-   (fallback CompanyName) → parse result rows → download URL. doc_type from the map
-   above. Uses the shared `Fetcher` (plain `requests`) — which works from any
-   non-blocked network, including production runs.
-3. Wire `COUNTRY_BACKENDS["BE"]`, add network-free tests against the captured
-   fixtures, live-validate against AB InBev, review, PR — the same cycle as the
-   other six backends.
+> The steps below were the open plan at investigation time. All are now done (PR #60 merged).
 
-The backend is deliberately **not** written speculatively against the 4-year-old
-archive: every other backend caught a real bug only at live validation, so BE waits
-for one real capture rather than shipping a guess.
+1. ✅ Ran `python scripts/capture_be_stori.py` against the modern `webapi.fsma.be`
+   JSON API (not the legacy WebForms site — the WAF blocks those from all clients;
+   the JSON API was captured from a residential network via `curl_cffi` Chrome
+   impersonation). Real fixtures saved to `tests/fixtures/registers/bnb_*.json`.
+2. ✅ Built `bottom_up_corpus/registers/bnb_cbso.py` and `bnb_xbrl.py` against the
+   BNB Central Balance Sheet Office (CBSO) open-data XBRL endpoint — the FSMA/STORI
+   route proved unnecessary because BNB CBSO is the open statutory-accounts register
+   for Belgium, separate from the regulated-filings index. `--be-file`/`--be-numbers`
+   CLI flags; dimensional XBRL parsed via Arelle.
+3. ✅ Wired `concepts_be.py`, network-free tests added, live-validated against real
+   BE entities (Equinor BE, AB InBev), reviewed, and merged as PR #60.
+
+The FSMA/STORI investigation record above is kept for context (it explains why
+`curl_cffi` is required and why the JSON API, not the WebForms site, is the target
+if EU-pillar BE filing acquisition is ever needed — the BNB CBSO path only covers
+statutory financial accounts, not exchange-filed disclosures).

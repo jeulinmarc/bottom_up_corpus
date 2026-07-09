@@ -57,7 +57,7 @@ appears as `no-financials` — never a silent drop.
 The `IFRS_CONCEPTS` pack in `bottom_up_corpus/eu/ifrs_concepts.py` maps the same
 curated keys as the SEC pack to `ifrs-full` tags (e.g. `Revenue`,
 `ProfitLossFromOperatingActivities`, `CashFlowsFromUsedInOperatingActivities`,
-`TotalEquity`). The shared engine (`summaries_from_flat`, `compute_derived`,
+`Equity`). The shared engine (`summaries_from_flat`, `compute_derived`,
 `attach_ttm_from_flat`) runs verbatim — the IFRS pack is a drop-in replacement for
 the US-GAAP pack.
 
@@ -213,15 +213,15 @@ extracting them requires OCR or PDF-table parsing. Swiss issuers have no OAM and
 their historical filings predate ESEF entirely. A future OCR-based extraction
 phase would extend the time series back and add semi-annual frequency rows.
 
-**3. Register open-data backends — statutory accounts for the credit/private universe. ✅ Now a separate pillar.**
+**3. Register open-data backends — statutory accounts for the credit/private universe. ✅ Complete — 8 registers merged.**
 For the credit and private-company universe (non-listed issuers, bond obligors,
-bank counterparties) that never files ESEF, statutory accounts filed with national
-business registers are the primary source. This is now built as the
+bank counterparties) that never file ESEF, statutory accounts filed with national
+business registers are the primary source. This is now the
 **register-financials pillar** — a separate `data/financials_register/` output,
-`basis`-labelled, governed by the no-false-data confidence gate: 🇳🇴 Norway
-(Brønnøysund/Brreg, structured JSON — merged) and 🇬🇧 UK Companies House (iXBRL via
-Arelle — PR #58); 🇧🇪 BE BNB / 🇩🇰 DK and others next. See
-[`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md).
+`basis`-labelled, governed by the no-false-data confidence gate. Eight registers
+are merged (PRs #57–66): 🇳🇴 NO Brreg · 🇬🇧 UK Companies House · 🇧🇪 BE BNB ·
+🇱🇺 LU LBR · 🇫🇮 FI PRH · 🇩🇰 DK Erhvervsstyrelsen · 🇪🇪 EE Äriregister · 🇸🇰 SK
+registeruz. See [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md).
 
 ## Honest limitations
 

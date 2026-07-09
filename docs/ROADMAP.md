@@ -6,7 +6,7 @@
 
 🇺🇸 **SEC** pillar complete + 🇪🇺 **EU** document pillar built (14 jurisdictions) +
 EU ESEF structured financials done (Pillar B, PRs #55–56) + register-financials
-pillar started. All merged to `main` except UK (#58, open). See
+pillar complete (8 registers, PRs #57–66). All merged to `main`. See
 [`SEC_PILLAR.md`](SEC_PILLAR.md), [`EU_PILLAR.md`](EU_PILLAR.md),
 [`EU_FINANCIALS.md`](EU_FINANCIALS.md), [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md).
 
@@ -22,8 +22,14 @@ pillar started. All merged to `main` except UK (#58, open). See
 | Cross-CIK entities; S&P 500 historical universe; CODEOWNERS | ✅ |
 | Hardening (PRs #15–18) + docs reconciliation (#19) | ✅ |
 | **EU ESEF/IFRS structured financials (Pillar B)** — json_url stdlib (#55) + Arelle Tier B (#56) | ✅ |
-| **Register financials** — 🇳🇴 NO Brreg JSON (#57, merged) | ✅ |
-| **Register financials** — 🇬🇧 UK Companies House iXBRL, `--ch-bulk` (#58, open) | 🔄 |
+| **Register financials** — 🇳🇴 NO Brreg JSON (#57) | ✅ |
+| **Register financials** — 🇬🇧 UK Companies House iXBRL, `--ch-bulk` (#58) | ✅ |
+| **Register financials** — 🇧🇪 BE BNB CBSO XBRL, `--be-file`/`--be-numbers` (#60) | ✅ |
+| **Register financials** — 🇱🇺 LU LBR/STATEC Centrale des bilans, `--lu-file` (#61–62) | ✅ |
+| **Register financials** — 🇫🇮 FI PRH avoindata XBRL, `--fi-file`/`--fi-businessid` (#63) | ✅ |
+| **Register financials** — 🇩🇰 DK Erhvervsstyrelsen (ESEF + FSA), `--dk-file`/`--dk-cvr` (#64) | ✅ |
+| **Register financials** — 🇪🇪 EE Äriregister (RIK), `--ee-file`/`--ee-year` (#65) | ✅ |
+| **Register financials** — 🇸🇰 SK Register účtovných závierok, `--sk-file`/`--sk-id` (#66) | ✅ |
 
 **Phase 5 (international) — EU pillar built.** The `bottom_up_corpus/eu/` package
 federates 13 national OAMs + Euronext + filings.xbrl.org behind a pluggable
@@ -70,14 +76,25 @@ suppressed, not guessed; the reason is recorded per key in the coverage report.
 Registers are balance-sheet-primary; leverage is liabilities-based (total liabilities,
 not pure financial borrowings).
 
-| Register | Method | Status |
-|---|---|---|
-| 🇳🇴 NO Brønnøysund (Brreg) | structured JSON, no XBRL | ✅ merged #57 |
-| 🇬🇧 UK Companies House | iXBRL via Arelle, `--ch-bulk` | 🔄 PR #58 open |
+| Register | Currency | Method | Leverage basis | Status |
+|---|---|---|---|---|
+| 🇳🇴 NO Brønnøysund (Brreg) | NOK (filing-declared) | structured JSON | `total_liabilities` | ✅ merged #57 |
+| 🇬🇧 UK Companies House | GBP | iXBRL via Arelle, `--ch-bulk` | `total_liabilities` | ✅ merged #58 |
+| 🇧🇪 BE BNB CBSO | EUR | dimensional XBRL, `--be-file`/`--be-numbers` | `borrowings` | ✅ merged #60 |
+| 🇱🇺 LU LBR/STATEC Centrale des bilans | EUR | XBRL, `--lu-file` | `borrowings` | ✅ merged #61–62 |
+| 🇫🇮 FI PRH avoindata | EUR | XBRL, `--fi-file`/`--fi-businessid` | `none` (maturity split absent) | ✅ merged #63 |
+| 🇩🇰 DK Erhvervsstyrelsen (ESEF + FSA) | DKK | XBRL/Arelle, `--dk-file`/`--dk-cvr` | `borrowings` (ESEF) / `total_liabilities` (FSA) | ✅ merged #64 |
+| 🇪🇪 EE Äriregister (RIK) | EUR | CSV bulk, `--ee-file`/`--ee-year` | `total_liabilities` | ✅ merged #65 |
+| 🇸🇰 SK Register účtovných závierok | EUR | REST API / XBRL, `--sk-file`/`--sk-id` | `borrowings` | ✅ merged #66 |
 
-Next: 🇧🇪 BE BNB / 🇩🇰 DK Erhvervsstyrelsen (both XBRL; reuse the Arelle path); UK
-targeted REST API (per-CH-number named-entity lookup); historic monthly backfill
-(multi-year history per entity); OCR for the non-ESEF / pre-2020 tail.
+**Paid / inaccessible registers (honest):** 🇮🇹 IT, 🇩🇪 DE, 🇮🇪 IE (paid API), 🇸🇮 SI
+(paid / ToS-restricted), 🇵🇱 PL (CAPTCHA wall), 🇱🇻 LV (bulk export stale FY2019).
+🇫🇷 FR (INPI) is open-data in principle but requires a free account credential —
+currently blocked pending that token.
+
+**Next possibilities:** OCR for non-ESEF / pre-2020 tail; DE/FR/SE acquisition-side
+fix (enable ESEF zip download for Arelle Tier B); historic monthly backfill
+(multi-year history per entity via CH bulk); targeted REST API per CH-number.
 
 ## Other jurisdictions (future)
 

@@ -10,16 +10,18 @@ Every document comes from the issuer's **regulator of record** (SEC, AMF, FCA,
 CONSOB, …) — public, primary-source disclosures, with provenance recorded per
 file. No proprietary datasets, no machine translation, no model-generated text.
 
-## Two pillars
+## Three pillars
 
 | Pillar | Region | Source of record | Identity | Status |
 |---|---|---|---|---|
 | **🇺🇸 SEC** | United States | EDGAR | CIK | complete (reports, ownership, XBRL financials) |
 | **🇪🇺 EU** | 14 jurisdictions | national OAMs + Euronext + FCA NSM | LEI / ISIN | 13 backends + cross-market complement |
+| **Register** | 8 countries | national business registers | local entity ID | 8 registers merged — [`REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) |
 
-The two pillars share the same discipline (official sources only, stable ids,
-exhaustive discovery, never silently partial) and feed the same RAG contract, but
-use different identity systems (CIK in the US; GLEIF LEI/ISIN in the EU).
+All three pillars share the same discipline (official sources only, stable ids,
+exhaustive discovery, never silently partial) and feed the same RAG contract. The
+SEC and EU pillars cover listed issuers (CIK / GLEIF LEI); the register pillar
+targets the credit and private-company universe of non-listed entities.
 
 ### Structured financials
 
@@ -30,14 +32,17 @@ a unified per-period row schema (see [`docs/FINANCIALS.md`](docs/FINANCIALS.md))
 |---|---|---|---|
 | **SEC XBRL** | US listed issuers | EDGAR `companyfacts` | ✅ done |
 | **EU ESEF / IFRS** (Pillar B) | EU listed issuers | `filings.xbrl.org` json_url + Arelle (Tier B) | ✅ done — [`EU_FINANCIALS.md`](docs/EU_FINANCIALS.md) |
-| **Register financials** | Private / credit universe (non-listed) | 🇳🇴 NO Brreg + 🇬🇧 UK Companies House | 🇳🇴 #57 merged; 🇬🇧 #58 open — [`REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) |
+| **Register financials** | Private / credit universe (non-listed) | 8 national registers: 🇳🇴 NO · 🇬🇧 UK · 🇧🇪 BE · 🇱🇺 LU · 🇫🇮 FI · 🇩🇰 DK · 🇪🇪 EE · 🇸🇰 SK | ✅ all merged (#57–66) — [`REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) |
 
 The register pillar targets issuers that never file ESEF — bond obligors, private
 companies, bank counterparties. Output lands in `data/financials_register/` (never
 merged with `data/financials_eu/`), labelled by `basis` (legal-entity vs.
-consolidated). It is governed by a **no-false-data** discipline: registers are
-balance-sheet-primary and leverage is liabilities-based; any value that cannot be
-confirmed from structural anchors is suppressed, not guessed.
+consolidated). It is governed by a **no-false-data** discipline: any value that
+cannot be confirmed from structural anchors is suppressed, not guessed. Leverage
+rows carry a `leverage_basis` field (`"borrowings"` or `"total_liabilities"`)
+because registers differ — some expose real financial borrowings (BE/LU/SK/DK-ESEF),
+others only total liabilities (NO/UK/EE/DK-FSA) — so consumers cannot compare
+`debt_to_equity` across registers without knowing the basis.
 
 ## Quick start
 
@@ -78,7 +83,7 @@ python -m bottom_up_corpus register-financials --ch-bulk accounts_monthly_2024_0
 | [`docs/EU_BACKENDS.md`](docs/EU_BACKENDS.md) | Per-country backend reference (source API, identity key, doc types, pagination caps) |
 | [`docs/FINANCIALS.md`](docs/FINANCIALS.md) | The shared financials engine (reported + derived metrics, ~60 curated concepts) |
 | [`docs/EU_FINANCIALS.md`](docs/EU_FINANCIALS.md) | Structured EU ESEF/IFRS financials — json_url stdlib (Tier A) + Arelle (Tier B) |
-| [`docs/REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) | Statutory financials from national registers — 🇳🇴 NO Brreg + 🇬🇧 UK Companies House; no-false-data gate |
+| [`docs/REGISTER_FINANCIALS.md`](docs/REGISTER_FINANCIALS.md) | Statutory financials from 8 national registers (🇳🇴 NO · 🇬🇧 UK · 🇧🇪 BE · 🇱🇺 LU · 🇫🇮 FI · 🇩🇰 DK · 🇪🇪 EE · 🇸🇰 SK); no-false-data gate; `leverage_basis` field |
 | [`docs/INGESTION_RAG.md`](docs/INGESTION_RAG.md) | The RAG ingestion contract + a ready-to-paste orchestrator connector |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status & next steps |
 

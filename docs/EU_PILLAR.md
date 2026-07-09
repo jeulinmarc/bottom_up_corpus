@@ -187,5 +187,8 @@ CIK.
   its backstop and records a `truncated` error; an uncovered issuer shows up as
   `no-documents` in the coverage report. Incompleteness is always *visible*.
 - **Out of reach (recorded, not hidden):** CMVM Portugal-direct is an opaque,
-  auth-gated OutSystems portal (PT is covered via Euronext instead); the deepest
-  ESEF/IFRS *structured* extraction (Pillar B) is future work.
+  auth-gated OutSystems portal (PT is covered via Euronext instead).
+- **Structured ESEF/IFRS extraction (Pillar B) is done** — see
+  [`EU_FINANCIALS.md`](EU_FINANCIALS.md) for the json_url stdlib path (Tier A)
+  and the Arelle iXBRL path (Tier B). Remaining gap: acquisition-side fix for
+  DE/SE to enable Tier B for those backends.

@@ -198,4 +198,18 @@ source `tag`), `kind="derived"`, and `kind="derived_ttm"` rows. Every row carrie
 `sector_relevant`. `render_summary_html` renders the reported, derived, and TTM
 tables as a standalone HTML document.
 
+### `leverage_basis` — register pillar only
+
+Register-financials rows (`data/financials_register/`) carry an extra field,
+`leverage_basis`, on the four leverage-derived concepts (`total_debt`,
+`debt_to_equity`, `debt_to_assets`, `net_debt`). Its value is `"borrowings"` when
+the register exposes real financial borrowings (BE/LU/SK/DK-ESEF), or
+`"total_liabilities"` when it exposes only the aggregate liabilities balance as a
+gearing proxy (NO/UK/EE/DK-FSA). Finland suppresses these rows entirely (maturity
+split absent) and emits no `leverage_basis`. The field is absent on SEC and EU/ESEF
+rows (where the XBRL taxonomy always provides explicit debt tags). Consumers
+screening leverage across multiple registers must filter or bucket by this field —
+`debt_to_equity` from a `"borrowings"` register is not directly comparable to one
+from a `"total_liabilities"` register.
+
 See `examples/04_xbrl_financials.py` for a runnable end-to-end example.
