@@ -95,6 +95,14 @@ class Config:
         return self.data_dir / "financials"
 
     @property
+    def financials_eu_dir(self) -> Path:
+        return self.data_dir / "financials_eu"
+
+    @property
+    def financials_register_dir(self) -> Path:
+        return self.data_dir / "financials_register"
+
+    @property
     def ownership_dir(self) -> Path:
         return self.data_dir / "ownership"
 
