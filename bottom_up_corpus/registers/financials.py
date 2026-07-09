@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..eu.oim import flatten_oim_json
-from ..financials import PeriodSummary, rows_from_base, stamp_leverage_basis
+from ..financials import PeriodSummary, make_row_base, rows_from_base, stamp_leverage_basis
 from ..storage import Storage, _atomic_write_text
 from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
 from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
@@ -107,15 +107,32 @@ def _summary(
         values=mapped["values"], currency=mapped["currency"], sic=None)
 
 
+# ARCH-C1: which national identifier a register's ``entity_id`` is, keyed by the
+# register ``source``. erst-ifrs is special — its entity_id is the filer's LEI on the
+# from-files path but the CVR on the live-API path — so ``_base`` resolves ``id_scheme``
+# to "lei" whenever the entity_id is a syntactic LEI, and only otherwise consults this map.
+_SOURCE_ID_SCHEME: dict[str, str] = {
+    "brreg": "orgnr", "companies_house": "companies_house", "bnb": "kbo",
+    "lbr": "rcs", "prh": "ytunnus", "erst-fsa": "cvr", "erst-ifrs": "cvr",
+    "rik": "registrikood", "registeruz": "ico",
+}
+
+
 def _base(
     entity_id: str, lei, mapped: dict, summary: PeriodSummary,
     *, country: str, source: str,
 ) -> dict:
-    """Build the common row base dict (identity + period columns)."""
-    return {"entity_id": entity_id, "lei": lei, "country": country, "source": source,
-            "basis": mapped["basis"], "fy": summary.fy, "frequency": "annual",
-            "currency": mapped["currency"], "period_end": mapped["period_end"],
-            "publication_date": None}
+    """Build the canonical RowBase (identity + provenance + period columns), register-
+    filled: entity_id = the national number (or the LEI, for ESEF filers), id_scheme
+    per :data:`_SOURCE_ID_SCHEME`, source = the register tag, accession = the summary's
+    computed accession. sic / is_financial are None (registers carry no industry
+    classification); basis is the register's company/consolidated flag. ``frequency``
+    now comes from the summary (annual) rather than being hardcoded (ARCH-C1)."""
+    id_scheme = "lei" if _lei_or_none(entity_id) else _SOURCE_ID_SCHEME.get(source)
+    return make_row_base(
+        summary, entity_id=entity_id, id_scheme=id_scheme, lei=lei, country=country,
+        source=source, form=None, accession=summary.accession,
+        sic=None, is_financial=None, basis=mapped["basis"])
 
 
 def _emit_entity_rows(

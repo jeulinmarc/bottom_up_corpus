@@ -57,7 +57,11 @@ def test_build_eu_financials_writes_unified_rows(tmp_path, monkeypatch):
     rows = [json.loads(x) for x in out]
     rev = next(r for r in rows if r["kind"] == "reported" and r["concept"] == "revenue")
     assert rev["value"] == 100 and rev["lei"] == "LEI123" and rev["currency"] == "EUR"
-    assert rev["doc_type"] == "annual_report" and rev["is_financial"] is None
+    # Canonical RowBase (ARCH-C1): EU issuer id is the LEI (entity_id, id_scheme
+    # "lei"), country from GLEIF, source "esef", form = the ESEF doc_type.
+    assert rev["entity_id"] == "LEI123" and rev["id_scheme"] == "lei"
+    assert rev["country"] == "FR" and rev["source"] == "esef"
+    assert rev["form"] == "annual_report" and rev["is_financial"] is None
     assert rev["publication_date"] == "2021-05-01"
     assert (tmp_path / "reports" / "eu_financials_coverage.jsonl").exists()
 

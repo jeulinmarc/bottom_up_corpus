@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from ..config import Config
-from ..financials import attach_ttm_from_flat, rows_from_base, summaries_from_flat
+from ..financials import attach_ttm_from_flat, make_row_base, rows_from_base, summaries_from_flat
 from ..storage import Storage
 from .arelle_esef import oim_from_esef_zip
 from .entities import Entity, resolve_entities
@@ -81,15 +81,15 @@ def arelle_facts_for_entity(entity: "Entity", *, config) -> dict[str, list[dict]
     return flat
 
 
-def _eu_base(lei: str, summary) -> dict:
-    """The SEC-unified identity + period columns, EU-mapped (cik->lei, no sic, etc.)."""
-    return {
-        "lei": lei, "fy": summary.fy, "frequency": summary.frequency,
-        "currency": summary.currency, "is_financial": None,
-        "period_end": summary.period_end.isoformat() if summary.period_end else None,
-        "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
-        "doc_type": summary.sec_form, "source": summary.accession,
-    }
+def _eu_base(lei: str, country: "str | None", summary) -> dict:
+    """The canonical RowBase, EU/ESEF-filled: entity_id = LEI (id_scheme ``lei``),
+    source ``esef``, form = the ESEF doc_type, accession = the filing's fxo_id/doc_id.
+    ``country`` is the issuer's GLEIF jurisdiction (real data, not derived from the
+    LEI prefix); is_financial is None (ESEF carries no industry classification)."""
+    return make_row_base(
+        summary, entity_id=lei, id_scheme="lei", lei=lei, country=country,
+        source="esef", form=summary.sec_form, accession=summary.accession,
+        sic=None, is_financial=summary.is_financial, basis=None)
 
 
 def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, use_arelle: bool = False) -> dict:
@@ -128,7 +128,7 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, u
             continue
         rows: list[dict] = []
         for s in summaries:
-            rows.extend(rows_from_base(_eu_base(ent.lei, s), s))
+            rows.extend(rows_from_base(_eu_base(ent.lei, ent.country or None, s), s))
         out["periods"] += len(summaries)
         out["with_financials"] += 1
         if write:

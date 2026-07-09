@@ -73,7 +73,11 @@ def test_render_summary_html_has_metrics_and_pubdate():
 def test_normalized_rows():
     fy = next(x for x in _summaries() if x.frequency == "annual")
     rows = normalized_rows("0000320193", fy)
-    assert all(r["cik"] == "0000320193" and r["fy"] == 2023 for r in rows)
+    # Canonical RowBase (ARCH-C1): SEC issuer id is entity_id (id_scheme "cik"),
+    # country "US", source "sec".
+    assert all(r["entity_id"] == "0000320193" and r["id_scheme"] == "cik"
+               and r["country"] == "US" and r["source"] == "sec"
+               and r["fy"] == 2023 for r in rows)
     rev = next(r for r in rows if r["concept"] == "revenue")
     assert rev["value"] == 383285000000 and rev["publication_date"] == "2023-11-01"
     assert rev["kind"] == "reported"
