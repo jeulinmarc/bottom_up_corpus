@@ -415,18 +415,28 @@ by three independent paths that share the `financials.py` engine:
 |---|---|---|---|---|
 | **SEC XBRL** | US listed issuers | EDGAR `companyfacts` | `sources/edgar_xbrl.py` | `data/financials/<cik>.jsonl` |
 | **EU ESEF / IFRS** (Pillar B) | EU listed issuers | `filings.xbrl.org` json_url (Tier A) + local ESEF `.zip` via Arelle (Tier B) | `eu/financials.py` | `data/financials_eu/<lei>.jsonl` |
-| **Register financials** | Private / credit universe | 🇳🇴 NO Brreg structured JSON; 🇬🇧 UK Companies House iXBRL via Arelle | `registers/` | `data/financials_register/<entity_id>.jsonl` |
+| **Register financials** | Private / credit universe | 8 national registers (🇳🇴 NO · 🇬🇧 UK · 🇧🇪 BE · 🇱🇺 LU · 🇫🇮 FI · 🇩🇰 DK · 🇪🇪 EE · 🇸🇰 SK) | `registers/` | `data/financials_register/<entity_id>.jsonl` |
 
-All three emit the same `kind="reported"` / `kind="derived"` row model; the
-concept-mapping pack (US-GAAP, IFRS, or register-specific) is the only difference.
+All three emit the same `kind="reported"` / `kind="derived"` row model. The primary
+axis of variation is the **concept-mapping pack** (US-GAAP, IFRS, or
+register-specific), but the register path also adds structural features not present
+in the SEC/EU paths: a `basis` column (`"company"` / `"consolidated"`) and a
+`leverage_basis` field on every leverage-derived row (see below).
 The three output directories are **never merged** — they serve different universes
-and GAAP regimes (US-GAAP, IFRS, N-GAAP / FRS 102).
+and GAAP regimes (US-GAAP, IFRS, N-GAAP / FRS 102 / local GAAP).
 
 **Register pillar specifics.** `registers/` targets non-listed issuers (bond
 obligors, private companies, bank counterparties) that never file ESEF. Each row
 carries a `basis` label (`"company"` = legal-entity standalone; `"consolidated"` =
 economic group). A **no-false-data** confidence gate suppresses any derived value it
 cannot confirm from structural anchors; the reason is recorded per key in
-`data/reports/register_coverage.jsonl`. Registers are balance-sheet-primary and
-leverage is liabilities-based (total liabilities, not pure financial borrowings).
-See [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md) for the full accounting of caveats.
+`data/reports/register_coverage.jsonl`.
+
+Registers differ in what they expose for leverage: some provide real financial
+**borrowings** (BE/LU/SK/DK-ESEF), others only **total liabilities** as a gearing
+proxy (NO/UK/EE/DK-FSA), and Finland suppresses leverage rows entirely because the
+maturity split is absent. To prevent blind cross-register comparisons, the four
+leverage-derived rows (`total_debt`, `debt_to_equity`, `debt_to_assets`, `net_debt`)
+carry a `leverage_basis` field with value `"borrowings"`, `"total_liabilities"`, or
+no field (FI). See [`REGISTER_FINANCIALS.md`](REGISTER_FINANCIALS.md) for the full
+per-register accounting.
