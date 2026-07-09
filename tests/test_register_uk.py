@@ -390,7 +390,7 @@ def test_build_ch_financials_unit(monkeypatch, tmp_path):
 
     # Coverage written
     assert rep.get("coverage_path") is not None
-    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    cov_path = tmp_path / "reports" / "register_coverage_companies_house.jsonl"
     assert cov_path.exists()
     cov = {c["ch_number"]: c for c in
            (json.loads(x) for x in cov_path.read_text().splitlines())}
@@ -441,7 +441,7 @@ def test_build_ch_financials_error_isolation(monkeypatch, tmp_path):
 
     assert rep["errors"] == 1
     assert rep["with_financials"] == 1
-    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    cov_path = tmp_path / "reports" / "register_coverage_companies_house.jsonl"
     cov = {c["ch_number"]: c for c in
            (json.loads(x) for x in cov_path.read_text().splitlines())}
     assert cov["02855129"]["status"] == "error"
@@ -481,7 +481,7 @@ def test_build_ch_financials_unbalanced(monkeypatch, tmp_path):
     assert not (tmp_path / "financials_register" / "UNBAL01.jsonl").exists()
 
     # Coverage row for this entity must carry status='unbalanced'
-    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    cov_path = tmp_path / "reports" / "register_coverage_companies_house.jsonl"
     assert cov_path.exists(), "coverage file must be written"
     rows = [json.loads(x) for x in cov_path.read_text().splitlines()]
     assert len(rows) == 1
@@ -607,7 +607,7 @@ def test_cli_ch_bulk_with_write(monkeypatch, tmp_path):
         captured.update(write=write, limit=limit)
         return {"entities": 2, "with_financials": 2, "no_financials": 0,
                 "unbalanced": 0, "errors": 0, "periods": 2, "paths": [],
-                "coverage_path": str(tmp_path / "reports" / "register_coverage.jsonl")}
+                "coverage_path": str(tmp_path / "reports" / "register_coverage_companies_house.jsonl")}
 
     monkeypatch.setattr(cli, "build_ch_financials", fake_build)
 
