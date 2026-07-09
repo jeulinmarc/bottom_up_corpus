@@ -18,7 +18,7 @@
 from __future__ import annotations
 import re
 
-_GLEIF = "https://api.gleif.org/api/v1/lei-records/{lei}"
+from ..gleif import fetch_gleif_record, parse_gleif_record
 
 
 def _norm_ch_number(s: str) -> str:
@@ -123,14 +123,13 @@ def resolve_register_specs(specs: list[dict], *, fetcher) -> list[dict]:
         lei = spec.get("lei")
         orgnr = ch_number = be_number = business_id = rcs = cvr = registrikood = ico = name = country = None
         if lei:
-            try:
-                raw = fetcher.get_json(_GLEIF.format(lei=lei))
-            except Exception:  # noqa: BLE001 — GLEIF network/HTTP failure -> unresolved
-                raw = {}
-            ent = (raw.get("data") or {}).get("attributes", {}).get("entity", {})
-            country = (ent.get("legalAddress") or {}).get("country")
-            name = (ent.get("legalName") or {}).get("name", "")
-            ra = ent.get("registeredAs")
+            # GLEIF failure / unknown LEI -> record is None -> empty fields ->
+            # falls through to the "unresolved" branch below (never guesses).
+            record = fetch_gleif_record(lei, fetcher=fetcher)
+            fields = parse_gleif_record((record or {}).get("attributes", {}))
+            country = fields["legal_country"]
+            name = fields["name"]
+            ra = fields["registered_as"]
             if country == "NO" and ra:
                 orgnr = "".join(ch for ch in str(ra) if ch.isdigit())
             elif country == "GB" and ra:
