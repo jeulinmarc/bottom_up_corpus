@@ -601,6 +601,17 @@ def compute_derived(
             # with no NoncurrentBorrowings -> true total is 1000, not 1300.)
             cur = 0
             if short_tag in _ROLLUP_OWN_CURRENT_TAGS:
+                # Accepted edge (NO-FALSE-DATA, K1): the current tag is the roll-up's
+                # OWN tranche (us-gaap DebtCurrent / ifrs CurrentBorrowings), whose
+                # maturities are already inside the LongTermDebt roll-up, so we zero it
+                # to avoid a double-count. If a US-GAAP filer instead lumps GENUINE
+                # short-term borrowings into DebtCurrent (rather than tagging them
+                # CommercialPaper / ShortTermBorrowings / NotesPayableCurrent), those
+                # are dropped here and total_debt slightly UNDER-counts. We accept the
+                # under-count: understating leverage is the safe direction (the opposite
+                # -- adding the roll-up's own current maturities on top -- would OVER-state).
+                # Any ST borrowing tagged distinctly is still added; IFRS's explicit
+                # Noncurrent/Current Borrowings split has no roll-up ambiguity -> exact.
                 st = 0
         elif short_tag == "DebtCurrent":
             # Clean noncurrent-only LTD split + DebtCurrent (= current LTD + ST):

@@ -420,9 +420,13 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     import warnings
 
     flat = parse_virk_esef_xml(xml_bytes)
+    # E-I4 (sector honesty): a DK-ESEF filer is identified by LEI only — no SIC/NACE,
+    # so its sector is UNKNOWN. Pass sector_known=False (mirroring the EU pillar in
+    # eu/financials.py) so is_financial resolves to None and the bank/insurer-sensitive
+    # derived metrics are stamped sector_relevant=None instead of a false True.
     summaries = summaries_from_flat(
         flat, concepts=IFRS_CONCEPTS,
-        company="", company_current="", sic=None,
+        company="", company_current="", sic=None, sector_known=False,
     )
 
     # Balance gate: Assets == Equity + Liabilities within tolerance.
