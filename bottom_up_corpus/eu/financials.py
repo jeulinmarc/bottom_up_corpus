@@ -113,8 +113,14 @@ def build_eu_financials(specs, *, fetcher, config: Config, write: bool = True, u
         arelle_flat = arelle_facts_for_entity(ent, config=config) if use_arelle else {}
         for tag, pts in arelle_flat.items():
             flat.setdefault(tag, []).extend(pts)
+        # E-I4: the ESEF pillar has no industry classification, so the issuer's
+        # sector is UNKNOWN -- pass sector_known=False so is_financial resolves to
+        # None and the engine does NOT falsely assert sector-relevance on the
+        # bank/insurer-sensitive metrics (ESEF is bank-heavy). Deriving a real
+        # financial flag from NACE (via GLEIF) is a deferred feature; until then
+        # "unknown" is the honest value (mirrors is_financial=None in _eu_base).
         summaries = summaries_from_flat(flat, concepts=IFRS_CONCEPTS, company=ent.name,
-                                        company_current=ent.name, sic=None)
+                                        company_current=ent.name, sic=None, sector_known=False)
         attach_ttm_from_flat(flat, summaries, concepts_by_key=IFRS_CONCEPTS_BY_KEY)
         if not summaries:
             coverage.append({"lei": ent.lei, "name": ent.name, "status": "no-financials"})

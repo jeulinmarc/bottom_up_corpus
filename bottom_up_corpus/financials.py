@@ -324,7 +324,7 @@ DERIVED_TTM_BY_KEY = {d.key: d for d in DERIVED_TTM}
 def compute_ttm_derived(
     *, t12: dict[str, float | None], avg_assets: float | None,
     avg_equity: float | None, pit_net_debt: float | None,
-    is_financial: bool = False,
+    is_financial: bool | None = False,
 ) -> dict[str, dict]:
     """Bloomberg-style TTM ratios from trailing-12m flows and average balances.
 
@@ -339,7 +339,7 @@ def compute_ttm_derived(
             return
         d = DERIVED_TTM_BY_KEY[key]
         out[key] = {"value": val, "unit": d.unit, "label": d.label,
-                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
+                    "sector_relevant": _sector_relevant(is_financial, key)}
 
     def div(a, b):
         return a / b if (a is not None and b not in (None, 0)) else None
@@ -420,9 +420,69 @@ def _src(values: dict, key: str) -> str | None:
     return v.get("tag") if v else None
 
 
+# Long-term-debt tags that are current-INCLUSIVE roll-ups: they already contain
+# the current maturities of long-term debt, so the current tranche must NOT be
+# added on top (doing so double-counts -> overstated leverage). US-GAAP
+# LongTermDebt / LongTermDebtAndCapitalLeaseObligations and IFRS Borrowings.
+_ROLLUP_LTD_TAGS: frozenset[str] = frozenset({
+    "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations", "Borrowings",
+})
+# The roll-up's OWN current tranche (a total current-debt line the roll-up already
+# subsumes): US-GAAP DebtCurrent, IFRS CurrentBorrowings. When long_term_debt came
+# from a roll-up, a short_term_debt resolving to one of these is NOT added again.
+_ROLLUP_OWN_CURRENT_TAGS: frozenset[str] = frozenset({"DebtCurrent", "CurrentBorrowings"})
+
+# E-I3 (parent-vs-consolidated equity base). The `equity` and `net_income` concepts
+# are DEFINED on the parent-attributable base (owners of the parent). Both packs
+# carry a consolidated-total fallback (`Equity` / `ProfitLoss`, incl. NCI) for filers
+# that omit the parent-attributable tag. When the two sides resolve to DIFFERENT bases
+# -- a parent numerator over a consolidated equity denominator (or vice-versa) -- and
+# non-controlling interests are material, ROE / per-common-share book value would be a
+# mixed-base number that is simply wrong. These sets let the engine tell which base a
+# value resolved from, so it can gate the affected ratios (see compute_derived).
+_PARENT_ATTRIB_TAGS: frozenset[str] = frozenset({
+    "StockholdersEquity", "EquityAttributableToOwnersOfParent",   # equity (owners of parent)
+    "NetIncomeLoss", "ProfitLossAttributableToOwnersOfParent",    # earnings (owners of parent)
+})
+_TOTAL_ATTRIB_TAGS: frozenset[str] = frozenset({
+    "Equity",        # IFRS consolidated equity (incl. NCI)
+    "ProfitLoss",    # consolidated profit (incl. NCI); us-gaap ProfitLoss is also the total
+})
+# NCI counts as "material" (not a rounding artifact) above 1% of the equity base --
+# below that the parent/consolidated mix moves ROE by <1% and gating would drop good data.
+_NCI_MATERIALITY = 0.01
+
+
+def _attribution(tag: str | None) -> str | None:
+    """'parent' | 'total' | None -- the attribution base of an equity/earnings tag."""
+    if tag in _PARENT_ATTRIB_TAGS:
+        return "parent"
+    if tag in _TOTAL_ATTRIB_TAGS:
+        return "total"
+    return None
+
+
+def _sector_relevant(is_financial: bool | None, key: str) -> bool | None:
+    """Whether a derived metric is sector-relevant for this issuer (E-I4).
+
+    Non-sector-sensitive metrics are always relevant. For the sector-sensitive block
+    (bank/insurer-low-information metrics), a financial issuer -> False, a KNOWN
+    non-financial issuer -> True, and an UNKNOWN sector (``is_financial is None`` --
+    e.g. an EU/ESEF issuer whose industry is not yet derived; see the NACE note in
+    ``eu/financials.py``) -> ``None``: we must not ASSERT a relevance we cannot back.
+    (Previously ``None`` silently collapsed to ``True``, falsely flagging every EU
+    bank/insurer metric as sector-relevant.)
+    """
+    if key not in SECTOR_SENSITIVE:
+        return True
+    if is_financial is None:
+        return None
+    return not is_financial
+
+
 def compute_derived(
     values: dict[str, dict], frequency: str = "annual", currency: str = "USD",
-    is_financial: bool = False,
+    is_financial: bool | None = False,
 ) -> dict[str, dict]:
     """Compute ratios/aggregates from reported concept ``values``.
 
@@ -458,7 +518,7 @@ def compute_derived(
         else:
             unit = d.unit
         out[key] = {"value": val, "unit": unit, "label": d.label,
-                    "sector_relevant": not (is_financial and key in SECTOR_SENSITIVE)}
+                    "sector_relevant": _sector_relevant(is_financial, key)}
 
     def div(a: float | None, b: float | None) -> float | None:
         if a is None or b is None or b == 0:
@@ -490,19 +550,54 @@ def compute_derived(
     ac, lc = _num(values, "assets_current"), _num(values, "liabilities_current")
     cash = _num(values, "cash")
 
-    # Aggregates
-    ltd = _num(values, "long_term_debt")
+    # E-I3: gate equity-attribution-mixed ratios when NCI is material. If `equity`
+    # and `net_income` resolved from DIFFERENT attribution bases -- a parent-only
+    # numerator over a consolidated (incl.-NCI) equity base, or vice-versa -- and
+    # non-controlling interests are material, ROE and per-common-share book value
+    # would be a mixed-base number that is simply wrong; gate them instead of
+    # emitting it. With no material NCI (the common case, incl. every no-NCI
+    # DK-ESEF filer whose `Equity` legitimately == parent equity) nothing changes.
+    # (debt_to_equity is intentionally NOT gated: debt has no attribution, so
+    # debt/equity is a well-defined ratio on whichever single equity base, not a mix.)
+    nci = _num(values, "noncontrolling_interest")
+    mixed_equity_base = (
+        nci is not None and eq not in (None, 0)
+        and abs(nci) > _NCI_MATERIALITY * abs(eq)
+        and _attribution(_src(values, "equity")) is not None
+        and _attribution(_src(values, "net_income")) is not None
+        and _attribution(_src(values, "equity")) != _attribution(_src(values, "net_income"))
+    )
+
+    # Aggregates. total_debt is emitted whenever ANY debt component is present
+    # (long-term, its current portion, or short-term), summed additively -- so a
+    # commercial-paper / all-current-debt issuer gets its real total_debt =
+    # short_term_debt, while a genuinely debt-free filer (no component) stays None.
+    debt_keys = ("long_term_debt", "lt_debt_current", "short_term_debt")
     total_debt = None
-    if ltd is not None:
+    if any(_num(values, k) is not None for k in debt_keys):
         ltd_tag = _src(values, "long_term_debt")
         short_tag = _src(values, "short_term_debt")
+        ltd = opt("long_term_debt")
         cur = opt("lt_debt_current")
-        # LongTermDebt is the FASB roll-up (current + noncurrent); DebtCurrent
-        # already includes current maturities of LTD. Either case already counts
-        # the current portion, so do not add lt_debt_current again.
-        if ltd_tag == "LongTermDebt" or short_tag == "DebtCurrent":
+        st = opt("short_term_debt")
+        if ltd_tag in _ROLLUP_LTD_TAGS:
+            # long_term_debt resolved from a current-INCLUSIVE roll-up (US-GAAP
+            # LongTermDebt[AndCapitalLeaseObligations], IFRS Borrowings): its own
+            # current maturities are already inside it. Never add lt_debt_current,
+            # and add short_term_debt only when it is a genuinely separate
+            # short-term borrowing (commercial paper, notes) -- NOT the roll-up's
+            # own current tranche (DebtCurrent / CurrentBorrowings), which the
+            # roll-up already contains. (Borrowings=1000 + CurrentBorrowings=300
+            # with no NoncurrentBorrowings -> true total is 1000, not 1300.)
             cur = 0
-        total_debt = ltd + cur + opt("short_term_debt")
+            if short_tag in _ROLLUP_OWN_CURRENT_TAGS:
+                st = 0
+        elif short_tag == "DebtCurrent":
+            # Clean noncurrent-only LTD split + DebtCurrent (= current LTD + ST):
+            # DebtCurrent already includes the current maturities of LTD, so don't
+            # add lt_debt_current on top of it.
+            cur = 0
+        total_debt = ltd + cur + st
     put("total_debt", total_debt)
 
     leases = (opt("finance_lease_current") + opt("finance_lease_noncurrent")
@@ -517,7 +612,14 @@ def compute_derived(
             sti = 0  # cash tag already includes short-term investments
         # Long-term marketable securities are a liquid offset to debt (Apple,
         # Microsoft, ...): excluding them overstates net debt / hides net cash.
-        net_debt = total_debt - cash - sti - opt("long_term_investments")
+        # But the generic us-gaap:LongTermInvestments fallback routinely bundles
+        # illiquid equity-method / strategic holdings; netting those against debt
+        # makes a levered industrial read net_debt ~ 0. So only genuinely
+        # marketable long-term securities are offset -- the generic tag is not.
+        lti = opt("long_term_investments")
+        if _src(values, "long_term_investments") == "LongTermInvestments":
+            lti = 0
+        net_debt = total_debt - cash - sti - lti
     put("net_debt", net_debt)
     # Friendly mirror: positive = net cash, negative = net debt.
     put("net_cash", -net_debt if net_debt is not None else None)
@@ -572,7 +674,7 @@ def compute_derived(
 
     # Returns / tax (%). ROE is on COMMON equity: (net income - preferred dividends).
     ni_common = (ni - opt("preferred_dividends")) if ni is not None else None
-    put("roe", pct_pos(ni_common, eq))
+    put("roe", None if mixed_equity_base else pct_pos(ni_common, eq))
     put("roa", pct(ni, assets))
     put("effective_tax_rate", pct_pos(inc_tax, pretax))
 
@@ -617,9 +719,12 @@ def compute_derived(
     put("dpo", dpo)
     if dso is not None and dio is not None and dpo is not None:
         put("ccc", dso + dio - dpo)
+    # Per-common-share book value is equity-denominated: gate it on the same mixed
+    # NCI base as ROE -- off a consolidated (incl.-NCI) equity it overstates the
+    # common holder's per-share stake.
     shares = _num(values, "shares_outstanding")
-    put("book_value_per_share", div(common_eq, shares))
-    put("tangible_book_value_per_share", div(tbv, shares))
+    put("book_value_per_share", None if mixed_equity_base else div(common_eq, shares))
+    put("tangible_book_value_per_share", None if mixed_equity_base else div(tbv, shares))
 
     return out
 
@@ -645,10 +750,19 @@ class PeriodSummary:
     values: dict[str, dict] = field(default_factory=dict)
     currency: str = "USD"          # issuer's monetary reporting currency
     sic: str | None = None         # SEC SIC code (industry classification)
+    # False = the issuer's sector is UNKNOWN (no industry classification available,
+    # e.g. the EU/ESEF pillar), so is_financial resolves to None rather than a
+    # (false) non-financial. Defaults True: an absent SIC in a SIC-carrying pillar
+    # (SEC / registers) still means "not classified financial" (behavior unchanged).
+    sector_known: bool = True
     ttm: dict[str, dict] = field(default_factory=dict)
 
     @property
-    def is_financial(self) -> bool:
+    def is_financial(self) -> bool | None:
+        # None = sector unknown (see `sector_known`); the engine then declines to
+        # assert sector-relevance on the bank/insurer-sensitive derived metrics.
+        if not self.sector_known:
+            return None
         return _is_financial(self.sic)
 
     @property
@@ -873,10 +987,13 @@ def summaries_from_flat(
     flat: dict[str, list[dict]], *, concepts: tuple[Concept, ...],
     company: str, company_current: str, name_for_date=None,
     since_year: int | None = None, until_year: int | None = None,
-    sic: str | None = None,
+    sic: str | None = None, sector_known: bool = True,
 ) -> list[PeriodSummary]:
     """Group curated concepts into one summary per reporting period, from a
-    pre-flattened ``{tag: [points]}`` dict and an injectable concept pack."""
+    pre-flattened ``{tag: [points]}`` dict and an injectable concept pack.
+
+    ``sector_known=False`` marks the issuer's industry as unknown (no SIC/NACE
+    available, e.g. the EU/ESEF pillar) so ``is_financial`` resolves to None."""
     cbk = {c.key: c for c in concepts}
     currency = reporting_currency(flat)
     duration: dict[tuple[date, str], dict[str, list[dict]]] = {}
@@ -933,7 +1050,7 @@ def summaries_from_flat(
             sec_form=first.get("form") or "XBRL",
             accession=first.get("accn") or f"XBRL-{end.isoformat()}-{freq}",
             company=pit or company, company_current=company_current, values=values,
-            currency=currency or "USD", sic=sic,
+            currency=currency or "USD", sic=sic, sector_known=sector_known,
         ))
     summaries.sort(key=lambda s: (s.period_end or date.min, s.frequency), reverse=True)
     return summaries

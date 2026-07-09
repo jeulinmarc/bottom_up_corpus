@@ -271,6 +271,83 @@ def test_total_debt_no_double_count_for_debtcurrent():
     assert d["total_debt"]["value"] == 140  # 100 + 40 (DebtCurrent), current portion not re-added
 
 
+def test_total_debt_no_double_count_for_ifrs_borrowings_rollup():
+    from bottom_up_corpus.financials import compute_derived
+    # IFRS `Borrowings` is a current-INCLUSIVE roll-up; `CurrentBorrowings` is its
+    # own current tranche (already inside it). With no NoncurrentBorrowings the
+    # true total is the roll-up itself (1000), NOT 1000 + 300.
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "EUR", "tag": "Borrowings"},
+        "short_term_debt": {"value": 300.0, "unit": "EUR", "tag": "CurrentBorrowings"},
+        "equity": {"value": 2000.0, "unit": "EUR"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["total_debt"]["value"] == 1000            # not 1300
+    assert d["debt_to_equity"]["value"] == pytest.approx(0.50)  # not 0.65
+
+
+def test_total_debt_ifrs_clean_split_unchanged():
+    from bottom_up_corpus.financials import compute_derived
+    # Clean IFRS split: NoncurrentBorrowings (long-term only) + CurrentBorrowings
+    # -> additive, total = 700 + 300 = 1000 (the roll-up guard must not fire here).
+    vals = {
+        "long_term_debt": {"value": 700.0, "unit": "EUR", "tag": "NoncurrentBorrowings"},
+        "short_term_debt": {"value": 300.0, "unit": "EUR", "tag": "CurrentBorrowings"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["total_debt"]["value"] == 1000
+
+
+def test_total_debt_us_gaap_longtermdebt_plus_debtcurrent_not_doubled():
+    from bottom_up_corpus.financials import compute_derived
+    # US-GAAP `LongTermDebt` roll-up (incl. current maturities) + `DebtCurrent`
+    # (the total current-debt line it already subsumes) -> total is the roll-up
+    # (1000), not 1000 + 300.
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebt"},
+        "short_term_debt": {"value": 300.0, "unit": "USD", "tag": "DebtCurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 1000            # not 1300
+
+
+def test_total_debt_rollup_still_adds_separate_short_term_borrowing():
+    from bottom_up_corpus.financials import compute_derived
+    # A LongTermDebt roll-up + genuinely-separate commercial paper (not the
+    # roll-up's own current tranche) -> the CP IS additive: 1000 + 200 = 1200.
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebt"},
+        "short_term_debt": {"value": 200.0, "unit": "USD", "tag": "CommercialPaper"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 1200
+
+
+def test_total_debt_short_term_only_borrower():
+    from bottom_up_corpus.financials import compute_derived
+    # A commercial-paper / all-current-debt issuer (only short_term_debt, no
+    # long-term line) still gets a real total_debt = short_term_debt and the
+    # leverage ratios that build on it.
+    vals = {
+        "short_term_debt": {"value": 500.0, "unit": "USD", "tag": "CommercialPaper"},
+        "equity": {"value": 1000.0, "unit": "USD"},
+        "assets": {"value": 2000.0, "unit": "USD"},
+    }
+    d = compute_derived(vals)
+    assert d["total_debt"]["value"] == 500
+    assert d["debt_to_equity"]["value"] == pytest.approx(0.5)
+    assert d["debt_to_assets"]["value"] == pytest.approx(0.25)
+
+
+def test_total_debt_none_for_debt_free_filer():
+    from bottom_up_corpus.financials import compute_derived
+    # No debt component of any kind -> total_debt stays None (never coerced to 0).
+    vals = {"equity": {"value": 1000.0, "unit": "USD"}, "assets": {"value": 2000.0, "unit": "USD"}}
+    d = compute_derived(vals)
+    assert "total_debt" not in d
+    assert "debt_to_equity" not in d
+
+
 def test_net_debt_no_double_count_for_combined_cash_tag():
     from bottom_up_corpus.financials import compute_derived
     vals = {
@@ -283,6 +360,33 @@ def test_net_debt_no_double_count_for_combined_cash_tag():
     assert d["net_debt"]["value"] == 40
     # cash_ratio numerator also must not re-add STI (here lc absent -> ratio omitted)
     assert "cash_ratio" not in d
+
+
+def test_net_debt_excludes_generic_long_term_investments():
+    from bottom_up_corpus.financials import compute_derived
+    # The generic us-gaap:LongTermInvestments tag can hold illiquid equity-method
+    # / strategic stakes -> it must NOT be netted against debt (a levered
+    # industrial would otherwise read net_debt ~ 0).
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "cash": {"value": 100.0, "unit": "USD", "tag": "CashAndCashEquivalentsAtCarryingValue"},
+        "long_term_investments": {"value": 900.0, "unit": "USD", "tag": "LongTermInvestments"},
+    }
+    d = compute_derived(vals)
+    assert d["net_debt"]["value"] == 900          # 1000 - 100 - 0, NOT 0
+
+
+def test_net_debt_offsets_marketable_long_term_securities():
+    from bottom_up_corpus.financials import compute_derived
+    # Genuinely-marketable long-term securities (MarketableSecuritiesNoncurrent) ARE
+    # a liquid offset to debt (cash-rich issuers like Apple/Microsoft).
+    vals = {
+        "long_term_debt": {"value": 1000.0, "unit": "USD", "tag": "LongTermDebtNoncurrent"},
+        "cash": {"value": 100.0, "unit": "USD", "tag": "CashAndCashEquivalentsAtCarryingValue"},
+        "long_term_investments": {"value": 900.0, "unit": "USD", "tag": "MarketableSecuritiesNoncurrent"},
+    }
+    d = compute_derived(vals)
+    assert d["net_debt"]["value"] == 0            # 1000 - 100 - 900
 
 
 def test_negative_equity_suppresses_roe_and_dte():
@@ -303,6 +407,64 @@ def test_nonpositive_pretax_suppresses_effective_tax_rate():
     vals = {"income_tax": {"value": 5.0, "unit": "USD"},
             "pretax_income": {"value": -20.0, "unit": "USD"}}
     assert "effective_tax_rate" not in compute_derived(vals)
+
+
+def test_roe_gated_on_mixed_parent_vs_consolidated_nci_base():
+    from bottom_up_corpus.financials import compute_derived
+    # net_income = parent-attributable (ProfitLossAttributableToOwnersOfParent) but
+    # equity = the consolidated `Equity` total (incl. NCI), with MATERIAL NCI ->
+    # ROE would divide a parent numerator by a consolidated equity base (mixed,
+    # wrong). Gate ROE + per-common-share book value; roa (assets base) is fine.
+    vals = {
+        "net_income": {"value": 100.0, "unit": "EUR", "tag": "ProfitLossAttributableToOwnersOfParent"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "noncontrolling_interest": {"value": 200.0, "unit": "EUR", "tag": "NoncontrollingInterests"},
+        "assets": {"value": 3000.0, "unit": "EUR"},
+        "shares_outstanding": {"value": 100.0, "unit": "shares"},
+    }
+    d = compute_derived(vals, currency="EUR")  # annual
+    assert "roe" not in d                       # mixed base -> gated
+    assert "book_value_per_share" not in d      # equity-denominated -> gated
+    assert d["roa"]["value"] == pytest.approx(100 / 3000 * 100)  # unaffected
+
+
+def test_roe_not_gated_without_material_nci_dk_esef_style():
+    from bottom_up_corpus.financials import compute_derived
+    # DK-ESEF style: equity resolves to the `Equity` total tag but there is NO NCI,
+    # so `Equity` IS parent equity. Parent-attributable NI. No mix -> ROE unchanged.
+    vals = {
+        "net_income": {"value": 100.0, "unit": "EUR", "tag": "ProfitLossAttributableToOwnersOfParent"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "assets": {"value": 3000.0, "unit": "EUR"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["roe"]["value"] == pytest.approx(10.0)  # 100 / 1000, unchanged
+
+
+def test_roe_not_gated_when_both_bases_consolidated():
+    from bottom_up_corpus.financials import compute_derived
+    # Both sides consolidated (equity=Equity total, net_income=ProfitLoss total) with
+    # material NCI -> a consistent consolidated ROE, not a mix -> emitted, not gated.
+    vals = {
+        "net_income": {"value": 120.0, "unit": "EUR", "tag": "ProfitLoss"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "noncontrolling_interest": {"value": 200.0, "unit": "EUR", "tag": "NoncontrollingInterests"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["roe"]["value"] == pytest.approx(12.0)  # 120 / 1000, consolidated
+
+
+def test_roe_not_gated_when_nci_immaterial():
+    from bottom_up_corpus.financials import compute_derived
+    # Mixed tags but NCI is 0.5% of equity (< 1% materiality) -> the base mix moves
+    # ROE by <1%, so we keep the number rather than drop good data.
+    vals = {
+        "net_income": {"value": 100.0, "unit": "EUR", "tag": "ProfitLossAttributableToOwnersOfParent"},
+        "equity": {"value": 1000.0, "unit": "EUR", "tag": "Equity"},
+        "noncontrolling_interest": {"value": 5.0, "unit": "EUR", "tag": "NoncontrollingInterests"},
+    }
+    d = compute_derived(vals, currency="EUR")
+    assert d["roe"]["value"] == pytest.approx(10.0)  # immaterial NCI -> not gated
 
 
 def test_roe_roa_are_annual_only():
@@ -366,6 +528,37 @@ def test_non_financial_everything_sector_relevant():
     from bottom_up_corpus.financials import compute_derived
     d = compute_derived(_sector_vals(), frequency="annual", is_financial=False)
     assert all(v["sector_relevant"] is True for v in d.values())
+
+
+def test_unknown_sector_does_not_assert_sector_relevance():
+    from bottom_up_corpus.financials import compute_derived
+    # is_financial=None (sector UNKNOWN, e.g. the EU/ESEF pillar) must NOT stamp the
+    # bank/insurer-sensitive metrics sector_relevant=True -- that asserts a relevance
+    # we can't back. They carry None (unknown); sector-neutral metrics stay True.
+    d = compute_derived(_sector_vals(), frequency="annual", is_financial=None)
+    for k in ("ebitda", "interest_coverage", "current_ratio", "net_debt", "gross_margin"):
+        assert d[k]["sector_relevant"] is None, k        # not True
+    assert d["net_margin"]["sector_relevant"] is True    # sector-neutral -> still True
+    assert d["total_debt"]["sector_relevant"] is True
+
+
+def test_period_summary_unknown_sector_yields_is_financial_none():
+    from bottom_up_corpus.financials import summaries_from_flat
+    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS
+    # An EU-style summary (sector_known=False) -> is_financial None, and its
+    # sector-sensitive derived metrics are not falsely stamped sector_relevant=True.
+    flat = {
+        "Revenue": [{"val": 100.0, "start": "2020-01-01", "end": "2020-12-31",
+                     "unit": "EUR", "tag": "Revenue", "filed": "2021-04-01", "form": "ar"}],
+        "ProfitLossFromOperatingActivities": [{"val": 20.0, "start": "2020-01-01", "end": "2020-12-31",
+                     "unit": "EUR", "tag": "ProfitLossFromOperatingActivities", "filed": "2021-04-01", "form": "ar"}],
+        "DepreciationAndAmortisationExpense": [{"val": 5.0, "start": "2020-01-01", "end": "2020-12-31",
+                     "unit": "EUR", "tag": "DepreciationAndAmortisationExpense", "filed": "2021-04-01", "form": "ar"}],
+    }
+    s = summaries_from_flat(flat, concepts=IFRS_CONCEPTS, company="X",
+                            company_current="X", sic=None, sector_known=False)[0]
+    assert s.is_financial is None
+    assert s.derived["ebitda"]["sector_relevant"] is None   # unknown, not True
 
 
 def test_period_summary_is_financial_from_sic():
