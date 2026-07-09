@@ -11,10 +11,9 @@ import json
 from ..config import Config
 from ..financials import attach_ttm_from_flat, make_row_base, rows_from_base, summaries_from_flat
 from ..storage import Storage
+from ..xbrl import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY, flatten_oim_json
 from .arelle_esef import oim_from_esef_zip
 from .entities import Entity, resolve_entities
-from .ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
-from .oim import flatten_oim_json
 from .sources.filings_org import FilingsXbrlOrg
 
 

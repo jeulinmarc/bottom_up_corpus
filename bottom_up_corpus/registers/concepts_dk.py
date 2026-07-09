@@ -3,7 +3,7 @@
 Path A (listed ESEF/IFRS):  parse_virk_esef_xml + map_dk_esef
     Stdlib ``xml.etree`` parser for Virk bare ``ifrs-full`` XBRL instances.
     Produces the same flat ``{local_name: [datapoint]}`` shape as
-    ``eu.oim.flatten_oim_json``, then feeds it through the existing
+    ``xbrl.oim.flatten_oim_json``, then feeds it through the existing
     ``summaries_from_flat(flat, concepts=IFRS_CONCEPTS)`` — 100 % reuse,
     no Arelle, borrowings-based leverage for free.
 
@@ -277,7 +277,7 @@ def parse_virk_esef_xml(xml_bytes: bytes) -> "dict[str, list[dict]]":
     """Parse a Virk bare ``ifrs-full`` XBRL instance into the engine's flat shape.
 
     Returns ``{local_name: [datapoint]}`` where each datapoint mirrors the keys
-    produced by ``eu.oim.flatten_oim_json``:
+    produced by ``xbrl.oim.flatten_oim_json``:
 
     * **Instant** (balance-sheet) facts: ``val``, ``end``, ``unit``, ``tag``,
       ``label``, ``filed``, ``form``, ``accn`` — no ``start`` key.
@@ -416,7 +416,7 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     :func:`~bottom_up_corpus.financials.rows_from_base`.
     """
     from ..financials import summaries_from_flat
-    from ..eu.ifrs_concepts import IFRS_CONCEPTS
+    from ..xbrl import IFRS_CONCEPTS
     import warnings
 
     flat = parse_virk_esef_xml(xml_bytes)

@@ -548,7 +548,7 @@ def test_unknown_sector_does_not_assert_sector_relevance():
 
 def test_period_summary_unknown_sector_yields_is_financial_none():
     from bottom_up_corpus.financials import summaries_from_flat
-    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS
+    from bottom_up_corpus.xbrl import IFRS_CONCEPTS
     # An EU-style summary (sector_known=False) -> is_financial None, and its
     # sector-sensitive derived metrics are not falsely stamped sector_relevant=True.
     flat = {

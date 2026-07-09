@@ -1,4 +1,4 @@
-from bottom_up_corpus.eu.oim import normalize_unit, normalize_period, flatten_oim_json
+from bottom_up_corpus.xbrl import normalize_unit, normalize_period, flatten_oim_json
 
 
 def test_normalize_unit():

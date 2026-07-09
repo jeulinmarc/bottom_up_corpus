@@ -6,7 +6,7 @@ import pytest
 from bottom_up_corpus.config import Config
 from bottom_up_corpus.eu.entities import Entity
 from bottom_up_corpus.eu.financials import build_eu_financials, facts_for_entity
-from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS
+from bottom_up_corpus.xbrl import IFRS_CONCEPTS
 from bottom_up_corpus.financials import summaries_from_flat
 
 FIX = Path(__file__).parent / "fixtures" / "eu"

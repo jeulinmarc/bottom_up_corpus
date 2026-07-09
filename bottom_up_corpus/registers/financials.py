@@ -16,9 +16,9 @@ import tempfile
 from pathlib import Path
 
 from ..config import Config
-from ..eu.oim import flatten_oim_json
 from ..financials import rows_from_base
 from ..storage import Storage
+from ..xbrl import flatten_oim_json
 from ._common import (
     _base,
     _emit_entity_rows,
