@@ -34,7 +34,6 @@ which would silently UNDERSTATE assets = a false number.
 """
 from __future__ import annotations
 
-import re
 
 from ._common import _CURRENCY_RE, _tol
 

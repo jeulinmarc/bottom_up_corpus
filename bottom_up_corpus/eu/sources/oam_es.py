@@ -35,7 +35,7 @@ from urllib.parse import quote
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # ---------------------------------------------------------------------------
 # Module-level constants

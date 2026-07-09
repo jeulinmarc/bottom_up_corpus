@@ -343,7 +343,6 @@ def test_pagination_overflow_then_stops():
 
 def test_pagination_cap_records_truncated():
     """Reaching _MAX_WINDOWS records a truncated error."""
-    from bottom_up_corpus.eu.sources.oam_no import _MAX_WINDOWS
 
     overflow_page = {
         "data": {

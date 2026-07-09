@@ -50,7 +50,7 @@ from .sources.cik_lookup import fetch_cik_lookup, parse_cik_lookup
 from .sources.edgar_fts import EdgarFTS
 from .sources.edgar_index import EdgarFullIndex
 from .storage import Storage
-from .taxonomy import FULL_SCOPE, FormType, parse_scope
+from .taxonomy import FULL_SCOPE, parse_scope
 from .universe import (
     Issuer,
     Universe,

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # The two Kapitalmarkt registers, as (URL slug, register label).
 _REGISTERS = [

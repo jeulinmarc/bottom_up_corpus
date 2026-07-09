@@ -44,7 +44,6 @@ The confidence gate (§4 of the design doc):
 """
 from __future__ import annotations
 
-import re
 
 from ._common import _CURRENCY_RE, _tol
 

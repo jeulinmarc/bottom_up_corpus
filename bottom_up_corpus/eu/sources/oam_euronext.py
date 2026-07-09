@@ -27,7 +27,7 @@ from urllib.parse import parse_qs
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # ---------------------------------------------------------------------------
 # Country -> Euronext market MIC

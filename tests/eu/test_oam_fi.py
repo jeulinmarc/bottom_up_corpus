@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from bottom_up_corpus.eu.documents import DOC_TYPES
 from bottom_up_corpus.eu.entities import Entity
@@ -359,7 +358,6 @@ def test_pagination_terminates_on_empty_page():
 
 def test_pagination_cap_records_truncation():
     """When _MAX_PAGES is hit, a truncation error must be recorded."""
-    from bottom_up_corpus.eu.sources.oam_fi import _MAX_PAGES
 
     call_count = 0
 
@@ -379,7 +377,7 @@ def test_pagination_cap_records_truncation():
                     'totalDataLength="2589"', 'totalDataLength="99999"'
                 )
             return (
-                f'<nef-pagination totalDataLength="99999"></nef-pagination>'
+                '<nef-pagination totalDataLength="99999"></nef-pagination>'
                 + SEARCH_HTML
             )
 

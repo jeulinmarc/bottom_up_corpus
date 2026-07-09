@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 from bottom_up_corpus.sources.cik_lookup import (
     CIK_LOOKUP_URL,

@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 
 _PAGE = 100  # JSON:API page size; an issuer's ESEF reports are far under this.

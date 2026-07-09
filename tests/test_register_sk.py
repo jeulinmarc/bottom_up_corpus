@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sk"
 

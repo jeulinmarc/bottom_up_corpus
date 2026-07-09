@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from bottom_up_corpus.eu.documents import DOC_TYPES
 from bottom_up_corpus.eu.entities import Entity
