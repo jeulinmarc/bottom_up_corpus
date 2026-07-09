@@ -197,6 +197,16 @@ CONCEPTS: tuple[Concept, ...] = (
 
 CONCEPTS_BY_KEY = {c.key: c for c in CONCEPTS}
 
+# M1: the single source of truth for reported-line-item labels, keyed by concept
+# key. Every pillar's *reported* rows take their human label from here via
+# :func:`rows_from_base`, so a register mapper that only knows the machine key
+# ("revenue") no longer carries its own label and all three pillars agree on one
+# canonical label per concept. The keys are the curated superset (the IFRS pack
+# and every register mapper emit a subset of these keys), so this map covers them
+# all. Derived / TTM labels are engine-supplied (from DERIVED / DERIVED_TTM) and
+# are NOT overridden here.
+CONCEPT_LABELS: dict[str, str] = {c.key: c.label for c in CONCEPTS}
+
 # Flow concepts summed over a trailing-twelve-month window for the TTM block.
 _TTM_FLOW_KEYS: tuple[str, ...] = (
     "revenue", "net_income", "operating_income", "gross_profit",
@@ -1177,8 +1187,16 @@ def render_summary_html(summary: PeriodSummary) -> str:
 
 def rows_from_base(base: dict, summary: PeriodSummary) -> list[dict]:
     """Flatten a summary into reported/derived/derived_ttm rows on top of ``base``
-    (the identity + period columns), shared by the SEC and EU pillars."""
-    rows = [{**base, "kind": "reported", "concept": key, "label": v["label"],
+    (the canonical identity + provenance + period columns), shared by all three
+    pillars (SEC, EU/ESEF, registers).
+
+    M1: reported-row labels are backfilled from the shared :data:`CONCEPT_LABELS`
+    registry (keyed by concept key), so every pillar agrees on one human label per
+    concept regardless of what its mapper stored — a register row for ``revenue``
+    gets ``"Revenue"``, not the machine key. Derived / TTM labels are engine-supplied
+    and pass through unchanged."""
+    rows = [{**base, "kind": "reported", "concept": key,
+             "label": CONCEPT_LABELS.get(key) or v.get("label") or key,
              "value": v["value"], "unit": v["unit"], "tag": v.get("tag")}
             for key, v in summary.values.items()]
     rows += [{**base, "kind": "derived", "concept": key, "label": v["label"],
@@ -1223,11 +1241,70 @@ def stamp_leverage_basis(rows: list[dict], leverage_basis: str | None) -> list[d
     return rows
 
 
+# ARCH-C1: the ONE canonical identity + provenance + period frame that every
+# financial row carries, filled identically by all three pillars (SEC, EU/ESEF,
+# registers). Before this, each pillar built its own divergent dict (issuer id was
+# cik|lei|entity_id; provenance was sec_form+accession | doc_type+source | source;
+# country only on registers; is_financial bool|None|absent). Now there is one
+# vocabulary. The row BODY (kind/concept/value/unit/tag/label) is added on top by
+# :func:`rows_from_base`.
+ROW_BASE_KEYS: tuple[str, ...] = (
+    # identity
+    "entity_id", "id_scheme", "lei", "country",
+    # period
+    "currency", "period_end", "fy", "frequency", "publication_date",
+    # provenance
+    "source", "form", "accession",
+    # nullable qualifiers
+    "sic", "is_financial", "basis",
+)
+
+
+def make_row_base(
+    summary: PeriodSummary, *,
+    entity_id: str, id_scheme: str | None, lei: str | None, country: str | None,
+    source: str, form: str | None, accession: str | None,
+    sic: str | None = None, is_financial: bool | None = None,
+    basis: str | None = None,
+) -> dict:
+    """Build the canonical RowBase — the identity/provenance/period columns shared by
+    every financial row across all three pillars (ARCH-C1).
+
+    Identity: ``entity_id`` is the pillar's primary id (SEC = CIK, EU = LEI, register
+    = national number); ``id_scheme`` names what it is (``cik`` / ``lei`` / ``orgnr``
+    / ``kbo`` / …); ``lei`` is populated wherever known; ``country`` is always carried.
+    Period: ``currency`` / ``period_end`` / ``fy`` / ``frequency`` /
+    ``publication_date`` — all read from the summary, so ``frequency`` is ALWAYS the
+    period's own frequency (never hardcoded). Provenance: ``source`` (``sec`` /
+    ``esef`` / ``brreg`` / …), ``form`` (SEC form / ESEF doc_type / None), ``accession``.
+    Qualifiers: ``sic`` (SEC only, else None), ``is_financial`` (bool where the sector
+    is known, else None), ``basis`` (register ``company`` / ``consolidated``, else None).
+    """
+    return {
+        "entity_id": entity_id,
+        "id_scheme": id_scheme,
+        "lei": lei,
+        "country": country,
+        "currency": summary.currency,
+        "period_end": summary.period_end.isoformat() if summary.period_end else None,
+        "fy": summary.fy,
+        "frequency": summary.frequency,
+        "publication_date": (summary.publication_date.isoformat()
+                             if summary.publication_date else None),
+        "source": source,
+        "form": form,
+        "accession": accession,
+        "sic": sic,
+        "is_financial": is_financial,
+        "basis": basis,
+    }
+
+
 def normalized_rows(cik: str, summary: PeriodSummary) -> list[dict]:
-    base = {"cik": cik, "fy": summary.fy, "frequency": summary.frequency,
-            "currency": summary.currency, "sic": summary.sic,
-            "is_financial": summary.is_financial,
-            "period_end": summary.period_end.isoformat() if summary.period_end else None,
-            "publication_date": summary.publication_date.isoformat() if summary.publication_date else None,
-            "sec_form": summary.sec_form, "accession": summary.accession}
+    """SEC rows on the canonical RowBase: entity_id = CIK (id_scheme ``cik``),
+    country ``US``, source ``sec``, form = the filing form (10-K / 10-Q / …)."""
+    base = make_row_base(
+        summary, entity_id=cik, id_scheme="cik", lei=None, country="US",
+        source="sec", form=summary.sec_form, accession=summary.accession,
+        sic=summary.sic, is_financial=summary.is_financial, basis=None)
     return rows_from_base(base, summary)
