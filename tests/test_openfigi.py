@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from bottom_up_corpus.openfigi import (
     OPENFIGI_URL,
-    FigiRecord,
     coverage_hint,
     map_identifiers,
 )

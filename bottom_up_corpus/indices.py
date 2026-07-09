@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import io
 import re
-from datetime import date
 
 import pandas as pd
 from dateutil import parser as dateparser

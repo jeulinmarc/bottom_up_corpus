@@ -55,6 +55,7 @@ import calendar
 import re
 from datetime import date
 
+from ._common import _tol
 from .sk_registeruz import parse_vykaz
 
 # ---------------------------------------------------------------------------
@@ -119,12 +120,6 @@ def cell(cells: dict, key: tuple[int, int], col: int):
 def _col(id_sablony: int, table_idx: int) -> int:
     """Column index for a table: POD (699) assets table (0) → netto col 2; else 0."""
     return 2 if (id_sablony == 699 and table_idx == 0) else 0
-
-
-def _tol(scale: float) -> float:
-    """Absolute tolerance for the balance identity: ``max(2, 0.005·|scale|)`` —
-    0.5%, never tighter than 2 EUR (so micro-entity rounding never trips it)."""
-    return max(2.0, 0.005 * abs(scale))
 
 
 def _period_end(vykaz: dict) -> str | None:

@@ -34,12 +34,8 @@ which would silently UNDERSTATE assets = a false number.
 """
 from __future__ import annotations
 
-import re
 
-# ISO-4217 currency code pattern: exactly 3 uppercase ASCII letters.
-# Used to reject non-monetary units (e.g. "shares", "GBP/shares") when picking
-# the reporting currency from the period's unit map.
-_CURRENCY_RE = re.compile(r'^[A-Z]{3}$')
+from ._common import _CURRENCY_RE, _tol
 
 # curated key -> FRC local-name fallbacks, highest priority first. First present
 # (in the current period) wins. NetAssetsLiabilities is handled separately — it is
@@ -57,15 +53,6 @@ UK_FIELDS: dict[str, tuple[str, ...]] = {
     "receivables": ("Debtors",),
     "inventory": ("TotalInventories",),
 }
-
-
-def _tol(scale: float) -> float:
-    """Absolute tolerance for a balance identity at magnitude ``scale``.
-
-    ``max(2, 0.005 * |scale|)`` — 0.5% of the figure, but never tighter than 2
-    currency units (so tiny micro-entity filings are not tripped by rounding).
-    """
-    return max(2.0, 0.005 * abs(scale))
 
 
 def _current_period(flat: dict[str, list[dict]]) -> tuple[str, dict, str] | None:

@@ -66,7 +66,10 @@ def test_oim_from_esef_zip_raises_clear_error_when_arelle_missing(monkeypatch, t
 def test_tls_cert_check_stays_on_when_verify_tls_true(monkeypatch, tmp_path):
     """When config.verify_tls=True (default), noCertificateCheck must NOT be set
     to True on the Arelle controller — fix for unconditional TLS-off."""
-    import sys, types, zipfile, io
+    import sys
+    import types
+    import zipfile
+    import io
     from bottom_up_corpus.config import Config
 
     # Write a minimal ESEF zip. The inner-path check is

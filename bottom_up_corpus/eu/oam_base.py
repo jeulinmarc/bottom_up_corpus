@@ -29,8 +29,14 @@ class OamSource(ABC):
     def _record_error(self, context, url, error):
         self.errors.append({"source": self.name, "context": context, "url": url, "error": str(error)})
 
-    @abstractmethod
-    def list_issuers(self) -> list[IssuerRef]: ...
+    def list_issuers(self) -> list[IssuerRef]:
+        """Enumerate all known issuers for this OAM.
+
+        Default: return empty — full enumeration is a scale-up concern for most
+        backends (discovery is driven per-entity via :meth:`discover`).  Backends
+        that can cheaply enumerate (e.g. OamFI's embedded company list) override it.
+        """
+        return []
 
     @abstractmethod
     def discover(self, entity: Entity) -> list[Document]: ...

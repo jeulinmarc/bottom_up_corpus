@@ -370,7 +370,6 @@ def test_build_ee_financials_from_files_error_isolation(tmp_path):
     # Real test: a report with no registrikood → no-financials (not an error), just
     # verify the batch continues. We can do this via a synthetic test.
     # Create a tiny elements CSV and a meta CSV that omits the registrikood.
-    import io
     elem_text = "report_id;tabel;elemendi_label;elemendi_nimetus;vaartus\n99001;b;l;Assets;1000.0\n"
     meta_text = "report_id;registrikood;aruandeaasta;kas konsolideeritud?;period_end\n99001;;2025;Ei;31.12.2025\n"
     elem_bytes = elem_text.encode("utf-8")

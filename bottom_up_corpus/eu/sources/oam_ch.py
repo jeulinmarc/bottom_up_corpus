@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # ---------------------------------------------------------------------------
 # SIX constants
@@ -168,10 +168,6 @@ class DisclosureCH(OamSource):
 
     name = "oam-ch"
     country = "CH"
-
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
 
     # ------------------------------------------------------------------
     # Public API

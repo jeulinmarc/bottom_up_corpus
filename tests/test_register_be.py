@@ -588,7 +588,6 @@ def test_build_be_financials_api_stub(tmp_path):
 
 def test_cli_be_file_dry_run(tmp_path):
     """--be-file dry-run: build_be_financials_from_files called with write=False."""
-    import io
     from bottom_up_corpus.cli import main
 
     rc = main([

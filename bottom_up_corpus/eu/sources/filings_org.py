@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 
 _PAGE = 100  # JSON:API page size; an issuer's ESEF reports are far under this.
@@ -20,9 +20,6 @@ class FilingsXbrlOrg(OamSource):
     name = "filings.xbrl.org"
     country = "EU"
     BASE = "https://filings.xbrl.org"
-
-    def list_issuers(self) -> list[IssuerRef]:
-        return []  # complementary backend: discovery is per-entity, not enumerated here
 
     def discover(self, entity: Entity) -> list[Document]:
         if not entity.lei:

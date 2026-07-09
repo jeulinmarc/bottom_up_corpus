@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
+from bottom_up_corpus.registers.identity import _norm_ico, resolve_register_specs
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sk"
 
@@ -226,7 +226,8 @@ def _synth_pod(assets, equity, liab, accruals, *, sablony=699, pristupnost="Vere
         {"pocetDatovychStlpcov": 2, "riadky": [
             {"cisloRiadku": 80}, {"cisloRiadku": 101}, {"cisloRiadku": 141}]},
     ]}
-    c = lambda x: "" if x is None else str(x)
+    def c(x):
+        return "" if x is None else str(x)
     vykaz = {
         "idSablony": sablony,
         "pristupnostDat": pristupnost,
@@ -462,8 +463,6 @@ def test_map_malformed_vykaz_is_no_financials():
 # ---------------------------------------------------------------------------
 # Task 3 — SK identity (IČO / LEI->GLEIF registeredAs)
 # ---------------------------------------------------------------------------
-
-from bottom_up_corpus.registers.identity import _norm_ico, resolve_register_specs
 
 
 class _GleifFetcherSK:

@@ -27,7 +27,7 @@ from urllib.parse import parse_qs
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # ---------------------------------------------------------------------------
 # Country -> Euronext market MIC
@@ -160,10 +160,6 @@ class EuronextSource(OamSource):
         ISINs it does not actually list (no-guess)."""
         super().__init__(fetcher, config)
         self._force_mic = force_mic
-
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
 
     def discover(self, entity: Entity) -> list[Document]:
         """Return the issuer's Euronext notices.

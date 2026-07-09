@@ -62,6 +62,11 @@ The confidence gate (§4 of the design doc):
 """
 from __future__ import annotations
 
+import xml.etree.ElementTree as _ET
+from datetime import date as _date
+
+from ._common import _tol
+
 # ---------------------------------------------------------------------------
 # The curated concept pack: curated key -> (FSA local name, human label). Each
 # entry is a directly-tagged figure; emitted when present, suppressed (with a
@@ -85,13 +90,6 @@ _REVENUE = "Revenue"
 _PROVISIONS = "Provisions"
 _SHORT = "ShorttermLiabilitiesOtherThanProvisions"
 _LONG = "LongtermLiabilitiesOtherThanProvisions"
-
-
-def _tol(scale: float) -> float:
-    """Absolute tolerance for a balance identity at magnitude ``scale``:
-    ``max(2, 0.005 * |scale|)`` — 0.5%, but never tighter than 2 DKK (so tiny
-    micro-entity filings are not tripped by rounding)."""
-    return max(2.0, 0.005 * abs(scale))
 
 
 def map_fsa_facts(parsed: dict) -> dict:
@@ -258,9 +256,6 @@ def _emit_maturity_split(emit, suppress, liabilities, short, long, provisions):
 # Path A — Virk ESEF bare-XBRL parser (listed issuers, IFRS)
 # ===========================================================================
 
-import xml.etree.ElementTree as _ET
-from datetime import date as _date
-
 # XBRL instance namespace URIs
 _NS_XBRLI = "http://www.xbrl.org/2003/instance"
 _NS_XSI = "http://www.w3.org/2001/XMLSchema-instance"
@@ -425,9 +420,13 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     import warnings
 
     flat = parse_virk_esef_xml(xml_bytes)
+    # E-I4 (sector honesty): a DK-ESEF filer is identified by LEI only — no SIC/NACE,
+    # so its sector is UNKNOWN. Pass sector_known=False (mirroring the EU pillar in
+    # eu/financials.py) so is_financial resolves to None and the bank/insurer-sensitive
+    # derived metrics are stamped sector_relevant=None instead of a false True.
     summaries = summaries_from_flat(
         flat, concepts=IFRS_CONCEPTS,
-        company="", company_current="", sic=None,
+        company="", company_current="", sic=None, sector_known=False,
     )
 
     # Balance gate: Assets == Equity + Liabilities within tolerance.

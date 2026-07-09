@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # ---------------------------------------------------------------------------
 # Module constants
@@ -107,10 +107,6 @@ class StoriBE(OamSource):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
 
     def discover(self, entity: Entity) -> list[Document]:
         now = datetime.now(timezone.utc).isoformat()

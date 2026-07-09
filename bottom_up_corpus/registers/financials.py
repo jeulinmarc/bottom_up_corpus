@@ -13,13 +13,21 @@ import json
 import os
 import re
 import tempfile
-from datetime import date
 from pathlib import Path
 
 from ..config import Config
 from ..eu.oim import flatten_oim_json
-from ..financials import PeriodSummary, make_row_base, rows_from_base, stamp_leverage_basis
-from ..storage import Storage, _atomic_write_text
+from ..financials import rows_from_base
+from ..storage import Storage
+from ._common import (
+    _base,
+    _emit_entity_rows,
+    _emit_mapped,
+    _finalise_coverage,
+    _lei_or_none,
+    _make_out,
+    _summary,
+)
 from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
 from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
@@ -54,24 +62,6 @@ _YTUNNUS_RE = re.compile(r"(\d{7}-\d)")
 _BASIS_BORROWINGS = "borrowings"
 _BASIS_TOTAL_LIABILITIES = "total_liabilities"
 
-# ISO-17442 LEI: exactly 20 upper-case alphanumerics. Used on the DK path to
-# populate the `lei` column when the entity_id is itself a LEI (ESEF filers).
-_LEI_RE = re.compile(r"[A-Z0-9]{20}\Z")
-
-
-def _lei_or_none(entity_id: str) -> "str | None":
-    """Return ``entity_id`` when it is a syntactic LEI (ISO-17442), else None."""
-    return entity_id if _LEI_RE.match(entity_id or "") else None
-
-
-# Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
-# never breaks out goodwill / intangibles, so the engine's tangible_book_value
-# (= common equity − goodwill − intangibles, both defaulting to 0) collapses to `equity`
-# and would silently OVERSTATE true TBV for any obligor carrying intangibles. We
-# structurally cannot compute it from the register, so we suppress it (and its per-share
-# form, already absent for want of a share count) rather than emit a misleading figure.
-_SUPPRESSED_CONCEPTS = {"tangible_book_value", "tangible_book_value_per_share"}
-
 
 def _dedupe_latest(entries: list[dict]) -> list[dict]:
     """Collapse raw Brreg entries so each (regnskapsperiode.tilDato, regnskapstype)
@@ -94,98 +84,11 @@ def _dedupe_latest(entries: list[dict]) -> list[dict]:
     return list(best.values())
 
 
-def _summary(
-    mapped: dict, name: str,
-    *, sec_form: str = "brreg", accession: str | None = None,
-) -> PeriodSummary:
-    """Build a PeriodSummary from a ``mapped`` dict (NO or UK)."""
-    pe = date.fromisoformat(mapped["period_end"])
-    acc = accession if accession is not None else f"{sec_form}-{pe.isoformat()}"
-    return PeriodSummary(
-        period_end=pe, frequency="annual", publication_date=None, sec_form=sec_form,
-        accession=acc, company=name, company_current=name,
-        values=mapped["values"], currency=mapped["currency"], sic=None)
-
-
-# ARCH-C1: which national identifier a register's ``entity_id`` is, keyed by the
-# register ``source``. erst-ifrs is special — its entity_id is the filer's LEI on the
-# from-files path but the CVR on the live-API path — so ``_base`` resolves ``id_scheme``
-# to "lei" whenever the entity_id is a syntactic LEI, and only otherwise consults this map.
-_SOURCE_ID_SCHEME: dict[str, str] = {
-    "brreg": "orgnr", "companies_house": "companies_house", "bnb": "kbo",
-    "lbr": "rcs", "prh": "ytunnus", "erst-fsa": "cvr", "erst-ifrs": "cvr",
-    "rik": "registrikood", "registeruz": "ico",
-}
-
-
-def _base(
-    entity_id: str, lei, mapped: dict, summary: PeriodSummary,
-    *, country: str, source: str,
-) -> dict:
-    """Build the canonical RowBase (identity + provenance + period columns), register-
-    filled: entity_id = the national number (or the LEI, for ESEF filers), id_scheme
-    per :data:`_SOURCE_ID_SCHEME`, source = the register tag, accession = the summary's
-    computed accession. sic / is_financial are None (registers carry no industry
-    classification); basis is the register's company/consolidated flag. ``frequency``
-    now comes from the summary (annual) rather than being hardcoded (ARCH-C1)."""
-    id_scheme = "lei" if _lei_or_none(entity_id) else _SOURCE_ID_SCHEME.get(source)
-    return make_row_base(
-        summary, entity_id=entity_id, id_scheme=id_scheme, lei=lei, country=country,
-        source=source, form=None, accession=summary.accession,
-        sic=None, is_financial=None, basis=mapped["basis"])
-
-
-def _emit_entity_rows(
-    entity_id: str, rows: list[dict], n_periods: int,
-    cov_base: dict, storage: Storage, out: dict, coverage: list[dict],
-    *, write: bool, leverage_basis: "str | None" = None,
-) -> None:
-    """Shared tail: write the financials table, update counters, append coverage entry.
-
-    Handles both the ``no-financials`` (empty rows) and ``ok`` paths. Error and
-    ``unbalanced`` paths are handled by the individual producers before calling here.
-
-    Parameters
-    ----------
-    entity_id:  Key for ``write_register_financials_table`` and ``paths``.
-    rows:       Pre-built row list from ``rows_from_base``; may be empty.
-    n_periods:  Number of source periods that contributed rows (for the coverage entry).
-    cov_base:   Dict of coverage-identifying fields (e.g. ``{"orgnr": …}`` for NO,
-                ``{"ch_number": …}`` for UK); ``status`` and ``periods`` are added here.
-    storage:    Storage instance for ``write_register_financials_table``.
-    out:        Mutable summary dict; ``no_financials`` / ``with_financials`` / ``periods``
-                / ``paths`` are updated in-place.
-    coverage:   Mutable list; one entry is appended.
-    write:      When False, skip the disk write and ``paths`` update.
-    leverage_basis:  ``"borrowings"`` or ``"total_liabilities"`` — the producer
-                declares which debt definition backs the leverage-derived rows; it
-                is stamped onto them (see :func:`stamp_leverage_basis`). ``None``
-                (the default, e.g. FI which emits no leverage rows) leaves the
-                field absent.
-    """
-    # Single choke point: drop concepts that are structurally unprovable from any
-    # register source.  Filtering here — rather than in each individual producer —
-    # means no new producer can accidentally emit them.
-    rows = [row for row in rows if row.get("concept") not in _SUPPRESSED_CONCEPTS]
-    # C1: stamp the leverage basis onto the leverage-derived rows (no-op if None).
-    stamp_leverage_basis(rows, leverage_basis)
-    if not rows:
-        coverage.append({**cov_base, "status": "no-financials"})
-        out["no_financials"] += 1
-        return
-    out["periods"] += n_periods
-    out["with_financials"] += 1
-    if write:
-        out["paths"].append(storage.write_register_financials_table(entity_id, rows))
-    coverage.append({**cov_base, "status": "ok", "periods": n_periods})
-
-
 def build_register_financials(specs, *, fetcher, config: Config, write: bool = True) -> dict:
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out = {"entities": 0, "with_financials": 0, "no_financials": 0,
-           "unbalanced": 0, "errors": 0, "periods": 0, "paths": []}
+    out = _make_out()
     for r in resolved:
         out["entities"] += 1
         if not r.get("orgnr"):
@@ -223,13 +126,7 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
                              "status": "error", "error": str(exc)})
             out["errors"] += 1
             continue
-    if write:
-        cov = config.data_dir / "reports" / "register_coverage_brreg.jsonl"
-        _atomic_write_text(cov, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "brreg", write=write)
 
 
 def build_ch_financials(
@@ -271,8 +168,7 @@ def build_ch_financials(
 
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {"entities": 0, "with_financials": 0, "no_financials": 0,
-                 "unbalanced": 0, "errors": 0, "periods": 0, "paths": []}
+    out = _make_out()
 
     try:
         for ch_number, html_bytes in iter_ch_bulk(zip_path, limit=limit):
@@ -304,40 +200,15 @@ def build_ch_financials(
                     out["no_financials"] += 1
                     continue
 
-                # NetAssets != Equity -> whole filing rejected
-                if mapped["unbalanced"]:
-                    cov = {**cov_base, "status": "unbalanced"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["unbalanced"] += 1
-                    continue
-
-                # No emittable values (but not an outright unbalanced rejection)
-                if not mapped.get("values"):
-                    cov = {**cov_base, "status": "no-financials"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["no_financials"] += 1
-                    continue
-
-                s = _summary(
-                    mapped, ch_number,
-                    sec_form="companies_house",
-                    accession=f"ch-{ch_number}-{mapped['period_end']}",
-                )
-                base = _base(ch_number, None, mapped, s, country="GB",
-                             source="companies_house")
-                rows = list(rows_from_base(base, s))
-
-                cov = dict(cov_base)
-                if mapped.get("suppressed"):
-                    cov["suppressed"] = mapped["suppressed"]
                 # UK short_term_debt mirrors current liabilities so total_debt
                 # reconstructs total liabilities -> a gearing proxy, not borrowings.
-                _emit_entity_rows(ch_number, rows, 1, cov, storage, out, coverage,
-                                  write=write, leverage_basis=_BASIS_TOTAL_LIABILITIES)
+                # (accession prefix "ch" differs from source "companies_house".)
+                _emit_mapped(
+                    mapped, ch_number, None, None, cov_base,
+                    country="GB", source="companies_house", form="ch",
+                    leverage_basis=_BASIS_TOTAL_LIABILITIES,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
 
             except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch
                 coverage.append({**cov_base, "status": "error", "error": str(exc)})
@@ -348,14 +219,7 @@ def build_ch_financials(
         if own_cntlr:
             cntlr.close()
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_companies_house.jsonl"
-        _atomic_write_text(cov_path,
-                           "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "companies_house", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -385,38 +249,12 @@ def _be_pipeline(
     flat, pe = parse_bnb_document(xbrl_source)
     mapped = map_bnb_facts(flat, period_end=pe)
 
-    cov_base: dict = {"be_number": entity_id, "lei": lei}
-
-    if mapped["unbalanced"]:
-        cov = {**cov_base, "status": "unbalanced"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["unbalanced"] += 1
-        return
-
-    if not mapped.get("values"):
-        cov = {**cov_base, "status": "no-financials"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["no_financials"] += 1
-        return
-
-    s = _summary(
-        mapped, name or entity_id,
-        sec_form="bnb",
-        accession=f"bnb-{entity_id}-{mapped['period_end']}",
-    )
-    base = _base(entity_id, lei, mapped, s, country="BE", source="bnb")
-    rows = list(rows_from_base(base, s))
-
-    cov = dict(cov_base)
-    if mapped.get("suppressed"):
-        cov["suppressed"] = mapped["suppressed"]
     # BE emits real m51 financial borrowings (x-checked) -> borrowings-based leverage.
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write,
-                      leverage_basis=_BASIS_BORROWINGS)
+    _emit_mapped(
+        mapped, entity_id, lei, name, {"be_number": entity_id, "lei": lei},
+        country="BE", source="bnb", form="bnb", leverage_basis=_BASIS_BORROWINGS,
+        storage=storage, out=out, coverage=coverage, write=write,
+    )
 
 
 def build_be_financials_from_files(
@@ -447,10 +285,7 @@ def build_be_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         out["entities"] += 1
@@ -476,14 +311,7 @@ def build_be_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_bnb.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "bnb", write=write)
 
 
 def build_lu_financials_from_files(
@@ -515,10 +343,7 @@ def build_lu_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         path_obj = Path(str(path))
@@ -540,50 +365,20 @@ def build_lu_financials_from_files(
             try:
                 mapped = map_lu_entity(declarer["declarations"])
 
-                if mapped["unbalanced"]:
-                    cov = {**cov_base, "status": "unbalanced"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["unbalanced"] += 1
-                    continue
-
-                if not mapped.get("values"):
-                    cov = {**cov_base, "status": "no-financials"}
-                    if mapped.get("suppressed"):
-                        cov["suppressed"] = mapped["suppressed"]
-                    coverage.append(cov)
-                    out["no_financials"] += 1
-                    continue
-
-                s = _summary(
-                    mapped, declarer.get("name") or entity_id,
-                    sec_form="lbr",
-                    accession=f"lbr-{entity_id}-{mapped['period_end']}",
-                )
-                base = _base(entity_id, None, mapped, s, country="LU", source="lbr")
-                rows = list(rows_from_base(base, s))
-
-                cov = dict(cov_base)
-                if mapped.get("suppressed"):
-                    cov["suppressed"] = mapped["suppressed"]
                 # LU maps real borrowings (ecdf financial-debt lines) -> borrowings basis.
-                _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
-                                  write=write, leverage_basis=_BASIS_BORROWINGS)
+                _emit_mapped(
+                    mapped, entity_id, None, declarer.get("name"), cov_base,
+                    country="LU", source="lbr", form="lbr",
+                    leverage_basis=_BASIS_BORROWINGS,
+                    storage=storage, out=out, coverage=coverage, write=write,
+                )
 
             except Exception as exc:  # noqa: BLE001 — record + skip, keep the batch going
                 coverage.append({**cov_base, "status": "error", "error": str(exc)})
                 out["errors"] += 1
                 continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_lbr.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "lbr", write=write)
 
 
 def build_be_financials(
@@ -624,10 +419,7 @@ def build_be_financials(
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for r in resolved:
         out["entities"] += 1
@@ -663,14 +455,7 @@ def build_be_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_bnb.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "bnb", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -717,38 +502,13 @@ def _fi_pipeline(
     parsed = parse_fi_facts(xbrl_source)
     mapped = map_fi_facts(parsed)
 
-    cov_base: dict = {"business_id": entity_id, "lei": lei}
-
-    if mapped["unbalanced"]:
-        cov = {**cov_base, "status": "unbalanced"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["unbalanced"] += 1
-        return
-
-    if not mapped.get("values"):
-        cov = {**cov_base, "status": "no-financials"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["no_financials"] += 1
-        return
-
-    s = _summary(
-        mapped, name or entity_id,
-        sec_form="prh",
-        accession=f"prh-{entity_id}-{mapped['period_end']}",
-    )
-    base = _base(entity_id, lei, mapped, s, country="FI", source="prh")
-    rows = list(rows_from_base(base, s))
-
-    cov = dict(cov_base)
-    if mapped.get("suppressed"):
-        cov["suppressed"] = mapped["suppressed"]
     # FI suppresses the maturity split, so the engine emits NO leverage rows —
     # there is nothing to stamp, hence no leverage_basis (left None).
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write)
+    _emit_mapped(
+        mapped, entity_id, lei, name, {"business_id": entity_id, "lei": lei},
+        country="FI", source="prh", form="prh", leverage_basis=None,
+        storage=storage, out=out, coverage=coverage, write=write,
+    )
 
 
 def build_fi_financials_from_files(
@@ -773,10 +533,7 @@ def build_fi_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         out["entities"] += 1
@@ -794,14 +551,7 @@ def build_fi_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_prh.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "prh", write=write)
 
 
 def build_fi_financials(
@@ -838,10 +588,7 @@ def build_fi_financials(
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for r in resolved:
         out["entities"] += 1
@@ -877,14 +624,7 @@ def build_fi_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_prh.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "prh", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -981,40 +721,14 @@ def _dk_fsa_pipeline(
     parsed = parse_fsa_facts(xml_bytes)
     mapped = map_fsa_facts(parsed)
 
-    cov_base: dict = {"cvr": entity_id, "lei": lei}
-
-    if mapped["unbalanced"]:
-        cov = {**cov_base, "status": "unbalanced"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["unbalanced"] += 1
-        return
-
-    if not mapped.get("values"):
-        cov = {**cov_base, "status": "no-financials"}
-        if mapped.get("suppressed"):
-            cov["suppressed"] = mapped["suppressed"]
-        coverage.append(cov)
-        out["no_financials"] += 1
-        return
-
-    s = _summary(
-        mapped, entity_id,
-        sec_form="erst-fsa",
-        accession=f"erst-fsa-{entity_id}-{mapped['period_end']}",
-    )
-    # M1: when the entity_id is itself a LEI, surface it in the `lei` column too.
-    row_lei = lei or _lei_or_none(entity_id)
-    base = _base(entity_id, row_lei, mapped, s, country="DK", source="erst-fsa")
-    rows = list(rows_from_base(base, s))
-
-    cov = dict(cov_base)
-    if mapped.get("suppressed"):
-        cov["suppressed"] = mapped["suppressed"]
     # DK-GAAP FSA maps the maturity split of TOTAL liabilities -> gearing proxy.
-    _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage, write=write,
-                      leverage_basis=_BASIS_TOTAL_LIABILITIES)
+    # _emit_mapped surfaces a LEI entity_id into the `lei` column (M1) for free.
+    _emit_mapped(
+        mapped, entity_id, lei, None, {"cvr": entity_id, "lei": lei},
+        country="DK", source="erst-fsa", form="erst-fsa",
+        leverage_basis=_BASIS_TOTAL_LIABILITIES,
+        storage=storage, out=out, coverage=coverage, write=write,
+    )
 
 
 def _dk_esef_pipeline(
@@ -1140,10 +854,7 @@ def build_dk_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         out["entities"] += 1
@@ -1180,14 +891,7 @@ def build_dk_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_erst.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "erst", write=write)
 
 
 def build_dk_financials(
@@ -1227,10 +931,7 @@ def build_dk_financials(
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for r in resolved:
         out["entities"] += 1
@@ -1281,14 +982,7 @@ def build_dk_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_erst.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "erst", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -1337,10 +1031,7 @@ def build_ee_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     # --- Pass 1: stream reports up to *limit*, grouping by registrikood.
     # Deduplication key = period_end within each registrikood; last-seen report wins
@@ -1432,14 +1123,7 @@ def build_ee_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_rik.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "rik", write=write)
 
 
 def build_ee_financials(
@@ -1506,20 +1190,15 @@ def build_sk_financials_from_files(
     write:
         Persist rows + coverage (default True); False for dry-run.
     """
-    import json as _json_mod
-
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     out["entities"] += 1
     with open(vykaz_path, encoding="utf-8") as fh:
-        vykaz = _json_mod.load(fh)
+        vykaz = json.load(fh)
     with open(sablona_path, encoding="utf-8") as fh:
-        sablona = _json_mod.load(fh)
+        sablona = json.load(fh)
 
     ico = (vykaz.get("obsah") or {}).get("titulnaStrana", {}).get("ico")
     entity_id = ico or Path(str(vykaz_path)).stem
@@ -1528,47 +1207,19 @@ def build_sk_financials_from_files(
     try:
         mapped = _map_sk_vykaz(vykaz, sablona)
 
-        if mapped["unbalanced"]:
-            cov = {**cov_base, "status": "unbalanced"}
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            coverage.append(cov)
-            out["unbalanced"] += 1
-
-        elif not mapped.get("values"):
-            cov = {**cov_base, "status": "no-financials"}
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            coverage.append(cov)
-            out["no_financials"] += 1
-
-        else:
-            s = _summary(
-                mapped, entity_id,
-                sec_form="registeruz",
-                accession=f"registeruz-{entity_id}-{mapped['period_end']}",
-            )
-            base = _base(entity_id, None, mapped, s, country="SK", source="registeruz")
-            rows = list(rows_from_base(base, s))
-            cov = dict(cov_base)
-            if mapped.get("suppressed"):
-                cov["suppressed"] = mapped["suppressed"]
-            # SK maps real bank-loan borrowings → borrowings-based leverage.
-            _emit_entity_rows(entity_id, rows, 1, cov, storage, out, coverage,
-                              write=write, leverage_basis=_BASIS_BORROWINGS)
+        # SK maps real bank-loan borrowings → borrowings-based leverage.
+        _emit_mapped(
+            mapped, entity_id, None, None, cov_base,
+            country="SK", source="registeruz", form="registeruz",
+            leverage_basis=_BASIS_BORROWINGS,
+            storage=storage, out=out, coverage=coverage, write=write,
+        )
 
     except Exception as exc:  # noqa: BLE001 — record + skip
         coverage.append({**cov_base, "status": "error", "error": str(exc)})
         out["errors"] += 1
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_registeruz.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "registeruz", write=write)
 
 
 def build_sk_financials(
@@ -1605,10 +1256,7 @@ def build_sk_financials(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
     sablona_cache: dict[int, dict] = {}  # id_sablony → sablona dict (few distinct values)
 
     n_entities = 0
@@ -1711,11 +1359,4 @@ def build_sk_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_registeruz.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "registeruz", write=write)

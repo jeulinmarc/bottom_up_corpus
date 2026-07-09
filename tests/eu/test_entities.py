@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
-import pytest
-from bottom_up_corpus.eu.entities import Entity, resolve_entities
+from bottom_up_corpus.eu.entities import resolve_entities
 
 FIX = Path(__file__).parent.parent / "fixtures" / "eu"
 

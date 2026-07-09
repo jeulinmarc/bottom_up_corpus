@@ -5,7 +5,6 @@ from datetime import date
 import pytest
 
 from bottom_up_corpus.financials import (
-    FlowSeries,
     _build_flow_series,
     _standalone_quarter,
     _ttm_flow,

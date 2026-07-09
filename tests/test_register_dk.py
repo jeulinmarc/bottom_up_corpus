@@ -402,6 +402,31 @@ def test_map_dk_esef_balance_gate_holds():
     assert s.currency == "DKK"
 
 
+def test_map_dk_esef_sector_unknown_no_false_sector_relevant():
+    """E-I4 (#68 follow-up): a DK-ESEF filer is identified by LEI only (no SIC/NACE),
+    so its sector is UNKNOWN. Its sector-sensitive derived metrics must be stamped
+    ``sector_relevant=None`` (honest "unknown"), never a false ``True``; the
+    non-sector-sensitive metrics stay ``True``."""
+    from bottom_up_corpus.registers.concepts_dk import map_dk_esef
+    from bottom_up_corpus.financials import SECTOR_SENSITIVE
+
+    s = map_dk_esef(open(ESEF_SLICE, "rb").read())[0]
+    # Sector is unknown (mirrors the EU pillar), so is_financial declines to assert.
+    assert s.sector_known is False
+    assert s.is_financial is None
+
+    # A sector-sensitive metric present in the fixture must NOT assert relevance.
+    assert "net_debt" in s.derived
+    assert s.derived["net_debt"]["sector_relevant"] is None
+    # No sector-sensitive derived metric is ever stamped a false True.
+    assert all(
+        s.derived[k]["sector_relevant"] is None
+        for k in s.derived if k in SECTOR_SENSITIVE
+    )
+    # A non-sector-sensitive metric (leverage vs equity) is still relevant.
+    assert s.derived["debt_to_equity"]["sector_relevant"] is True
+
+
 # ---------------------------------------------------------------------------
 # R-I2: DK-ESEF balance gate must DROP (not just warn) unbalanced summaries
 # ---------------------------------------------------------------------------

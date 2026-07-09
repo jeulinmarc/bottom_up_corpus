@@ -35,7 +35,7 @@ from datetime import date, datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # ---------------------------------------------------------------------------
 # Module constants
@@ -187,10 +187,6 @@ class NewsWebNO(OamSource):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def list_issuers(self) -> list[IssuerRef]:
-        """Return empty — full enumeration is a scale-up concern."""
-        return []
 
     def discover(self, entity: Entity) -> list[Document]:
         """Return all filings for *entity* from Oslo Børs NewsWeb.

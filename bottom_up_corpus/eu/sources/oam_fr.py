@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from ..documents import Document
 from ..entities import Entity
-from ..oam_base import IssuerRef, OamSource
+from ..oam_base import OamSource
 
 # LEIs and ISINs are uppercase alphanumeric; reject anything else to prevent
 # stray quotes from breaking or altering the ODS where-clause.
@@ -62,9 +62,6 @@ def _file_kind(url: str) -> str:
 class InfoFinanciereFR(OamSource):
     name = "oam-fr"
     country = "FR"
-
-    def list_issuers(self) -> list[IssuerRef]:
-        return []  # full enumeration via ODS facets is a scale-up concern; not needed for the bounded test
 
     def discover(self, entity: Entity) -> list[Document]:
         from urllib.parse import quote

@@ -44,11 +44,8 @@ The confidence gate (§4 of the design doc):
 """
 from __future__ import annotations
 
-import re
 
-# ISO-4217 currency code: exactly 3 uppercase ASCII letters. Rejects the
-# non-monetary units the parser also yields ("pure", "shares").
-_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+from ._common import _CURRENCY_RE, _tol
 
 # Curated key -> (bas, part, required-members). The canonical fact for a key has
 # ``dims == {"bas":bas, "part":part, "prd":"m1"} ∪ required`` and NO other
@@ -82,12 +79,6 @@ _ALWAYS_SUPPRESS: dict[str, str] = {
 # a maturity bucket (rst) split by instrument type (typ). Anything else under
 # ``m51/part=m3/ntr=m3`` is a deviating structure we cannot cleanly sum.
 _TRANCHE_DIMS = {"bas", "ntr", "part", "prd", "rst", "typ"}
-
-
-def _tol(scale: float) -> float:
-    """Absolute tolerance for a balance identity at magnitude ``scale``:
-    ``max(2, 0.005 * |scale|)`` — 0.5%, but never tighter than 2 EUR."""
-    return max(2.0, 0.005 * abs(scale))
 
 
 def _currency(flat: list[dict]) -> str:
