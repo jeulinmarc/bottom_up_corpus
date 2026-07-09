@@ -20,6 +20,7 @@ from ..config import Config
 from ..eu.oim import flatten_oim_json
 from ..financials import PeriodSummary, make_row_base, rows_from_base, stamp_leverage_basis
 from ..storage import Storage, _atomic_write_text
+from ._common import _finalise_coverage, _make_out
 from .bnb_cbso import fetch_bnb_deposit as _fetch_bnb_deposit
 from .bnb_xbrl import open_bnb_deposit, parse_bnb_document
 from .ch_bulk import iter_ch_bulk
@@ -184,8 +185,7 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out = {"entities": 0, "with_financials": 0, "no_financials": 0,
-           "unbalanced": 0, "errors": 0, "periods": 0, "paths": []}
+    out = _make_out()
     for r in resolved:
         out["entities"] += 1
         if not r.get("orgnr"):
@@ -223,13 +223,7 @@ def build_register_financials(specs, *, fetcher, config: Config, write: bool = T
                              "status": "error", "error": str(exc)})
             out["errors"] += 1
             continue
-    if write:
-        cov = config.data_dir / "reports" / "register_coverage_brreg.jsonl"
-        _atomic_write_text(cov, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "brreg", write=write)
 
 
 def build_ch_financials(
@@ -271,8 +265,7 @@ def build_ch_financials(
 
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {"entities": 0, "with_financials": 0, "no_financials": 0,
-                 "unbalanced": 0, "errors": 0, "periods": 0, "paths": []}
+    out = _make_out()
 
     try:
         for ch_number, html_bytes in iter_ch_bulk(zip_path, limit=limit):
@@ -348,14 +341,7 @@ def build_ch_financials(
         if own_cntlr:
             cntlr.close()
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_companies_house.jsonl"
-        _atomic_write_text(cov_path,
-                           "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "companies_house", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -447,10 +433,7 @@ def build_be_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         out["entities"] += 1
@@ -476,14 +459,7 @@ def build_be_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_bnb.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "bnb", write=write)
 
 
 def build_lu_financials_from_files(
@@ -515,10 +491,7 @@ def build_lu_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         path_obj = Path(str(path))
@@ -576,14 +549,7 @@ def build_lu_financials_from_files(
                 out["errors"] += 1
                 continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_lbr.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "lbr", write=write)
 
 
 def build_be_financials(
@@ -624,10 +590,7 @@ def build_be_financials(
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for r in resolved:
         out["entities"] += 1
@@ -663,14 +626,7 @@ def build_be_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_bnb.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "bnb", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -773,10 +729,7 @@ def build_fi_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         out["entities"] += 1
@@ -794,14 +747,7 @@ def build_fi_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_prh.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "prh", write=write)
 
 
 def build_fi_financials(
@@ -838,10 +784,7 @@ def build_fi_financials(
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for r in resolved:
         out["entities"] += 1
@@ -877,14 +820,7 @@ def build_fi_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_prh.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "prh", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -1140,10 +1076,7 @@ def build_dk_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for path in paths:
         out["entities"] += 1
@@ -1180,14 +1113,7 @@ def build_dk_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_erst.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "erst", write=write)
 
 
 def build_dk_financials(
@@ -1227,10 +1153,7 @@ def build_dk_financials(
     resolved = resolve_register_specs(specs, fetcher=fetcher)
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     for r in resolved:
         out["entities"] += 1
@@ -1281,14 +1204,7 @@ def build_dk_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_erst.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "erst", write=write)
 
 
 # ---------------------------------------------------------------------------
@@ -1337,10 +1253,7 @@ def build_ee_financials_from_files(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     # --- Pass 1: stream reports up to *limit*, grouping by registrikood.
     # Deduplication key = period_end within each registrikood; last-seen report wins
@@ -1432,14 +1345,7 @@ def build_ee_financials_from_files(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_rik.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "rik", write=write)
 
 
 def build_ee_financials(
@@ -1510,10 +1416,7 @@ def build_sk_financials_from_files(
 
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
 
     out["entities"] += 1
     with open(vykaz_path, encoding="utf-8") as fh:
@@ -1561,14 +1464,7 @@ def build_sk_financials_from_files(
         coverage.append({**cov_base, "status": "error", "error": str(exc)})
         out["errors"] += 1
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_registeruz.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "registeruz", write=write)
 
 
 def build_sk_financials(
@@ -1605,10 +1501,7 @@ def build_sk_financials(
     """
     storage = Storage(config)
     coverage: list[dict] = []
-    out: dict = {
-        "entities": 0, "with_financials": 0, "no_financials": 0,
-        "unbalanced": 0, "errors": 0, "periods": 0, "paths": [],
-    }
+    out = _make_out()
     sablona_cache: dict[int, dict] = {}  # id_sablony → sablona dict (few distinct values)
 
     n_entities = 0
@@ -1711,11 +1604,4 @@ def build_sk_financials(
             out["errors"] += 1
             continue
 
-    if write:
-        cov_path = config.data_dir / "reports" / "register_coverage_registeruz.jsonl"
-        _atomic_write_text(
-            cov_path, "\n".join(json.dumps(c, default=str) for c in coverage))
-        out["coverage_path"] = str(cov_path)
-    else:
-        out["coverage_path"] = None
-    return out
+    return _finalise_coverage(out, coverage, config, "registeruz", write=write)
