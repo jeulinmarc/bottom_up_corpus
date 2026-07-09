@@ -412,10 +412,9 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     Pipeline: ``parse_virk_esef_xml`` → ``summaries_from_flat(IFRS_CONCEPTS)``
     (100 % reuse of the EU IFRS engine — no Arelle, borrowings-based leverage
     via ``NoncurrentBorrowings`` + ``CurrentBorrowings``). The balance gate
-    ``Assets == Equity + Liabilities`` is verified for each summary and a
-    warning is emitted when it fails; the summary is retained rather than
-    discarded (partial financials are still useful downstream, and the caller
-    can apply stricter filtering).
+    ``Assets == Equity + Liabilities`` is enforced: summaries that fail the
+    gate are **dropped** and never emitted (parity with all other register
+    engines — an unbalanced ESEF summary must not be propagated downstream).
 
     Returns a list of :class:`PeriodSummary` objects (same type that
     ``eu.financials.build_eu_financials`` produces), ready for
@@ -432,6 +431,9 @@ def map_dk_esef(xml_bytes: bytes) -> list:
     )
 
     # Balance gate: Assets == Equity + Liabilities within tolerance.
+    # Parity with all other registers: DROP the summary when the gate fails rather
+    # than only warning — an unbalanced ESEF filing must NOT be emitted as "ok".
+    balanced: list = []
     for s in summaries:
         v = s.values
         assets = (v.get("assets") or {}).get("value")
@@ -444,8 +446,10 @@ def map_dk_esef(xml_bytes: bytes) -> list:
                 warnings.warn(
                     f"ESEF balance gate ({s.period_end}): Assets {assets:,.0f} != "
                     f"Equity {equity_v:,.0f} + Liabilities {liabilities:,.0f} "
-                    f"(diff={diff:.0f}, tol={tol:.0f}) — filing may be unreliable",
+                    f"(diff={diff:.0f}, tol={tol:.0f}) — summary dropped (unbalanced)",
                     stacklevel=2,
                 )
+                continue  # DROP: do not emit this period
+        balanced.append(s)
 
-    return summaries
+    return balanced

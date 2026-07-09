@@ -447,12 +447,66 @@ def test_i3_malformed_record_does_not_abort_batch(tmp_path):
     assert rep["errors"] == 1                         # counted separately, not as no_financials
     assert rep["no_financials"] == 0
     assert rep["with_financials"] == 1
-    cov_path = tmp_path / "reports" / "register_coverage.jsonl"
+    cov_path = tmp_path / "reports" / "register_coverage_brreg.jsonl"
     assert cov_path.exists()                          # coverage write still ran post-loop
     cov = {c["orgnr"]: c for c in (json.loads(x) for x in cov_path.read_text().splitlines())}
     assert cov["100000000"]["status"] == "error" and "error" in cov["100000000"]
     assert cov["923609016"]["status"] == "ok"
     assert (tmp_path / "financials_register" / "923609016.jsonl").exists()
+
+
+# --- R-I1: NO balance gate regression tests -----------------------------------
+
+def test_ri1_map_balanced_entry_has_6_key_shape():
+    """map_brreg_entry returns the 6-key shape (unbalanced=False) for a balanced entry."""
+    m = map_brreg_entry(_KONSERN_2022)
+    assert "unbalanced" in m
+    assert "suppressed" in m
+    assert m["unbalanced"] is False
+    assert m["suppressed"] == []
+
+
+def test_ri1_unbalanced_entry_returns_empty_values():
+    """Synthetic entry with assets != equity+liabilities beyond tol → unbalanced=True,
+    values={}.  The KONSERN_2022 fixture is balanced; we corrupt it by halving assets."""
+    import copy
+    bad = copy.deepcopy(_KONSERN_2022)
+    # Set sumEiendeler to half the true value so assets << equity+liabilities
+    bad["eiendeler"]["sumEiendeler"] = 1_000.0   # was 158_021_000_000
+    m = map_brreg_entry(bad)
+    assert m is not None                          # still returns a dict (not None)
+    assert m["unbalanced"] is True
+    assert m["values"] == {}
+    assert any("assets" in str(s) for s in m["suppressed"])
+
+
+def test_ri1_producer_skips_unbalanced_entries(tmp_path):
+    """build_register_financials: an unbalanced entry is counted in out['unbalanced'],
+    produces no rows, and does NOT write a financials JSONL for that entity."""
+    import copy
+    from bottom_up_corpus.registers.financials import build_register_financials
+
+    bad = copy.deepcopy(_KONSERN_2022)
+    bad["eiendeler"]["sumEiendeler"] = 1_000.0   # corrupt assets to force unbalanced
+
+    cfg = Config(data_dir=tmp_path)
+    fetcher = _MultiBrregFetcher({"000000001": [bad], "923609016": [_KONSERN_2022]})
+    rep = build_register_financials(
+        [{"orgnr": "000000001"}, {"orgnr": "923609016"}],
+        fetcher=fetcher, config=cfg, write=True,
+    )
+    assert rep["unbalanced"] == 1, f"expected unbalanced=1, got {rep}"
+    assert rep["with_financials"] == 1
+    assert not (tmp_path / "financials_register" / "000000001.jsonl").exists()
+    assert (tmp_path / "financials_register" / "923609016.jsonl").exists()
+
+
+def test_ri1_real_equinor_fixture_still_balanced(tmp_path):
+    """R-I1 non-regression: the real Equinor KONSERN+SELSKAP fixture is balanced;
+    rows are still emitted and no entity is counted as unbalanced."""
+    _, rows = _run(tmp_path, [_KONSERN_2022, _SELSKAP_2022])
+    assert rows, "must still emit rows for the balanced real fixture"
+    assert any(r["kind"] == "reported" and r["concept"] == "revenue" for r in rows)
 
 
 def test_i3b_heterogeneous_ids_do_not_crash_dedup(tmp_path):
@@ -463,3 +517,49 @@ def test_i3b_heterogeneous_ids_do_not_crash_dedup(tmp_path):
     rep, rows = _run(tmp_path, [a, b])
     assert rep["errors"] == 0 and rep["with_financials"] == 1 and rep["periods"] == 1
     assert any(r["concept"] == "revenue" and r["value"] == 150806000000 for r in rows)
+
+
+# --- R-I3: per-source coverage file, no clobber --------------------------------
+
+def test_ri3_two_registers_same_data_dir_no_clobber(tmp_path):
+    """R-I3 regression: running two different registers into the same data_dir must
+    produce TWO separate coverage files (one per source) — neither clobbers the other.
+
+    Uses NO (build_register_financials → register_coverage_brreg.jsonl) and
+    DK-GAAP FSA (build_dk_financials_from_files → register_coverage_erst.jsonl).
+    """
+    from bottom_up_corpus.registers.financials import (
+        build_register_financials,
+        build_dk_financials_from_files,
+    )
+
+    cfg = Config(data_dir=tmp_path)
+
+    # --- Run NO producer ---
+    build_register_financials(
+        [{"orgnr": "923609016"}],
+        fetcher=_BrregFetcher([_KONSERN_2022]),
+        config=cfg, write=True,
+    )
+
+    # --- Run DK producer on a real FSA fixture ---
+    build_dk_financials_from_files(
+        ["tests/fixtures/dk/dk_30830725_microB_2025.xml"],
+        config=cfg, write=True,
+    )
+
+    reports = tmp_path / "reports"
+    brreg_cov = reports / "register_coverage_brreg.jsonl"
+    erst_cov  = reports / "register_coverage_erst.jsonl"
+
+    assert brreg_cov.exists(), "register_coverage_brreg.jsonl must exist after NO run"
+    assert erst_cov.exists(),  "register_coverage_erst.jsonl must exist after DK run"
+
+    # Each file must contain only its own register's entries
+    brreg_rows = [json.loads(x) for x in brreg_cov.read_text().splitlines() if x.strip()]
+    erst_rows  = [json.loads(x) for x in erst_cov.read_text().splitlines() if x.strip()]
+    assert any("orgnr" in r for r in brreg_rows),  "brreg coverage must have orgnr entries"
+    assert any("cvr"   in r for r in erst_rows),   "erst coverage must have cvr entries"
+    # Crucially: no cross-contamination
+    assert not any("cvr"   in r for r in brreg_rows), "brreg file must not contain DK entries"
+    assert not any("orgnr" in r for r in erst_rows),  "erst file must not contain NO entries"

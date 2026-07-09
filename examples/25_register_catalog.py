@@ -33,7 +33,7 @@ print("   Output : data/financials_register/<ch_number>.jsonl  (country='GB', so
 
 print("\n3. Separate output — never merged with EU or SEC pillars")
 print("   data/financials_register/<entity_id>.jsonl  — curated rows (reported + derived)")
-print("   data/reports/register_coverage.jsonl        — per-entity status")
+print("   data/reports/register_coverage_<source>.jsonl — per-entity status (one file per source:")
 print("   Compare: data/financials_eu/ (ESEF/IFRS), data/financials/ (SEC/US-GAAP)")
 
 print(f"\nNorwegian curated concept pack — NO_FIELDS ({len(NO_FIELDS)} keys):")
@@ -50,4 +50,5 @@ print("        = total liabilities, not pure borrowings (N-GAAP gearing)")
 print("   UK : CurrentAssets − NetCurrentAssets  /  TALCL − NetAssets")
 print("        = derived from structural anchors; emitted atomically or not at all")
 print("   => debt_to_equity / debt_to_assets are total-liabilities-based ratios")
+print("    brreg / companies_house / bnb / lbr / prh / erst-fsa / erst-ifrs / rik / registeruz)")
 print("   See docs/REGISTER_FINANCIALS.md for full caveats")

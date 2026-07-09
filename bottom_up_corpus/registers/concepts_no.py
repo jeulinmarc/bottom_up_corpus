@@ -89,4 +89,19 @@ def map_brreg_entry(entry: dict) -> dict | None:
             "label": "long_term_debt", "tag": "sumGjeld−sumKortsiktigGjeld (derived)"}
     if not values:
         return None
-    return {"period_end": period, "basis": basis, "currency": currency, "values": values}
+    # Balance gate: assets == equity + liabilities within tolerance.
+    # Brreg provides all three fields (sumEiendeler / sumEgenkapital / sumGjeld) so the
+    # check is cheap and guards against malformed submissions reaching the engine.
+    assets_v = (values.get("assets") or {}).get("value")
+    equity_v = (values.get("equity") or {}).get("value")
+    liab_v = (values.get("liabilities") or {}).get("value")
+    unbalanced = False
+    suppressed: list = []
+    if assets_v is not None and equity_v is not None and liab_v is not None:
+        tol = max(2.0, 0.005 * abs(assets_v))
+        if abs(assets_v - (equity_v + liab_v)) > tol:
+            unbalanced = True
+            suppressed = [("__all__", "assets != equity+liabilities")]
+            values = {}
+    return {"period_end": period, "basis": basis, "currency": currency,
+            "values": values, "suppressed": suppressed, "unbalanced": unbalanced}
