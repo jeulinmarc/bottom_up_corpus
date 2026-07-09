@@ -139,9 +139,13 @@ class NsmGB(OamSource):
             # Read total on first response; record truncation immediately if needed.
             # The `total is None` gate runs exactly once, so this can't double-record.
             if total is None:
-                total_obj = hits_env.get("total") or {}
-                total = total_obj.get("value", 0) if isinstance(total_obj, dict) else int(total_obj)
-                if total > _MAX_RESULTS:
+                total_raw = hits_env.get("total")
+                if total_raw is not None:
+                    total_obj = total_raw or {}
+                    total = total_obj.get("value", 0) if isinstance(total_obj, dict) else int(total_obj)
+                # When "total" is absent, pagination is driven by empty hits pages
+                # (mirrors FI/IT pattern) rather than a possibly-missing count.
+                if total is not None and total > _MAX_RESULTS:
                     self._record_error(
                         "truncated",
                         _SEARCH_URL,

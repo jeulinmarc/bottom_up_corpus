@@ -456,13 +456,14 @@ def process_ownership(
                 xml = find_ownership_doc(raw, "E2")
                 if xml:
                     holdings, agg = parse_13f(xml)
+                    agg["value_unit"] = "USD" if rec.filing_date >= date(2023, 1, 3) else "USD_thousands"
                     rep = (rec.period_of_report or rec.filing_date)
                     rep_str = rep.isoformat() if rep else ""
                     storage.write_ownership_summary(
                         rec,
                         render_13f_html(holdings, agg, filer=rec.company or rec.cik, report=rep_str),
                         thirteenf_text(holdings, agg, filer=rec.company or rec.cik, report=rep_str))
-                    rows.extend(thirteenf_rows(rec.cik, rec.accession, holdings))
+                    rows.extend(thirteenf_rows(rec.cik, rec.accession, holdings, rec.filing_date))
                     report.parsed_13f += 1
             else:  # E3 narrative — generic text from fetch_and_store is kept
                 report.passthrough += 1

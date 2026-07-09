@@ -187,11 +187,12 @@ class StoriBE(OamSource):
             self._record_error("peek", f"{_BASE}/result", exc)
             return None, False
 
-        result_count = int(resp.get("resultCount") or 0)
-        if result_count == 0:
-            return None, True  # empty ISIN — skip silently, no error
-
         items = resp.get("storiResultItems") or []
+        result_count = resp.get("resultCount")
+        # Skip (empty ISIN) only when no items AND count is absent-or-zero.
+        # A missing resultCount must not cause us to skip an ISIN that has items.
+        if not items and (result_count is None or int(result_count) == 0):
+            return None, True  # empty ISIN — skip silently, no error
         if not items:
             # resultCount > 0 but no items in peek response — fall through to full search.
             return None, False
@@ -228,8 +229,12 @@ class StoriBE(OamSource):
                 break
 
             if total is None:
-                total = int(resp.get("resultCount") or 0)
-                if total > _MAX_RESULTS:
+                rc = resp.get("resultCount")
+                if rc is not None:
+                    total = int(rc)
+                # When resultCount is absent, total stays None and pagination is
+                # driven by empty pages instead of a count — mirrors FI/IT pattern.
+                if total is not None and total > _MAX_RESULTS:
                     self._record_error(
                         "truncated",
                         f"{_BASE}/result",
@@ -353,6 +358,8 @@ class StoriBE(OamSource):
         if session is None:
             return {}
         resp = session.post(url, json=body, headers=_HEADERS)
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"HTTP {resp.status_code} from {url}")
         return resp.json()
 
     def _get_json(self, url: str) -> object:
@@ -362,6 +369,8 @@ class StoriBE(OamSource):
         if session is None:
             return None
         resp = session.get(url, headers=_HEADERS)
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"HTTP {resp.status_code} from {url}")
         return resp.json()
 
     def _ensure_session(self):

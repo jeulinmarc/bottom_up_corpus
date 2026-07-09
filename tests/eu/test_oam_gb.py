@@ -306,3 +306,47 @@ def test_unsafe_download_link_is_skipped_and_recorded():
 def test_doc_type_empty_or_none_is_other():
     assert _doc_type("") == "other"
     assert _doc_type(None) == "other"
+
+
+# ---------------------------------------------------------------------------
+# A-I2 regression: GB pagination without a "total" field
+# ---------------------------------------------------------------------------
+
+def test_pagination_without_total_field():
+    """Stub returns 2 full pages then empty with NO 'hits.total' field.
+    Old code defaulted absent total to 0 → from_offset=100 >= 0 → stopped after
+    page 1.  Fix: absent total keeps None → paginate until empty hits page."""
+
+    class _NoTotalStub:
+        def __init__(self):
+            self.call_count = 0
+
+        def post_json(self, url, body, **_):
+            self.call_count += 1
+            from_off = body.get("from", 0)
+            if from_off < _PAGE * 2:
+                hits = [{
+                    "_source": {
+                        "disclosure_id": f"id-{from_off}-{i}",
+                        "type": "Annual Financial Report",
+                        "publication_date": "2025-01-01T00:00:00Z",
+                        "download_link": f"NSM/RNS/doc-{from_off}-{i}.pdf",
+                        "tag_esef": "",
+                        "headline": "AR",
+                        "source": "RNS",
+                        "isin": "",
+                        "company": "TEST CO",
+                    }
+                } for i in range(_PAGE)]
+                # NO 'hits.total' key
+                return {"hits": {"hits": hits}}
+            # Empty page → terminates
+            return {"hits": {"hits": []}}
+
+    stub = _NoTotalStub()
+    src = NsmGB(fetcher=stub)
+    docs = src.discover(Entity(lei="TESTLEI", name="Test", country="GB"))
+    assert len(docs) == _PAGE * 2, (
+        f"expected {_PAGE * 2} docs (2 pages × {_PAGE}), got {len(docs)}"
+    )
+    assert not src.errors

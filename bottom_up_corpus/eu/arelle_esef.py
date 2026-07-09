@@ -9,7 +9,7 @@ import zipfile
 _OIM_DOCTYPE = "https://xbrl.org/2021/xbrl-json"
 
 
-def oim_from_esef_zip(zip_path: str, *, cntlr=None) -> dict:
+def oim_from_esef_zip(zip_path: str, *, cntlr=None, config=None) -> dict:
     """An ESEF report-package .zip -> an OIM xBRL-JSON dict.
 
     Pass a shared Arelle ``cntlr`` to amortize the one-time IFRS-taxonomy load
@@ -37,10 +37,13 @@ def oim_from_esef_zip(zip_path: str, *, cntlr=None) -> dict:
     own = cntlr is None
     if own:
         cntlr = Cntlr.Cntlr(logFileName="logToBuffer")
-    try:
-        cntlr.webCache.noCertificateCheck = True   # tolerate SSL-inspection proxies
-    except Exception:  # noqa: BLE001
-        pass
+    # Only disable TLS verification when the caller explicitly opts out (e.g. behind
+    # a trusted SSL-inspection proxy).  Default is always to verify — mirrors Fetcher.
+    if not getattr(config, "verify_tls", True):
+        try:
+            cntlr.webCache.noCertificateCheck = True
+        except Exception:  # noqa: BLE001
+            pass
 
     model = None
     try:

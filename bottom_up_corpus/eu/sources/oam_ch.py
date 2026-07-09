@@ -270,12 +270,16 @@ class DisclosureCH(OamSource):
                 self._record_error("six-search", url, exc)
                 break
             if total is None:
-                total = resp.get("total") or 0
+                t = resp.get("total")
+                if t is not None:
+                    total = t
+                # When "total" is absent, pagination is driven by empty pages
+                # (mirrors FI/IT pattern) rather than a possibly-missing count.
             batch = resp.get("data") or []
             if not batch:
                 break
             items.extend(batch)
-            if len(items) >= total:
+            if total is not None and len(items) >= total:
                 break
         else:
             self._record_error(
