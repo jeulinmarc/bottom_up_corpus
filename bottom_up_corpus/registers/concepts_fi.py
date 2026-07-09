@@ -59,6 +59,8 @@ routed through appropriations, not a clean line), ``cash`` (``x438`` ambiguous),
 """
 from __future__ import annotations
 
+from ._common import _tol
+
 # ---------------------------------------------------------------------------
 # The validated concept pack: curated key -> fi_MC metric code. Every entry is
 # reconciled to the cent on the three real fixtures. ``interest_expense`` is the
@@ -90,13 +92,6 @@ _ALWAYS_SUPPRESS: dict[str, str] = {
 
 # Codes handled by dedicated gate logic rather than the plain pack loop.
 _GATED = {"net_income", "non_current_assets", "assets_current"}
-
-
-def _tol(scale: float) -> float:
-    """Absolute tolerance for a balance identity at magnitude ``scale``:
-    ``max(2, 0.005 * |scale|)`` — 0.5%, but never tighter than 2 EUR (so tiny
-    micro-entity filings are not tripped by rounding)."""
-    return max(2.0, 0.005 * abs(scale))
 
 
 def map_fi_facts(parsed: dict) -> dict:

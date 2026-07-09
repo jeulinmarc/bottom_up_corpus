@@ -53,6 +53,8 @@ all, so a coverage ratio can never be produced from this source.
 """
 from __future__ import annotations
 
+from ._common import _tol
+
 # ---------------------------------------------------------------------------
 # The validated concept pack: curated key -> et-gaap element name. Two keys
 # deliberately share an element: ``liabilities_current`` and ``short_term_debt``
@@ -91,13 +93,6 @@ _ALWAYS_SUPPRESS: dict[str, str] = {
                          "— coverage ratio not computable — suppressed "
                          "(no false data)",
 }
-
-
-def _tol(assets: float) -> float:
-    """Absolute tolerance for the balance identity: ``max(2, 0.005·|Assets|)`` —
-    0.5% of total assets, but never tighter than 2 EUR (so tiny micro-entity
-    filings are not tripped by rounding)."""
-    return max(2.0, 0.005 * abs(assets))
 
 
 def map_ee_report(

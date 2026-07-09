@@ -62,6 +62,8 @@ The confidence gate (§4 of the design doc):
 """
 from __future__ import annotations
 
+from ._common import _tol
+
 # ---------------------------------------------------------------------------
 # The curated concept pack: curated key -> (FSA local name, human label). Each
 # entry is a directly-tagged figure; emitted when present, suppressed (with a
@@ -85,13 +87,6 @@ _REVENUE = "Revenue"
 _PROVISIONS = "Provisions"
 _SHORT = "ShorttermLiabilitiesOtherThanProvisions"
 _LONG = "LongtermLiabilitiesOtherThanProvisions"
-
-
-def _tol(scale: float) -> float:
-    """Absolute tolerance for a balance identity at magnitude ``scale``:
-    ``max(2, 0.005 * |scale|)`` — 0.5%, but never tighter than 2 DKK (so tiny
-    micro-entity filings are not tripped by rounding)."""
-    return max(2.0, 0.005 * abs(scale))
 
 
 def map_fsa_facts(parsed: dict) -> dict:

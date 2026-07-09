@@ -27,6 +27,18 @@ def _lei_or_none(entity_id: str) -> "str | None":
     return entity_id if _LEI_RE.match(entity_id or "") else None
 
 
+# ISO-4217 currency code: exactly three upper-case letters.  Shared by the BE/UK
+# concept mappers to validate the reporting currency.
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _tol(scale: float) -> float:
+    """Absolute tolerance for a balance identity at magnitude ``scale``:
+    ``max(2, 0.005 * |scale|)`` — 0.5%, but never tighter than 2 currency units
+    (so tiny micro-entity filings are not tripped by rounding)."""
+    return max(2.0, 0.005 * abs(scale))
+
+
 # Brreg's standard layout exposes assets only as the aggregate `sumAnleggsmidler` and
 # never breaks out goodwill / intangibles, so the engine's tangible_book_value
 # (= common equity − goodwill − intangibles, both defaulting to 0) collapses to `equity`
