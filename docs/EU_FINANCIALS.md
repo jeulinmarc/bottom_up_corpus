@@ -30,20 +30,26 @@ restatements transparently.
 The EU output uses the **same row model** as [`FINANCIALS.md`](FINANCIALS.md):
 `kind="reported"`, `kind="derived"`, and `kind="derived_ttm"` rows (see that
 document for full definitions of the ~60 curated concepts and all derived metrics).
-The EU identity and period columns are mapped as follows:
+Both pillars use the same 15-key unified identity/provenance base. For EU rows the
+columns take these values:
 
-| SEC pillar column | EU pillar column | Notes |
+| Column | EU value | Notes |
 |---|---|---|
-| `cik` | `lei` | GLEIF Legal Entity Identifier |
-| `sec_form` | `doc_type` | e.g. `annual_report` |
-| `accession` | `source` | filings.xbrl.org filing ID (`fxo_id`) |
-| `sic` | — | not emitted (no EU SIC equivalent) |
-| `is_financial` | `is_financial=null` | always null (no SIC to classify by) |
+| `entity_id` | LEI | GLEIF Legal Entity Identifier |
+| `id_scheme` | `"lei"` | |
+| `lei` | LEI | same as `entity_id` for EU rows |
+| `country` | GLEIF jurisdiction | e.g. `"FR"`, `"NL"`, `"GB"` |
+| `source` | `"esef"` | literal pillar tag (was: fxo_id in the old schema) |
+| `accession` | fxo_id | filings.xbrl.org filing ID (moved here from old `source`) |
+| `form` | e.g. `"annual_report"` | replaces old `doc_type` column |
+| `sic` | null | no EU SIC equivalent |
+| `is_financial` | null | no SIC to classify by |
+| `basis` | null | |
 
-All other columns (`fy`, `frequency`, `currency`, `period_end`,
-`publication_date`, concept keys, `tag`, `value`, `unit`, `sector_relevant`, …)
-are identical. EU and SEC rows are therefore directly comparable in a single
-analytical table.
+All remaining columns (`currency`, `period_end`, `fy`, `frequency`,
+`publication_date`, `kind`, `concept`, `label`, `value`, `unit`, `tag`,
+`sector_relevant`, …) are identical to SEC rows. EU and SEC rows are directly
+comparable in a single analytical table.
 
 Output path: `data/financials_eu/<LEI>.jsonl`
 
