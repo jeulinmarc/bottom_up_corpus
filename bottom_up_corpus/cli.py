@@ -528,6 +528,21 @@ def _register_specs(args: argparse.Namespace) -> list[dict]:
     return []
 
 
+def _print_reg_result(rep: dict, args: argparse.Namespace) -> None:
+    """Print the standard register-financials result line (+ coverage path).
+
+    Shared by every register source except the Norway/LEI fallback, whose line
+    historically omits the unbalanced count and is printed inline.
+    """
+    mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
+    print(f"register-financials [{mode}] — {rep['entities']} entities, "
+          f"{rep['with_financials']} with financials, "
+          f"{rep.get('unbalanced', 0)} unbalanced, "
+          f"{rep['periods']} period summaries")
+    if rep.get("coverage_path"):
+        print(f"  coverage: {rep['coverage_path']}")
+
+
 def _cmd_register_financials(args: argparse.Namespace) -> int:
     cfg = _config(args)
     if getattr(args, "limit", None) is not None and not (
@@ -538,183 +553,74 @@ def _cmd_register_financials(args: argparse.Namespace) -> int:
     ):
         raise SystemExit("error: --limit requires --ch-bulk, --ee-file, --ee-year, or --sk-id")
 
-    # --- Estonia keyless path: elements CSV + metadata CSV (local files or bytes) ---
-    if getattr(args, "ee_file", None):
-        elem_path, meta_path = args.ee_file
-        rep = build_ee_financials_from_files(
-            elem_path, meta_path,
-            config=cfg,
-            write=args.write,
-            limit=getattr(args, "limit", None),
-        )
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Estonia online path: keyless bulk download for a given year ---
-    if getattr(args, "ee_year", None):
-        rep = build_ee_financials(
-            args.ee_year,
-            fetcher=Fetcher(cfg),
-            config=cfg,
-            write=args.write,
-            limit=getattr(args, "limit", None),
-            elem_url=getattr(args, "ee_elem_url", None),
-            meta_url=getattr(args, "ee_meta_url", None),
-        )
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Finland keyless path: one or more local PRH XBRL .xml files ---
-    if getattr(args, "fi_file", None):
-        rep = build_fi_financials_from_files(args.fi_file, config=cfg, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Finland API path: Y-tunnus resolved via PRH XBRL API (keyless) ---
-    if getattr(args, "fi_businessid", None):
-        specs = [{"business_id": bid} for bid in args.fi_businessid]
-        rep = build_fi_financials(
-            specs, fetcher=Fetcher(cfg), config=cfg, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Belgium keyless path: one or more local .xbrl / .zip files ---
-    if getattr(args, "be_file", None):
-        rep = build_be_financials_from_files(args.be_file, config=cfg, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Belgium API path: KBO numbers resolved via the CBSO API ---
-    if getattr(args, "be_numbers", None):
+    # Register-source dispatch, checked in order: the FIRST flag present wins
+    # (identical precedence to the former if/elif chain).  Each entry maps an
+    # args attribute to a zero-arg builder returning the `rep` dict; the shared
+    # result line is printed via _print_reg_result.  Builders instantiate
+    # Fetcher lazily so only the selected path opens a session.  The Norway/LEI
+    # path below is the default fallback (its result line omits the unbalanced
+    # count, so it is printed inline rather than via _print_reg_result).
+    def _build_be_numbers() -> dict:
         be_key = os.environ.get("BNB_CBSO_KEY") or ""
         if not be_key:
             raise SystemExit(
                 "error: --be-numbers requires a CBSO API key — "
                 "set the BNB_CBSO_KEY environment variable"
             )
-        specs = [{"be_number": k} for k in args.be_numbers]
-        rep = build_be_financials(
-            specs, fetcher=Fetcher(cfg), config=cfg, key=be_key, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
+        return build_be_financials(
+            [{"be_number": k} for k in args.be_numbers],
+            fetcher=Fetcher(cfg), config=cfg, key=be_key, write=args.write)
 
-    # --- UK Companies House bulk path ---
-    if getattr(args, "ch_bulk", None):
-        rep = build_ch_financials(
+    dispatch = [
+        # Estonia keyless path: elements CSV + metadata CSV (local files or bytes)
+        ("ee_file", lambda: build_ee_financials_from_files(
+            *args.ee_file, config=cfg, write=args.write,
+            limit=getattr(args, "limit", None))),
+        # Estonia online path: keyless bulk download for a given year
+        ("ee_year", lambda: build_ee_financials(
+            args.ee_year, fetcher=Fetcher(cfg), config=cfg, write=args.write,
+            limit=getattr(args, "limit", None),
+            elem_url=getattr(args, "ee_elem_url", None),
+            meta_url=getattr(args, "ee_meta_url", None))),
+        # Finland keyless path: one or more local PRH XBRL .xml files
+        ("fi_file", lambda: build_fi_financials_from_files(
+            args.fi_file, config=cfg, write=args.write)),
+        # Finland API path: Y-tunnus resolved via PRH XBRL API (keyless)
+        ("fi_businessid", lambda: build_fi_financials(
+            [{"business_id": bid} for bid in args.fi_businessid],
+            fetcher=Fetcher(cfg), config=cfg, write=args.write)),
+        # Belgium keyless path: one or more local .xbrl / .zip files
+        ("be_file", lambda: build_be_financials_from_files(
+            args.be_file, config=cfg, write=args.write)),
+        # Belgium API path: KBO numbers resolved via the CBSO API (needs key)
+        ("be_numbers", _build_be_numbers),
+        # UK Companies House bulk path
+        ("ch_bulk", lambda: build_ch_financials(
             args.ch_bulk, config=cfg, write=args.write,
-            limit=getattr(args, "limit", None))
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Luxembourg keyless path: one or more local eCDF XML files ---
-    if getattr(args, "lu_file", None):
-        rcs_filter = set(args.rcs) if getattr(args, "rcs", None) else None
-        rep = build_lu_financials_from_files(
-            args.lu_file, config=cfg, write=args.write, rcs_filter=rcs_filter)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Denmark keyless path: one or more local Virk XBRL .xml files ---
-    if getattr(args, "dk_file", None):
-        rep = build_dk_financials_from_files(args.dk_file, config=cfg, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Denmark API path: CVR numbers resolved via Virk Regnskaber (keyless) ---
-    if getattr(args, "dk_cvr", None):
-        specs = [{"cvr": c} for c in args.dk_cvr]
-        rep = build_dk_financials(
-            specs, fetcher=Fetcher(cfg), config=cfg, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Slovakia keyless path: one vykaz JSON + one sablona JSON (local files) ---
-    if getattr(args, "sk_file", None):
-        vykaz_path, sablona_path = args.sk_file
-        rep = build_sk_financials_from_files(
-            vykaz_path, sablona_path, config=cfg, write=args.write)
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
-
-    # --- Slovakia API traverse path: entity IDs → registeruz.sk (keyless) ---
-    if getattr(args, "sk_id", None):
-        rep = build_sk_financials(
+            limit=getattr(args, "limit", None))),
+        # Luxembourg keyless path: one or more local eCDF XML files
+        ("lu_file", lambda: build_lu_financials_from_files(
+            args.lu_file, config=cfg, write=args.write,
+            rcs_filter=set(args.rcs) if getattr(args, "rcs", None) else None)),
+        # Denmark keyless path: one or more local Virk XBRL .xml files
+        ("dk_file", lambda: build_dk_financials_from_files(
+            args.dk_file, config=cfg, write=args.write)),
+        # Denmark API path: CVR numbers resolved via Virk Regnskaber (keyless)
+        ("dk_cvr", lambda: build_dk_financials(
+            [{"cvr": c} for c in args.dk_cvr],
+            fetcher=Fetcher(cfg), config=cfg, write=args.write)),
+        # Slovakia keyless path: one vykaz JSON + one sablona JSON (local files)
+        ("sk_file", lambda: build_sk_financials_from_files(
+            *args.sk_file, config=cfg, write=args.write)),
+        # Slovakia API traverse path: entity IDs → registeruz.sk (keyless)
+        ("sk_id", lambda: build_sk_financials(
             args.sk_id, fetcher=Fetcher(cfg), config=cfg, write=args.write,
-            limit=getattr(args, "limit", None))
-        mode = "WROTE" if args.write else "DRY-RUN (nothing written)"
-        print(f"register-financials [{mode}] — {rep['entities']} entities, "
-              f"{rep['with_financials']} with financials, "
-              f"{rep.get('unbalanced', 0)} unbalanced, "
-              f"{rep['periods']} period summaries")
-        if rep.get("coverage_path"):
-            print(f"  coverage: {rep['coverage_path']}")
-        return 0
+            limit=getattr(args, "limit", None))),
+    ]
+    for attr, builder in dispatch:
+        if getattr(args, attr, None):
+            _print_reg_result(builder(), args)
+            return 0
 
     # --- Norway / LEI path ---
     rep = build_register_financials(
