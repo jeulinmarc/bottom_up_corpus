@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from ..gleif import fetch_gleif_record, parse_gleif_record
 from ..openfigi import OPENFIGI_URL
 
 GLEIF = "https://api.gleif.org/api/v1/lei-records"
@@ -57,11 +58,9 @@ class Entity:
 
 
 def _from_gleif_record(attrs: dict) -> tuple[str, str, str]:
-    ent = attrs.get("entity", {})
-    name = (ent.get("legalName") or {}).get("name", "")
-    country = ((ent.get("legalAddress") or {}).get("country")
-               or (ent.get("headquartersAddress") or {}).get("country") or "")
-    return attrs.get("lei", ""), name, country
+    # (lei, legalName, country) — country falls back to the HQ address, then "".
+    f = parse_gleif_record(attrs)
+    return f["lei"], f["name"], f["legal_country"] or f["hq_country"] or ""
 
 
 def _fetch_isins(lei: str, fetcher, *, seed: str = "", cap: int | None = None) -> tuple[str, ...]:
@@ -84,13 +83,10 @@ def _fetch_isins(lei: str, fetcher, *, seed: str = "", cap: int | None = None) -
 
 
 def _lookup_lei(lei: str, fetcher, *, with_isins: bool) -> Entity | None:
-    try:
-        data = fetcher.get_json(f"{GLEIF}/{lei}").get("data")
-    except Exception:
+    record = fetch_gleif_record(lei, fetcher=fetcher)
+    if not record:
         return None
-    if not data:
-        return None
-    lei_v, name, country = _from_gleif_record(data["attributes"])
+    lei_v, name, country = _from_gleif_record(record["attributes"])
     isins = _fetch_isins(lei_v or lei, fetcher) if with_isins else ()
     return Entity(lei=lei_v or lei, name=name, country=country, isins=isins, resolution="lei")
 

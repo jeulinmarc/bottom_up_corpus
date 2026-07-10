@@ -266,24 +266,35 @@ class Storage:
         _atomic_write_text(path, blob)
         return self._rel(path), hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
+    def _write_financials_table(
+        self, ident: str, rows: Iterable[dict], *, subdir: Path
+    ) -> str:
+        """Atomically write a per-entity financials JSONL table ``<subdir>/<ident>.jsonl``.
+
+        Shared core for the SEC/EU/register writers below: they differ only by the
+        target subdirectory (and how ``ident`` is normalized by the caller).
+        """
+        path = subdir / f"{ident}.jsonl"
+        _atomic_write_text(path, _jsonl(rows))
+        return self._rel(path)
+
     def write_financials_table(self, cik: str, rows: Iterable[dict]) -> str:
         """Write the normalized, queryable facts table data/financials/<cik>.jsonl."""
-        cik = normalize_cik(cik)
-        path = self.config.financials_dir / f"{cik}.jsonl"
-        _atomic_write_text(path, _jsonl(rows))
-        return self._rel(path)
+        return self._write_financials_table(
+            normalize_cik(cik), rows, subdir=self.config.financials_dir
+        )
 
-    def write_eu_financials_table(self, lei: str, rows: "Iterable[dict]") -> str:
+    def write_eu_financials_table(self, lei: str, rows: Iterable[dict]) -> str:
         """Write the normalized EU IFRS facts table data/financials_eu/<lei>.jsonl."""
-        path = self.config.data_dir / "financials_eu" / f"{lei}.jsonl"
-        _atomic_write_text(path, _jsonl(rows))
-        return self._rel(path)
+        return self._write_financials_table(
+            lei, rows, subdir=self.config.financials_eu_dir
+        )
 
-    def write_register_financials_table(self, entity_id: str, rows: "Iterable[dict]") -> str:
+    def write_register_financials_table(self, entity_id: str, rows: Iterable[dict]) -> str:
         """Write the register financials table data/financials_register/<entity_id>.jsonl."""
-        path = self.config.data_dir / "financials_register" / f"{entity_id}.jsonl"
-        _atomic_write_text(path, _jsonl(rows))
-        return self._rel(path)
+        return self._write_financials_table(
+            entity_id, rows, subdir=self.config.financials_register_dir
+        )
 
     def write_financial_summary(self, record: FilingRecord, html: str, text: str) -> None:
         """Write a period summary's HTML (primary) + clean text; mutate record paths."""

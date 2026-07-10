@@ -1,5 +1,5 @@
 from bottom_up_corpus.financials import CONCEPTS_BY_KEY
-from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
+from bottom_up_corpus.xbrl import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
 
 
 def test_keys_are_a_subset_of_the_sec_keys():

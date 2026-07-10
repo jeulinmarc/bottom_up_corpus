@@ -28,8 +28,8 @@ HEADLINE = ["revenue", "operating_income", "net_income", "assets", "equity", "ca
 def _summaries_from_zip(zip_path: str, *, entity_name: str = ""):
     """Parse zip with Arelle -> flatten -> summaries. Returns list[Summary]."""
     from bottom_up_corpus.eu.arelle_esef import oim_from_esef_zip
-    from bottom_up_corpus.eu.oim import flatten_oim_json
-    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
+    from bottom_up_corpus.xbrl import flatten_oim_json
+    from bottom_up_corpus.xbrl import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
     from bottom_up_corpus.financials import summaries_from_flat, attach_ttm_from_flat
 
     print(f"[Tier B] Parsing {zip_path} with Arelle …")
@@ -50,7 +50,7 @@ def _summaries_from_tier_a(lei: str, *, fetcher, entity_name: str = ""):
     """Fetch Tier-A facts from filings.xbrl.org -> summaries. Returns list[Summary]."""
     from bottom_up_corpus.eu.entities import Entity
     from bottom_up_corpus.eu.financials import facts_for_entity
-    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
+    from bottom_up_corpus.xbrl import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
     from bottom_up_corpus.financials import summaries_from_flat, attach_ttm_from_flat
 
     ent = Entity(lei=lei, name=entity_name or lei, country="", resolution="manual")

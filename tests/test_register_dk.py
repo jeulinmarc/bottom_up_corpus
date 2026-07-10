@@ -355,7 +355,7 @@ def test_summaries_from_flat_yields_borrowings_debt_to_equity():
     """summaries_from_flat + IFRS_CONCEPTS yields assets/equity/revenue + borrowings-based
     debt_to_equity: (NoncurrentBorrowings + CurrentBorrowings) / Equity."""
     from bottom_up_corpus.registers.concepts_dk import parse_virk_esef_xml
-    from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS
+    from bottom_up_corpus.xbrl import IFRS_CONCEPTS
     from bottom_up_corpus.financials import summaries_from_flat
 
     flat = parse_virk_esef_xml(open(ESEF_SLICE, "rb").read())

@@ -12,7 +12,7 @@ from bottom_up_corpus.config import Config
 from bottom_up_corpus.http import Fetcher
 from bottom_up_corpus.eu.entities import resolve_entities
 from bottom_up_corpus.eu.financials import facts_for_entity
-from bottom_up_corpus.eu.ifrs_concepts import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
+from bottom_up_corpus.xbrl import IFRS_CONCEPTS, IFRS_CONCEPTS_BY_KEY
 from bottom_up_corpus.financials import summaries_from_flat, attach_ttm_from_flat
 
 HEADLINE = ["revenue", "operating_income", "net_income", "assets", "equity", "cash"]
